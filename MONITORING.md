@@ -595,7 +595,141 @@ Initial Grafana dashboards:
 Dashboard variables must use bounded dimensions. Do not build variables from
 request IDs, frame IDs, people, or plates.
 
-## 15. Failure boundaries
+## 15. Remote access
+
+Remote access is a last-resort diagnostic path for an authorized engineer after
+the central metrics, alerts, logs, and bounded diagnostic snapshots have been
+inspected. It is not the normal monitoring path and is not a substitute for an
+external heartbeat or off-box telemetry.
+
+The supported remote-access gateway is **Tailscale plus Tailscale SSH**:
+
+```text
+managed engineer device
+  -> Tailscale identity and network policy
+  -> encrypted tailnet connection
+  -> Tailscale SSH authorization and reauthentication
+  -> non-root support account
+  -> explicitly authorized diagnostic or escalation actions
+```
+
+`tailscaled` runs as a host `systemd` service independently of K3s and provides
+both private network reachability and the Tailscale SSH server. An engineer must
+therefore still be able to reach the host when the Kubernetes API, cluster
+networking, or all Pods are unavailable. Tailscale supplies private reachability
+across customer NAT without exposing SSH directly to the public internet and
+maps an authorized tailnet identity to an existing non-root Linux account.
+
+### 15.1 Why Tailscale SSH is used
+
+Tailscale SSH centralizes network admission and SSH authorization in the
+tailnet policy. Engineers authenticate through the approved organization
+identity provider instead of distributing persistent OpenSSH public keys to
+every deployed edge server. Removing an engineer or changing the support group
+updates access centrally rather than requiring an `authorized_keys` change on
+each server.
+
+SSH access uses Tailscale SSH `check` mode to require periodic identity-provider
+reauthentication. The identity provider must enforce multifactor authentication;
+SSO alone is not treated as MFA. The SSH policy maps only explicitly authorized
+support identities to a named non-root local account. It does not use a broad
+mapping that permits arbitrary non-root local usernames, and it does not permit
+direct root login.
+
+Tailscale SSH session recording is not enabled until a data policy defines its
+purpose, access, retention, and deletion behavior because terminal output can
+contain camera credentials, faces, number plates, tokens, or other sensitive
+information.
+
+### 15.2 Tailscale SSH vs OpenSSH
+
+Tailscale plus normal OpenSSH would require two identity and credential
+lifecycles: the organization identity used to enter the tailnet and separate
+SSH keys or certificates authorized on the host. Onboarding, offboarding,
+rotation, and recovery would have to keep both systems synchronized. Tailscale
+SSH instead uses one organization identity for network and shell access while
+still evaluating separate tailnet network and SSH authorization rules. The
+single-identity model is simpler for this deployment; the Linux account and
+`sudo` policy remain independent host-level controls.
+
+### 15.3 Host and tailnet controls
+
+The remote-access configuration must:
+
+- use an organization-owned tailnet connected to the approved identity
+  provider with multifactor authentication;
+- enroll the edge server as a purpose-based tagged device rather than as a
+  device owned by an individual engineer;
+- use a one-time provisioning credential and remove it from the host and
+  installation media after enrollment;
+- grant only the support group and approved managed devices network access to
+  TCP port 22 on tagged edge servers;
+- define a separate Tailscale SSH rule that uses `check` mode and permits only
+  the named support account on tagged edge servers;
+- deny edge-to-engineer and edge-to-unrelated-tailnet connectivity unless a
+  separately documented use case requires it;
+- prohibit Tailscale SSH access as `root` and prohibit mappings to arbitrary
+  non-root local accounts;
+- rely on individually attributable identity-provider accounts rather than
+  shared support identities, and define prompt user and device revocation
+  procedures;
+- place engineers in a non-root support account with read-only diagnostic
+  access by default and separately controlled `sudo` escalation;
+- configure Tailscale SSH to intercept port 22 only on the Tailscale address and
+  expose no remote shell service directly on the public WAN; and
+- collect Tailscale service state and SSH authorization events through journald
+  and Alloy without logging credentials, command output, or transferred
+  diagnostic data by default.
+
+The edge server is not configured as a Tailscale exit node. It does not
+advertise the camera LAN as a subnet route in the initial deployment. Engineers
+diagnose camera connectivity from the edge server using bounded tools so remote
+access does not create a general route from support devices into the camera
+network. Advertising selected camera routes requires a separate threat review,
+customer approval, and destination-specific access policy.
+
+Prometheus, Alertmanager, Grafana, Loki, PostgreSQL, the Kubernetes API, and the
+edge-management API are not made generally reachable through the tailnet.
+When direct inspection of a local administrative endpoint is necessary, the
+engineer uses an explicitly authorized Tailscale SSH local port forward for the
+incident and closes it with the SSH session.
+
+### 15.4 Availability boundaries
+
+Tailscale remote access depends on the deployed site having a functioning WAN
+path. If that internet path fails:
+
+- `tailscaled` may continue running, but an off-site engineer cannot reach it;
+- an on-site engineer needs a separately approved local management path or
+  console; and
+- a separate customer WAN, cellular management path, or hardware out-of-band
+  controller is required if remote access during the primary WAN or host OS
+  failure is an availability requirement.
+
+Tailscale SSH also cannot recover a powered-off server, a failed kernel, a
+stopped `tailscaled` process, or broken host networking. The external heartbeat
+must report loss of the server independently; hardware out-of-band management
+is a future deployment choice rather than part of this software tunnel.
+
+### 15.5 Support workflow
+
+For a remote incident, the engineer:
+
+1. Reviews the central alert, dashboard, correlated logs, and available
+   diagnostic snapshot before requesting shell access.
+2. Records an incident or operation ID and the reason remote access is needed.
+3. Connects from an approved, managed Tailscale device and authenticates again
+   through Tailscale SSH `check` mode with an individual organization identity.
+4. Uses read-only host, K3s, camera-connectivity, and log commands first.
+5. Performs a privileged or state-changing action only through the documented
+   escalation procedure and records the action against the incident.
+6. Closes port forwards and the SSH session when diagnosis is complete.
+
+The support runbook must include `tailscale status`, `tailscale ping`, and
+`tailscale netcheck` so an engineer can distinguish direct, relayed, policy,
+DNS, and site-WAN failures from a Tailscale SSH authorization failure.
+
+## 16. Failure boundaries
 
 | Failure | Observable by | Result |
 |---|---|---|
@@ -612,7 +746,7 @@ An in-cluster Prometheus cannot be the sole detector of total K3s failure. The
 host edge-management service retains its independent systemd and API checks as
 defined in `HLD.md`.
 
-## 16. Retention and resource controls
+## 17. Retention and resource controls
 
 Monitoring runs on the same server as inference and must not exhaust resources
 needed by CV workloads.
@@ -631,7 +765,7 @@ Configure and verify:
 Retention duration and storage allocation remain deployment parameters until
 hardware capacity and incident-history requirements are agreed.
 
-## 17. Verification and acceptance criteria
+## 18. Verification and acceptance criteria
 
 The monitoring implementation is accepted when it demonstrates that:
 
@@ -655,8 +789,21 @@ The monitoring implementation is accepted when it demonstrates that:
     `/metrics`, logs, Loki labels, alert payloads, or dashboards.
 14. Restarting Alloy resumes from its persisted positions without replaying all
     locally retained logs, and position-loss behavior is documented and tested.
+15. An approved engineer can reach Tailscale SSH while K3s and all
+    cluster workloads are stopped.
+16. An unapproved tailnet user or device cannot reach TCP port 22 on the edge
+    server, and the public WAN cannot reach a host shell service directly.
+17. Tailscale SSH `check` mode requires identity-provider reauthentication,
+    attributes access to an individual engineer, prohibits root and arbitrary
+    local-user mappings, and grants only the documented non-root diagnostic
+    permissions before escalation.
+18. The tailnet exposes neither the camera subnet nor unrestricted monitoring,
+    database, management, or Kubernetes API endpoints.
+19. Loss of site internet is documented and tested as loss of off-site
+    Tailscale SSH access while the separately approved on-site management path
+    remains available.
 
-## 18. References
+## 19. References
 
 - `HLD.md` for system boundaries, host monitoring, recovery, and camera flow.
 - `APEXFABRIC_ARCHITECTURE.md` for the underlying K3s, node reporting,
@@ -675,3 +822,9 @@ The monitoring implementation is accepted when it demonstrates that:
   for Helm-based collector configuration.
 - [Grafana Alloy Loki components](https://grafana.com/docs/alloy/latest/reference/components/loki/)
   for file, journal, Kubernetes Event, processing, and write components.
+- [Tailscale connection types](https://tailscale.com/docs/reference/connection-types)
+  for direct, peer-relay, and DERP-relay connectivity behavior.
+- [Tailscale firewall guidance](https://tailscale.com/docs/reference/faq/firewall-ports)
+  for the outbound connectivity used by the host agent.
+- [Tailscale SSH](https://tailscale.com/docs/features/tailscale-ssh) for SSH
+  authorization, local-user mapping, and check-mode reauthentication.
