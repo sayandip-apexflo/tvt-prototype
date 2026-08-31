@@ -27,6 +27,11 @@ camera candidates, validates RTSP media, persists camera inventory in
 PostgreSQL, serves the management API/UI, and synchronizes enabled camera
 configuration into K3s.
 
+This revision also proposes a separate host alert-dispatcher service for
+durable alert email. That is an intentional scope extension: `HLD.md` and
+`MONITORING.md` currently list external email alert delivery as out of scope.
+Those documents must be updated if this LLD decision is approved.
+
 This plan deliberately excludes:
 
 - discovery, connection establishment, enrollment, approval, rejection, or
@@ -66,6 +71,7 @@ path, or credentials are not known.
 | Network-camera scheduling | `runtime-connectivity` and `requires_camera_labels: false` | LAN RTSP cameras are not node-local Kubernetes devices |
 | Reconciliation | Reuse bundle schema, semantic validator, renderer, field manager, ownership labels, and prune rules | Preserves the proven K3s-plane behavior |
 | Monitoring | Follow `MONITORING.md`: Prometheus metrics, JSON logs, Alloy, Loki, Alertmanager | Keeps monitoring contracts separate from business data |
+| Alert email | Host `tvt-alert-dispatcher.service` with authenticated webhooks, PostgreSQL outbox, and TLS SMTP | Preserves delivery/audit state and can report K3s outages without depending on an in-cluster sender |
 
 The gateway product is a proposed default, not a locked dependency. The PoC
 must prove supported codecs, reconnect behavior, one-upstream-session fan-out,
@@ -103,6 +109,7 @@ flowchart TB
 
     subgraph Host[Single Linux server]
         Edge[TVT edge-management service<br/>Python + React assets]
+        Dispatcher[TVT alert-dispatcher<br/>systemd service]
         DB[(Host PostgreSQL)]
         Key[Host credential key]
         K3sSvc[k3s.service]
@@ -123,6 +130,8 @@ flowchart TB
         end
     end
 
+    SMTP[Organization SMTP relay]
+
     Operator --> Edge
     Edge <--> DB
     Edge --> Key
@@ -140,7 +149,10 @@ flowchart TB
     Face --> Reporting
     ANPR --> Reporting
     Presence --> Reporting
-    Observability -->|alerts| Edge
+    Observability -->|firing and resolved webhook| Dispatcher
+    Edge -->|independent host alerts| Dispatcher
+    Dispatcher <--> DB
+    Dispatcher -->|TLS email| SMTP
     Watchdog --> K3sSvc
 ```
 
@@ -179,6 +191,13 @@ tvt-prototype/
     observability/
       logging.py
       metrics.py
+    alerting/
+      receiver.py
+      policy.py
+      outbox.py
+      emergency_spool.py
+      email_sender.py
+      templates/
     runtime.py
     settings.py
   apexfabric/
@@ -222,7 +241,12 @@ One process owns these async loops:
 - explicit and scheduled RTSP validation;
 - camera-to-K3s synchronization;
 - host and K3s health aggregation; and
-- alert state ingestion and cleanup.
+- alert-state reads for the UI.
+
+Alert webhook ingestion and email delivery run in the separate host
+`tvt-alert-dispatcher.service` described below. This lets alert delivery remain
+available when K3s is unhealthy without coupling SMTP retries to the UI/API
+process.
 
 Only one Uvicorn worker is used in V1. This avoids duplicate scanners and
 reconcilers. Slow or potentially stuck RTSP operations run in short-lived child
@@ -376,13 +400,18 @@ representations.
 | `camera_observations` | `id`, `camera_id FK NULL`, `operation_id`, `method`, `address`, `result_code`, bounded JSON metadata, `observed_at`; time-based retention |
 | `camera_health` | `camera_id PK/FK`, `validation_code`, `last_validated_at`, `last_packet_at`, `last_keyframe_at`, `gateway_up`, `consecutive_failures`, `next_retry_at` |
 | `camera_sync_state` | singleton/site row containing `desired_revision`, `applied_revision`, `status`, `last_attempt_at`, `last_error` |
-| `alerts` | stable fingerprint, source, severity, state, first/last seen, occurrence count, acknowledgement fields, resolved time |
+| `alert_instances` | stable fingerprint, source, severity, state, first/last seen, occurrence count, acknowledgement fields, resolved time, and last Alertmanager group key |
+| `alert_transitions` | alert FK, transition type, source timestamp, received timestamp, redacted payload, and unique idempotency key |
+| `notification_policies` | severity/alert matchers, recipients or recipient-group reference, initial/repeat interval, resolved-email policy, enabled state |
+| `notification_outbox` | alert transition FK, notification type, deterministic message ID, state, attempt count, next attempt, sent/expired timestamps |
+| `notification_attempts` | outbox FK, attempt number, start/end time, redacted SMTP result code, and bounded error category |
 | `audit_events` | actor, operation ID, action, target type/ID, result, redacted details, timestamp; append-only through the application role |
 | `solution_revisions` | deployment ID, canonical bundle, SHA-256 revision, lifecycle status, actor, timestamps; no secret values |
 
 Recommended indexes cover camera state, enabled cameras, current addresses,
-pending validation, pending synchronization, active alerts, and recent audit
-events. Observation and audit retention are bounded by scheduled database jobs.
+pending validation, pending synchronization, active alerts, due outbox rows,
+and recent audit events. Observation, alert-transition, delivery-attempt, and
+audit retention are bounded by scheduled database jobs.
 
 The transaction which changes camera configuration also increments the desired
 camera-set revision and marks synchronization pending. A background loop claims
@@ -407,6 +436,7 @@ Passwords are write-only and are represented in reads only by
 | `POST /api/v1/cameras/{camera_id}/validate` | Queue immediate authenticated RTSP validation |
 | `GET /api/v1/alerts` | List active/recent alerts |
 | `POST /api/v1/alerts/{alert_id}/acknowledge` | Record local acknowledgement |
+| `GET /api/v1/alerts/{alert_id}/notifications` | Show redacted email delivery state and attempts |
 | `GET /api/v1/cluster` | Return bounded K3s Node, Deployment, Pod, and synchronization summaries |
 | `GET /api/v1/solutions` | List catalog entries and deployed revisions |
 | `POST /api/v1/solutions/{solution_id}/apply` | Validate and reconcile a selected bundle |
@@ -416,6 +446,12 @@ Passwords are write-only and are represented in reads only by
 The API does not expose arbitrary `kubectl`, shell, log-path, file-read, or
 systemd operations. Workload diagnostics are allowlisted by ownership label,
 namespace, maximum output size, and timeout.
+
+The non-public alert receiver is
+`POST /internal/v1/alerts/alertmanager`. It binds only to the host address
+reachable from the Pod network, requires a dedicated bearer credential, limits
+payload size and alert count, and accepts no operator-supplied command or
+template.
 
 ## 10. Camera synchronization into K3s
 
@@ -552,7 +588,8 @@ must:
    hardware profile;
 7. apply the stream gateway and camera sync objects;
 8. install the monitoring stack with bounded resources; and
-9. install and enable host PostgreSQL, edge service, and watchdog units.
+9. install and enable host PostgreSQL, edge service, alert dispatcher, and
+   watchdog units.
 
 No agent join token, approval state, enrollment certificate, driver bundle, or
 remote install transaction exists in this sequence.
@@ -682,7 +719,235 @@ Neither metrics nor logs may contain camera credentials, direct RTSP URLs,
 faces, embeddings, person names, or number plates. Business events require a
 separate versioned and access-controlled data path.
 
-## 15. Recovery behavior
+## 15. Alert-dispatcher service
+
+### 15.1 Purpose and boundary
+
+The alert dispatcher is a host `systemd` service, separate from K3s and the
+edge-management API. It converts actionable alert state into durable,
+auditable email delivery. It does not evaluate PromQL, query arbitrary logs,
+restart services, execute runbooks, or decide whether a raw exception is
+important.
+
+Alertmanager remains responsible for grouping, inhibition, deduplication, and
+initial webhook timing. The dispatcher receives Alertmanager's firing and
+resolved webhooks, stores alert state, applies site email/reminder policy, and
+delivers mail through the organization SMTP relay. Alertmanager documents its
+routing and timing controls, including `group_wait`, `group_interval`,
+`repeat_interval`, and `send_resolved`, in its [configuration
+reference](https://prometheus.io/docs/alerting/latest/configuration/).
+
+The dispatcher, rather than Alertmanager, owns email reminder intervals because
+it also owns acknowledgement. Alertmanager uses a long repeat interval as a
+state refresh/safety net; repeated firing webhooks update last-seen state but do
+not themselves create another email. This prevents two independent repeat
+schedulers from producing duplicate reminders.
+
+The dispatcher is used instead of Alertmanager's direct SMTP receiver because
+TVT requires durable delivery history, UI acknowledgement, retry visibility,
+host-originated K3s-down alerts, and recipient policy in one place. A simpler
+deployment may use direct Alertmanager email only if those requirements are
+explicitly dropped.
+
+The unit starts after the network and PostgreSQL startup attempt, but it does
+not `Require=` PostgreSQL: it must remain running to use the bounded emergency
+path when the database is unavailable. It uses `Restart=on-failure`, a single
+webhook/Unix-socket receiver, and one outbox-worker loop in V1.
+
+### 15.2 Input paths
+
+There are two trusted alert sources:
+
+```text
+In-cluster condition
+  -> application metric
+  -> PrometheusRule with a `for` duration
+  -> Alertmanager group/inhibition
+  -> authenticated dispatcher webhook
+
+Host/control-plane condition
+  -> edge-management host check
+  -> permission-restricted dispatcher Unix socket
+```
+
+The second path allows an email when K3s, Prometheus, or Alertmanager is down.
+Both sources use the same normalized alert schema and persistence path.
+
+Raw `warning` and `error` log lines do not directly produce email. The code
+path for an actionable error increments a bounded metric and writes a
+correlated JSON log; a Prometheus rule evaluates the symptom. A Loki-derived
+alert is permitted only when the condition cannot reasonably be represented by
+a metric, and it must enter Alertmanager through the same labels and routing
+policy. This follows the Prometheus recommendation to alert on actionable
+symptoms and keep alert counts small rather than notifying on every possible
+cause. See [Prometheus alerting
+practices](https://prometheus.io/docs/practices/alerting/).
+
+### 15.3 Normalized alert contract
+
+Every accepted alert contains:
+
+```json
+{
+  "schema_version": "1.0",
+  "source": "alertmanager",
+  "status": "firing",
+  "starts_at": "2026-09-01T08:30:00Z",
+  "ends_at": null,
+  "labels": {
+    "site_id": "tvt-plant-01",
+    "alertname": "CameraMediaMissing",
+    "severity": "critical",
+    "service": "stream-gateway",
+    "camera_id": "camera-03"
+  },
+  "annotations": {
+    "summary": "Camera media has been missing for two minutes",
+    "runbook_url": "https://operations.example/runbooks/camera-media-missing"
+  }
+}
+```
+
+Allowed label names and bounded values are validated. Annotations are length-
+limited and treated as untrusted display text. Unknown fields, invalid
+timestamps, excessive alerts, and credential-bearing values are rejected or
+redacted before persistence.
+
+The stable fingerprint is calculated from:
+
+```text
+site_id + alertname + service + camera_id + use_case
+```
+
+Empty optional values have a canonical representation. Pod name, container ID,
+request ID, exception text, IP address, and timestamp are excluded so restarts
+and repeated evaluations do not create new logical incidents.
+
+### 15.4 State and idempotency
+
+The dispatcher applies this state model:
+
+```mermaid
+stateDiagram-v2
+    [*] --> active: first firing event
+    active --> active: repeated/updated firing event
+    active --> acknowledged: operator acknowledges
+    acknowledged --> acknowledged: repeated firing event
+    active --> resolved: resolved event
+    acknowledged --> resolved: resolved event
+    resolved --> active: later firing with a new start time
+```
+
+Receiving a webhook starts one database transaction which:
+
+1. upserts the logical alert instance by fingerprint;
+2. inserts an idempotent transition record;
+3. evaluates the matching notification policy;
+4. creates an outbox row when email is required; and
+5. commits before returning HTTP success.
+
+The transition idempotency key includes source, fingerprint, occurrence
+`starts_at`, transition status, and `ends_at` for resolution. Duplicate or
+retried webhooks update last-seen state but do not enqueue another transition
+email.
+
+If PostgreSQL is unavailable, the Alertmanager receiver returns a retryable
+failure. An allowlisted host-generated `PostgreSQLUnavailable` alert instead
+uses a small, bounded emergency filesystem spool so the database can report its
+own outage. The spool accepts only fixed internal alert types over the Unix
+socket, uses atomic write/rename, and is imported into PostgreSQL after
+recovery. If SMTP is unavailable, the receiver still returns success after the
+alert and normal outbox row are committed; the email worker retries
+independently. Acknowledgement suppresses future reminder emails but does not
+clear the alert and does not suppress its recovery email.
+
+### 15.5 Routing and notification policy
+
+Initial values are tuning defaults, not final SLOs:
+
+| Severity | Rule/route behavior | Email behavior |
+|---|---|---|
+| `critical` | Usually require a 2-minute sustained condition; Alertmanager `group_wait` 30 seconds | Send immediately after grouping; repeat every 30 minutes while active and unacknowledged |
+| `warning` | Usually require 5-10 minutes; group for 5 minutes | Send once; repeat every 4 hours while active and unacknowledged |
+| `info` | Record and display | No immediate email; optional daily digest |
+
+Only alerts with a configured policy produce email. Recipient groups are
+site-level configuration, not alert labels supplied by workloads.
+
+Alertmanager's `repeat_interval` is initially 24 hours and acts only as a state
+refresh. Dispatcher-generated reminder jobs use the email intervals in the
+table. Receiving the 24-hour firing refresh does not reset acknowledgement or
+enqueue an extra transition email.
+
+Required inhibition rules include:
+
+- Node or K3s down inhibits gateway, Pod, and CV workload alerts;
+- stream gateway down inhibits per-camera inference-stalled alerts;
+- a camera-offline alert inhibits source/inference alerts for that camera; and
+- PostgreSQL down inhibits secondary edge-API database symptoms.
+
+A resolved email is sent only if a firing email for that alert occurrence was
+successfully delivered. Alertmanager email defaults do not imply this policy;
+the dispatcher implements it explicitly from its delivery records.
+
+### 15.6 Email outbox and SMTP delivery
+
+The worker claims due outbox rows using `SELECT ... FOR UPDATE SKIP LOCKED`,
+renders a versioned local template, and submits mail over certificate-verified
+TLS to the configured SMTP relay. It never accepts templates, recipients,
+headers, or SMTP settings from the alert payload.
+
+The emergency filesystem spool is used only for fixed host-infrastructure
+alerts when PostgreSQL cannot accept the normal transaction. It has strict file
+count/byte limits, contains the same redacted normalized fields, and is not a
+general replacement queue for Alertmanager webhooks.
+
+Suggested retry intervals are:
+
+```text
+1 minute -> 2 minutes -> 5 minutes -> 10 minutes -> 30 minutes -> hourly
+```
+
+Each attempt has connection, command, and overall deadlines. Permanent SMTP
+responses mark the notification failed; transient responses schedule the next
+attempt. A configured maximum delivery age expires undeliverable mail while
+retaining redacted evidence for the UI.
+
+Delivery is at-least-once. An ambiguous network failure after SMTP accepts a
+message can cause a duplicate. Each transition therefore uses a deterministic
+`Message-ID` and alert thread key so mail clients can group repeats and recovery
+messages.
+
+Email content is limited to:
+
+- site ID, severity, alert name, component, and stable camera ID;
+- safe summary, start time, duration, and current state;
+- dashboard and runbook links; and
+- acknowledgement link only when the management UI has an approved reachable
+  address and authentication boundary.
+
+Email must not include RTSP URLs, credentials, faces, embeddings, person names,
+number plates, Kubernetes Secrets, arbitrary log bodies, or raw stack traces.
+
+### 15.7 Availability and self-monitoring
+
+The dispatcher exposes `/healthz`, `/readyz`, and `/metrics` on a host-local
+endpoint. Metrics include accepted/rejected events, active alerts, outbox
+depth/age, delivery attempts by bounded result, last successful delivery time,
+and webhook/SMTP duration.
+
+The edge-management service checks the dispatcher and displays degraded email
+delivery in the UI. Prometheus scrapes it when K3s is healthy. A scheduled
+synthetic alert exercises Prometheus, Alertmanager, webhook persistence, and
+SMTP submission without claiming that a human mailbox read the message.
+
+The local dispatcher cannot report complete server, power, disk, host-network,
+or site-WAN failure after the host is unreachable. Detecting that failure
+requires an external heartbeat or central monitoring receiver. SMTP delivery
+also requires a working outbound network path; queued mail resumes when that
+path returns.
+
+## 16. Recovery behavior
 
 | Failure | Detection | V1 response |
 |---|---|---|
@@ -692,7 +957,9 @@ separate versioned and access-controlled data path.
 | CV process wedges | Liveness probe | Kubelet restarts container |
 | CV is alive but cannot serve | Readiness probe | Remove Pod from Service endpoints without destroying diagnostics |
 | Edge service exits | `systemd` | Restart; K3s continues with last active camera revision |
-| PostgreSQL exits | `systemd` and host check | Restart; UI is degraded; K3s continues |
+| Alert dispatcher exits | `systemd` | Restart; Alertmanager retries failed webhook deliveries and committed outbox work resumes |
+| PostgreSQL exits | `systemd` and host check | Restart; UI is degraded; an allowlisted host alert uses the bounded emergency spool; K3s continues |
+| SMTP relay/WAN is unavailable | Dispatcher delivery result | Retain committed outbox rows and retry with bounded backoff; show oldest pending age in UI |
 | K3s process exits | `systemd` | Restart and reconcile Deployments |
 | K3s API stays unhealthy | Root-owned fixed watchdog | One controlled restart after sustained failure, then cooldown and alert |
 | Host reboots | `systemd` ordering and declarative state | Restore database, edge API, K3s, gateway, and CV workloads |
@@ -702,7 +969,7 @@ The watchdog accepts no API-supplied command or argument. Initial timing is the
 HLD policy: check every 30 seconds, tolerate at least two minutes, restart once,
 then wait ten minutes before another action.
 
-## 16. Security boundaries
+## 17. Security boundaries
 
 - Bind the prototype UI to loopback until authentication and CSRF protection
   are implemented. Exposure to a management LAN is a separate review gate.
@@ -723,14 +990,23 @@ then wait ten minutes before another action.
   production release.
 - Keep PostgreSQL on a Unix socket or loopback with separate migration and
   application roles.
+- Bind the dispatcher webhook only to the host address needed by the Pod
+  network, authenticate it with a dedicated rotated credential, and enforce
+  request-size, alert-count, field, and timeout limits.
+- Store SMTP credentials in a protected host credential file or approved secret
+  store. Require certificate-verified TLS, restrict sender/recipient domains,
+  and prohibit plaintext fallback.
+- Own the host-alert Unix socket and emergency spool as `tvt-alert:tvt`, deny
+  access to other users, set hard file/byte limits, and reject non-allowlisted
+  emergency alert types.
 - Redact secrets before logging; collector-side redaction is only a secondary
   safeguard.
 - Treat faces, embeddings, attendance, and plates as sensitive business data
   governed outside the camera-inventory schema.
 
-## 17. Verification plan
+## 18. Verification plan
 
-### 17.1 Unit tests
+### 18.1 Unit tests
 
 - camera identity normalization, matching, conflict, and IP-change behavior;
 - state-machine transitions and invalid-transition rejection;
@@ -744,9 +1020,14 @@ then wait ten minutes before another action.
 - deterministic rendering, placement, probe, Secret-mount, prune, and PVC
   retention behavior;
 - reporter freshness and status-controller label ownership; and
-- bounded metric labels and structured log fields.
+- bounded metric labels and structured log fields;
+- alert fingerprint normalization and collision cases;
+- notification policy matching, inhibition inputs, acknowledgement, and
+  resolved-email rules;
+- webhook and host-alert idempotency; and
+- outbox retry classification, expiry, and deterministic message IDs.
 
-### 17.2 Integration tests
+### 18.2 Integration tests
 
 Use containerized fake ONVIF/RTSP devices and recorded non-sensitive video:
 
@@ -760,10 +1041,14 @@ Use containerized fake ONVIF/RTSP devices and recorded non-sensitive video:
 - add two internal consumers while preserving one upstream session;
 - disconnect one source without affecting the others;
 - restart the edge service, PostgreSQL, gateway Pod, and K3s; and
+- process duplicate/out-of-order firing and resolved webhooks;
+- queue email while a fake SMTP relay is down and deliver it after recovery;
+- stop PostgreSQL, queue only the allowlisted emergency database alert on the
+  filesystem, and import its delivery record after database recovery;
 - verify secrets never appear in APIs, logs, metrics, Events, or rendered
   bundles.
 
-### 17.3 K3s acceptance tests
+### 18.3 K3s acceptance tests
 
 Port the reference lifecycle suite and retain its concrete assertions:
 
@@ -779,7 +1064,7 @@ Add TVT assertions for camera ConfigMap/Secret revision matching, gateway
 session count, per-camera reconnect, alert delivery, and host-UI availability
 while K3s is stopped.
 
-### 17.4 Capacity and field acceptance
+### 18.4 Capacity and field acceptance
 
 With all intended cameras and CV consumers active for a sustained run, record:
 
@@ -795,7 +1080,25 @@ With all intended cameras and CV consumers active for a sustained run, record:
 Five-camera success does not establish the eight-camera design ceiling unless
 the eight-camera workload is actually measured.
 
-## 18. Implementation plan and review gates
+### 18.5 Alert delivery acceptance
+
+The alert-dispatcher path is accepted when:
+
+1. a sustained camera outage produces one firing email;
+2. a transient outage shorter than the rule/route delay produces no email;
+3. recovery produces one resolved email only after a firing email was sent;
+4. K3s or Alertmanager failure produces a host-originated email;
+5. root-cause inhibition prevents downstream notification storms;
+6. SMTP failure preserves the notification and retries after restart;
+7. duplicate webhooks do not create duplicate logical transitions;
+8. acknowledgement stops reminders without clearing the alert or suppressing
+   recovery;
+9. no credential, RTSP URL, face, person, or plate data appears in email; and
+10. a PostgreSQL outage uses only the bounded emergency path and is reported;
+    and
+11. a synthetic end-to-end alert reaches SMTP and records auditable evidence.
+
+## 19. Implementation plan and review gates
 
 ### Phase 0: Freeze contracts
 
@@ -820,7 +1123,8 @@ passes reference failure/rollout acceptance tests.
 ### Phase 2: Build host management foundations
 
 - Create Python service packaging and `systemd` unit.
-- Add PostgreSQL models/migrations and repository layer.
+- Add PostgreSQL models/migrations and repository layer, including alert and
+  notification-outbox tables.
 - Add configuration, credential encryption, request IDs, JSON logging, and
   base metrics.
 - Serve the React shell and independent host/K3s health API.
@@ -862,14 +1166,19 @@ data design is approved.
 ### Phase 6: Monitoring, recovery, and security acceptance
 
 - Deploy the pinned monitoring stack from `MONITORING.md`.
-- Add alert rules/webhook/UI state, dashboards, and bounded retention.
+- Add alert rules, grouping/inhibition routes, and bounded retention.
+- Implement `tvt-alert-dispatcher.service`, authenticated receivers, policy
+  evaluation, durable outbox, bounded emergency spool, SMTP delivery,
+  templates, and UI delivery state.
+- Add firing/resolved email, retry, acknowledgement, synthetic-alert, and
+  notification-storm acceptance tests.
 - Add K3s watchdog and boot/recovery acceptance.
 - Complete secret-leak, RBAC, network-policy, image, and host-service review.
 
 **Exit:** The documented acceptance suites and sustained-load test pass with a
 stored evidence bundle and recovery measurements.
 
-## 19. Questions for review
+## 20. Questions for review
 
 These answers are not required to review the overall structure, but they are
 required before the associated phase is closed.
@@ -891,14 +1200,15 @@ required before the associated phase is closed.
 7. Will the management UI remain loopback-only, or must it be reachable on a
    customer management LAN? If reachable, what identity provider or local-user
    authentication is required?
-8. Is outbound SMTP available at the site, and where should email credentials,
-   recipient lists, retry state, and sent-report audit be stored?
+8. Is an organization SMTP relay reachable from the site, which recipient
+   groups receive critical/warning alerts, and what sender domain and
+   credential-storage mechanism are approved?
 9. What recovery target qualifies as "within a few minutes" for camera
    reconnect, Pod replacement, K3s restart, and full host reboot?
 10. Should the local OCI registry and monitoring data survive OS
     reinstallation, and what backup/restore medium is acceptable?
 
-## 20. Definition of the first usable increment
+## 21. Definition of the first usable increment
 
 The first usable increment is the platform and camera path, not the completion
 of every CV business feature. It is accepted when:
@@ -912,8 +1222,11 @@ of every CV business feature. It is accepted when:
 7. camera, Pod, edge-service, PostgreSQL, and K3s recovery behavior is tested;
 8. the UI remains available during a K3s outage; and
 9. metrics, JSON logs, and alerts identify failures without requiring shell
-   access.
+   access; and
+10. one synthetic firing/recovery sequence is durably queued and delivered
+    through the approved SMTP relay.
 
-Production face/ANPR accuracy, durable attendance/report data, email delivery,
-and eight-camera capacity are separate acceptance gates with their own input
-data and evidence.
+Production face/ANPR accuracy, durable attendance/report data, scheduled
+business-report email, and eight-camera capacity are separate acceptance gates
+with their own input data and evidence. Scheduled business-report email is not
+the alert-dispatcher path.
