@@ -23,7 +23,7 @@ The secure tunnel should be for last-resort shell access. The bulk of debugging 
 
 ## Current implementation
 
-The first K3s-plane slice is implemented from the approved
+The first two K3s-plane slices are implemented from the approved
 `k3s-prototype` commit `bcb58030f89b22b14ff1dbd0a68c5806d2f6a002`.
 It includes:
 
@@ -35,7 +35,11 @@ It includes:
 - a GStreamer-free node reporter which checks Intel devices and VA-API;
 - strict materialization of per-deployment desired-state and camera-source
   Secrets; and
-- a small `tvt-k3s` Python CLI for validation, rendering, dry runs, and Apply.
+- pinned single-node K3s installation and registry-mirror tooling;
+- digest-pinned publication and installation of the node-management images;
+  and
+- a `tvt-k3s` Python CLI for validation, rendering, Apply/prune, status,
+  declarative start/stop, revision history, and rollback.
 
 The alert dispatcher and full observability stack are intentionally not part
 of this implementation slice.
@@ -72,28 +76,48 @@ the same JSON input ephemerally from its encrypted inventory.
 
 ### Single-node K3s plane
 
-Build and push the two initial control images to the site registry:
+Install the frozen K3s version and configure its registry mirror. Online
+installation must be requested explicitly:
 
 ```bash
-docker build -t registry.local:5000/apexfabric/node-reporter:0.1.0 \
-  -f apexfabric/node_management/reporter/Dockerfile .
-docker build -t registry.local:5000/apexfabric/node-status-controller:0.1.0 \
-  -f apexfabric/node_management/status_controller/Dockerfile .
-docker push registry.local:5000/apexfabric/node-reporter:0.1.0
-docker push registry.local:5000/apexfabric/node-status-controller:0.1.0
+sudo bash scripts/install-k3s-single-node.sh \
+  --registry registry.local:5000 \
+  --download-installer
 ```
 
-On a machine with the pinned K3s release already installed, apply the
-single-node foundation:
+For an offline installation, provide the reviewed installer and pinned K3s
+binary instead:
 
 ```bash
-sudo bash scripts/install-k3s-plane.sh --registry registry.local:5000
+sudo bash scripts/install-k3s-single-node.sh \
+  --registry registry.local:5000 \
+  --installer /media/tvt/k3s/install.sh \
+  --k3s-binary /media/tvt/k3s/k3s
 ```
 
-The installer refuses a cluster with anything other than one registered Node.
-It labels that Node for the Intel 285H profile and applies the reference
-foundation and node-management resources. It does not install K3s, configure
-the registry mirror, or build workload images yet.
+Build and publish the two initial control images. This also resolves the
+registry manifests and writes an immutable digest lock:
+
+```bash
+bash scripts/publish-control-images.sh --registry registry.local:5000
+```
+
+Apply and verify the node-management plane using that lock:
+
+```bash
+sudo bash scripts/install-k3s-plane.sh \
+  --image-lock build/node-management-images.lock.json
+```
+
+The installers refuse a cluster with anything other than one registered Node.
+Verification requires a Ready node, healthy reporter/controller rollouts, an
+accepted `ApexNodeStatus`, the controller-owned qualification label, expected
+RBAC, and digest-pinned workload images.
+
+Use `--registry-scheme https` and `--scheme https` for a TLS registry. The
+initial HTTP mode is only for the isolated on-site registry network.
+
+### Solution Pack lifecycle
 
 Once K3s and the Traffic runtime image are available, apply the bundle and its
 ephemeral direct-camera inputs:
@@ -102,12 +126,36 @@ ephemeral direct-camera inputs:
 sudo .venv/bin/tvt-k3s apply \
   solution-packs/traffic/traffic-edge-runtime-intel-285h.yaml \
   --registry registry.local:5000 \
-  --secret-inputs /run/tvt/traffic-secret-inputs.json
+  --secret-inputs /run/tvt/traffic-secret-inputs.json \
+  --state-dir /var/lib/tvt/runtime
 ```
 
 Changing a camera URL or password requires running Apply again. The runtime
 updates the bundle-named Secrets and performs a controlled Deployment rollout
 so Kubernetes `subPath` mounts receive the new values.
+
+Inspect and control the deployment declaratively:
+
+```bash
+sudo .venv/bin/tvt-k3s list --state-dir /var/lib/tvt/runtime
+sudo .venv/bin/tvt-k3s status traffic-edge-intel-285h \
+  --state-dir /var/lib/tvt/runtime
+sudo .venv/bin/tvt-k3s stop traffic-edge-intel-285h \
+  --state-dir /var/lib/tvt/runtime
+sudo .venv/bin/tvt-k3s start traffic-edge-intel-285h \
+  --state-dir /var/lib/tvt/runtime
+sudo .venv/bin/tvt-k3s history traffic-edge-intel-285h \
+  --state-dir /var/lib/tvt/runtime
+sudo .venv/bin/tvt-k3s rollback traffic-edge-intel-285h \
+  --state-dir /var/lib/tvt/runtime
+```
+
+The runtime database is created with mode `0600`. It stores validated bundles,
+safe rollout summaries, and active revision metadata, but never stores
+ephemeral camera URLs. TVT rejects `applications[].secrets` at the runtime
+boundary. A rollback which changes camera assignments, or follows a failed
+camera-Secret update, requires a matching new `--secret-inputs` file because
+prior camera credentials are intentionally not retained.
 
 ### Tests
 

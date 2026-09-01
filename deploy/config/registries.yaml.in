@@ -1,0 +1,4 @@
+mirrors:
+  "__REGISTRY_ADDRESS__":
+    endpoint:
+      - "__REGISTRY_SCHEME__://__REGISTRY_ADDRESS__"
