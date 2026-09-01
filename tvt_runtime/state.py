@@ -1,4 +1,10 @@
-"""Non-secret deployment history for the local TVT Solution Pack runtime."""
+"""Legacy Slice 2 SQLite format used only by the one-shot importer.
+
+Production lifecycle commands no longer construct :class:`DeploymentStore`;
+the authoritative implementation is the PostgreSQL management plane under
+``tvt_edge``. The reader/writer remains solely to recognize and test the exact
+legacy format during migration.
+"""
 
 from __future__ import annotations
 

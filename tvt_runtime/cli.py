@@ -313,7 +313,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         if args.command in {"status", "list", "history", "start", "stop", "rollback"}:
-            print(json.dumps(local_command(args), indent=2, sort_keys=True))
+            raise ValueError(
+                "SQLite lifecycle commands were retired by Slice 3; use the "
+                "PostgreSQL-backed tvt-edge API and synchronization worker"
+            )
         else:
             bundle = load_and_validate(args.bundle, args.schema)
             replace_registry(bundle, getattr(args, "registry", None))
@@ -322,10 +325,14 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "render":
                 print(yaml.safe_dump_all(render(bundle, args.namespace), sort_keys=False))
             else:
-                store = None if args.dry_run else DeploymentStore(args.state_dir)
+                if not args.dry_run:
+                    raise ValueError(
+                        "direct Apply was retired by Slice 4; commit assignments "
+                        "through the tvt-edge API"
+                    )
                 print(
                     json.dumps(
-                        apply_command(args, bundle, store),
+                        apply_command(args, bundle, None),
                         indent=2,
                         sort_keys=True,
                     )

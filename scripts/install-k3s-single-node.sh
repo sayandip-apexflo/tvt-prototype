@@ -83,7 +83,7 @@ if ! command -v k3s >/dev/null 2>&1; then
   install_environment=(env \
     INSTALL_K3S_VERSION="${K3S_VERSION}" \
     K3S_KUBECONFIG_MODE="600" \
-    INSTALL_K3S_EXEC="server --disable=traefik --disable=servicelb")
+    INSTALL_K3S_EXEC="server --disable=traefik --disable=servicelb --secrets-encryption --secrets-encryption-provider=secretbox")
   if ${skip_download}; then
     install_environment+=(INSTALL_K3S_SKIP_DOWNLOAD=true)
   fi

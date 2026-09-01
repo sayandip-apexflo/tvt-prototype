@@ -8,18 +8,27 @@ version = "0.1.0"
 description = "Single-box TVT K3s and Solution Pack runtime"
 requires-python = ">=3.12"
 dependencies = [
+  "alembic>=1.14,<2",
+  "anyio>=4.8,<4.10",
+  "cryptography>=44,<47",
+  "fastapi>=0.115,<0.116",
   "jsonschema>=4.23,<5",
+  "psycopg[binary]>=3.2,<4",
+  "pydantic>=2.10,<2.12",
   "PyYAML>=6.0,<7",
+  "SQLAlchemy>=2.0.36,<3",
+  "uvicorn>=0.34,<0.35",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3,<9"]
+dev = ["httpx>=0.28,<1", "pytest>=8.3,<9"]
 
 [project.scripts]
 tvt-k3s = "tvt_runtime.cli:main"
+tvt-edge = "tvt_edge.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["apexfabric*", "tvt_runtime*"]
+include = ["apexfabric*", "tvt_edge*", "tvt_runtime*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -23,7 +23,7 @@ The secure tunnel should be for last-resort shell access. The bulk of debugging 
 
 ## Current implementation
 
-The first two K3s-plane slices are implemented from the approved
+The first four slices are implemented from the approved
 `k3s-prototype` commit `bcb58030f89b22b14ff1dbd0a68c5806d2f6a002`.
 It includes:
 
@@ -38,11 +38,15 @@ It includes:
 - pinned single-node K3s installation and registry-mirror tooling;
 - digest-pinned publication and installation of the node-management images;
   and
-- a `tvt-k3s` Python CLI for validation, rendering, Apply/prune, status,
-  declarative start/stop, revision history, and rollback.
+- a host-local PostgreSQL management plane with an encrypted camera inventory,
+  immutable desired revisions, lifecycle operations, audit, and retention;
+- a loopback-only `tvt-edge` API and CLI; and
+- a leased reconciliation worker which materializes camera Secrets only in
+  memory, applies them server-side, invokes the unchanged renderer, waits for
+  rollouts, and advances applied state only after success.
 
-The alert dispatcher and full observability stack are intentionally not part
-of this implementation slice.
+The web UI, active ONVIF/RTSP probing, alert dispatcher, and full observability
+stack are intentionally deferred.
 
 ### Local runtime
 
@@ -71,8 +75,9 @@ Test the direct-camera Secret and render contracts without contacting K3s:
 ```
 
 The example contains documentation-only camera URLs. Never put real camera
-credentials in a tracked file. The production management service will build
-the same JSON input ephemerally from its encrypted inventory.
+credentials in a tracked file. The management service builds the same input
+ephemerally from its encrypted inventory. Non-dry-run `tvt-k3s apply` and the
+old local SQLite lifecycle commands are retired from the production CLI.
 
 ### Single-node K3s plane
 
@@ -117,48 +122,54 @@ RBAC, and digest-pinned workload images.
 Use `--registry-scheme https` and `--scheme https` for a TLS registry. The
 initial HTTP mode is only for the isolated on-site registry network.
 
-### Solution Pack lifecycle
+### Host management plane and Solution Pack lifecycle
 
-Once K3s and the Traffic runtime image are available, apply the bundle and its
-ephemeral direct-camera inputs:
-
-```bash
-sudo .venv/bin/tvt-k3s apply \
-  solution-packs/traffic/traffic-edge-runtime-intel-285h.yaml \
-  --registry registry.local:5000 \
-  --secret-inputs /run/tvt/traffic-secret-inputs.json \
-  --state-dir /var/lib/tvt/runtime
-```
-
-Changing a camera URL or password requires running Apply again. The runtime
-updates the bundle-named Secrets and performs a controlled Deployment rollout
-so Kubernetes `subPath` mounts receive the new values.
-
-Inspect and control the deployment declaratively:
+PostgreSQL stays on the Ubuntu edge host. It is bound only to Unix sockets;
+neither PostgreSQL nor its data directory is placed in K3s. Bootstrap it and
+install the service units after reviewing the example environment file:
 
 ```bash
-sudo .venv/bin/tvt-k3s list --state-dir /var/lib/tvt/runtime
-sudo .venv/bin/tvt-k3s status traffic-edge-intel-285h \
-  --state-dir /var/lib/tvt/runtime
-sudo .venv/bin/tvt-k3s stop traffic-edge-intel-285h \
-  --state-dir /var/lib/tvt/runtime
-sudo .venv/bin/tvt-k3s start traffic-edge-intel-285h \
-  --state-dir /var/lib/tvt/runtime
-sudo .venv/bin/tvt-k3s history traffic-edge-intel-285h \
-  --state-dir /var/lib/tvt/runtime
-sudo .venv/bin/tvt-k3s rollback traffic-edge-intel-285h \
-  --state-dir /var/lib/tvt/runtime
+sudo bash scripts/bootstrap-postgresql.sh
+sudo bash scripts/install-tvt-kubeconfig.sh
+sudo systemctl enable --now tvt-edge.service tvt-camera-sync.service \
+  tvt-retention.timer
 ```
 
-The runtime database is created with mode `0600`. It stores validated bundles,
-safe rollout summaries, and active revision metadata, but never stores
-ephemeral camera URLs. TVT rejects `applications[].secrets` at the runtime
-boundary. A rollback which changes camera assignments, or follows a failed
-camera-Secret update, requires a matching new `--secret-inputs` file because
-prior camera credentials are intentionally not retained.
+The bootstrap creates the local role/database, generates the credential key,
+runs Alembic, and installs—but deliberately does not enable—the units. Edit the
+environment file before enabling them. Initialize the site and register the
+unchanged Traffic bundle with the loopback service:
+
+```bash
+sudo -u tvt-edge /opt/tvt/venv/bin/tvt-edge init-site \
+  plant-01 edge-01 'Plant 01' --timezone Asia/Kolkata
+```
+
+Register the bundle with `POST http://127.0.0.1:8088/api/v1/deployments` as a
+JSON object containing `bundle`, `namespace`, and `registry`.
+
+Camera onboarding, credential rotation, assignment commit, start, stop, and
+rollback are API operations. Assignment and lifecycle changes create immutable
+desired revisions; rotating an assigned camera's credentials requeues each
+affected deployment as a new revision. The sync worker updates the bundle-named
+Secrets and performs a controlled Deployment rollout so Kubernetes `subPath`
+mounts receive changed values. See [Slices 3 and 4](docs/SLICE-3-4.md) for the
+API and operational contract.
+
+Existing installations should enable K3s datastore Secret encryption during a
+reviewed maintenance window:
+
+```bash
+sudo bash scripts/enable-k3s-secrets-encryption.sh
+```
+
+New K3s installs enable `secretbox` datastore encryption automatically. The
+management database stores camera credentials only as AES-256-GCM ciphertext;
+the API never returns credential material, logs and error details are redacted,
+and the database never stores rendered Kubernetes Secret bodies.
 
 ### Tests
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m pytest -q
 ```

@@ -15,6 +15,18 @@ metadata:
     app.kubernetes.io/part-of: apexfabric
 automountServiceAccountToken: false
 ---
+# A controller-populated, long-lived token is used only by the host sync
+# worker. Its generated value is copied into a root-owned kubeconfig and is
+# never committed to this manifest.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: node-agent-host-token
+  namespace: apexfabric
+  annotations:
+    kubernetes.io/service-account.name: node-agent
+type: kubernetes.io/service-account-token
+---
 # Namespace-scoped reconciliation permissions. Namespace creation remains an
 # installer/control-plane responsibility and does not require a broad ClusterRole.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -46,3 +58,28 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: node-agent-reconciler
+---
+# The unchanged renderer includes the pre-created Namespace in each
+# server-side Apply. Restrict that patch permission to this one Namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: apexfabric-node-agent-namespace
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["apexfabric"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: apexfabric-node-agent-namespace
+subjects:
+  - kind: ServiceAccount
+    name: node-agent
+    namespace: apexfabric
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: apexfabric-node-agent-namespace

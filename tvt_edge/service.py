@@ -1,0 +1,1269 @@
+"""Transactional management operations for Slice 3."""
+
+from __future__ import annotations
+
+import copy
+import re
+import uuid
+from datetime import timedelta
+from typing import Any
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, sessionmaker
+
+from tvt_edge.bundles import (
+    BundleCamera,
+    apply_registry,
+    bundle_sha256,
+    canonical_bundle,
+    instantiate_traffic_bundle,
+    validate_tvt_bundle,
+)
+from tvt_edge.db.models import (
+    AuditEvent,
+    Camera,
+    CameraApplicationAssignment,
+    CameraCredentialVersion,
+    CameraDeploymentAssignment,
+    CameraEndpoint,
+    CameraIdentifier,
+    CameraRole,
+    CameraRoleAssignment,
+    CameraStatus,
+    CameraStreamProfile,
+    CameraValidationAttempt,
+    CredentialKeyVersion,
+    DeploymentAssignmentSet,
+    DeploymentSyncState,
+    DeploymentSyncAttempt,
+    DiscoveryRun,
+    CameraObservation,
+    KubernetesResourceRef,
+    ManagementOperation,
+    Site,
+    SolutionBundleRevision,
+    SolutionDeployment,
+    utc_now,
+)
+from tvt_edge.security import CredentialKeyring, redact
+
+
+DNS_ID = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,61}[a-z0-9])?$")
+SAFE_HOST = re.compile(r"^[A-Za-z0-9_.:-]+$")
+
+
+class ManagementService:
+    def __init__(
+        self, sessions: sessionmaker[Session], keyring: CredentialKeyring
+    ) -> None:
+        self.sessions = sessions
+        self.keyring = keyring
+
+    @staticmethod
+    def _audit(
+        session: Session,
+        *,
+        actor: str,
+        request_id: str,
+        action: str,
+        target_type: str,
+        target_id: str,
+        result: str = "succeeded",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        session.add(
+            AuditEvent(
+                actor=actor,
+                request_id=request_id,
+                action=action,
+                target_type=target_type,
+                target_id=target_id,
+                result=result,
+                details=redact(details or {}),
+            )
+        )
+
+    def create_site(
+        self,
+        site_key: str,
+        edge_id: str,
+        display_name: str,
+        timezone_name: str,
+        actor: str,
+        request_id: str,
+    ) -> Site:
+        if not DNS_ID.fullmatch(site_key) or not DNS_ID.fullmatch(edge_id):
+            raise ValueError("site_key and edge_id must be DNS-safe identifiers")
+        with self.sessions.begin() as session:
+            if session.scalar(select(Site.id).limit(1)) is not None:
+                raise ValueError("TVT V1 supports exactly one site")
+            site = Site(
+                site_key=site_key,
+                edge_id=edge_id,
+                display_name=display_name.strip(),
+                timezone_name=timezone_name,
+            )
+            session.add(site)
+            session.flush()
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="site.create",
+                target_type="site",
+                target_id=site_key,
+            )
+            return site
+
+    def current_site(self, session: Session | None = None) -> Site:
+        if session is not None:
+            site = session.scalar(select(Site).limit(1))
+        else:
+            with self.sessions() as owned:
+                site = owned.scalar(select(Site).limit(1))
+                if site is not None:
+                    owned.expunge(site)
+        if site is None:
+            raise ValueError("site is not configured")
+        return site
+
+    def create_camera(
+        self,
+        *,
+        camera_key: str,
+        friendly_name: str,
+        manufacturer: str | None,
+        model: str | None,
+        identifiers: list[dict[str, str]],
+        actor: str,
+        request_id: str,
+    ) -> Camera:
+        if not DNS_ID.fullmatch(camera_key):
+            raise ValueError("camera_key must be a DNS-safe identifier")
+        with self.sessions.begin() as session:
+            site = self.current_site(session)
+            camera = Camera(
+                site_id=site.id,
+                camera_key=camera_key,
+                friendly_name=friendly_name.strip(),
+                manufacturer=manufacturer,
+                model=model,
+            )
+            session.add(camera)
+            session.flush()
+            for value in identifiers:
+                session.add(
+                    CameraIdentifier(
+                        camera_id=camera.id,
+                        kind=value["kind"],
+                        normalized_value=value["value"].strip().lower(),
+                        display_value=value["value"].strip(),
+                        source=value.get("source", "operator"),
+                        confidence=value.get("confidence", "asserted"),
+                    )
+                )
+            session.add(CameraStatus(camera_id=camera.id))
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="camera.create",
+                target_type="camera",
+                target_id=camera_key,
+            )
+            return camera
+
+    def assign_camera_role(
+        self,
+        camera_key: str,
+        role_key: str,
+        display_name: str,
+        direction: str,
+        ordinal: int | None,
+        actor: str,
+        request_id: str,
+    ) -> CameraRoleAssignment:
+        if not DNS_ID.fullmatch(role_key):
+            raise ValueError("role_key must be a DNS-safe identifier")
+        if direction not in {"entry", "exit", "bidirectional", "unknown"}:
+            raise ValueError("camera direction is invalid")
+        with self.sessions.begin() as session:
+            camera = self._camera(session, camera_key)
+            role = session.scalar(
+                select(CameraRole).where(
+                    CameraRole.site_id == camera.site_id,
+                    CameraRole.role_key == role_key,
+                )
+            )
+            if role is None:
+                role = CameraRole(
+                    site_id=camera.site_id,
+                    role_key=role_key,
+                    display_name=display_name,
+                )
+                session.add(role)
+                session.flush()
+            assignment = CameraRoleAssignment(
+                camera_id=camera.id,
+                role_id=role.id,
+                direction=direction,
+                ordinal=ordinal,
+            )
+            session.add(assignment)
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="camera.role.assign",
+                target_type="camera",
+                target_id=camera_key,
+                details={"role_key": role_key, "direction": direction},
+            )
+            return assignment
+
+    def list_cameras(self) -> list[dict[str, Any]]:
+        with self.sessions() as session:
+            cameras = session.scalars(
+                select(Camera).where(Camera.deleted_at.is_(None)).order_by(Camera.camera_key)
+            ).all()
+            return [self._camera_view(session, camera) for camera in cameras]
+
+    def get_camera(self, camera_key: str) -> dict[str, Any]:
+        with self.sessions() as session:
+            camera = self._camera(session, camera_key)
+            return self._camera_view(session, camera)
+
+    @staticmethod
+    def _camera(session: Session, camera_key: str) -> Camera:
+        camera = session.scalar(
+            select(Camera).where(Camera.camera_key == camera_key, Camera.deleted_at.is_(None))
+        )
+        if camera is None:
+            raise ValueError(f"unknown camera {camera_key!r}")
+        return camera
+
+    @staticmethod
+    def _camera_view(session: Session, camera: Camera) -> dict[str, Any]:
+        profile = session.scalar(
+            select(CameraStreamProfile).where(
+                CameraStreamProfile.camera_id == camera.id,
+                CameraStreamProfile.selected.is_(True),
+            )
+        )
+        credential = session.scalar(
+            select(CameraCredentialVersion).where(
+                CameraCredentialVersion.camera_id == camera.id,
+                CameraCredentialVersion.state == "active",
+            )
+        )
+        identifiers = session.scalars(
+            select(CameraIdentifier).where(
+                CameraIdentifier.camera_id == camera.id,
+                CameraIdentifier.active.is_(True),
+            )
+        ).all()
+        return {
+            "camera_id": camera.camera_key,
+            "friendly_name": camera.friendly_name,
+            "manufacturer": camera.manufacturer,
+            "model": camera.model,
+            "state": camera.onboarding_state,
+            "enabled": camera.enabled,
+            "credentials_configured": credential is not None,
+            "selected_profile_id": str(profile.id) if profile else None,
+            "identifiers": [
+                {"kind": item.kind, "value": item.display_value or item.normalized_value}
+                for item in identifiers
+            ],
+            "created_at": camera.created_at.isoformat(),
+            "updated_at": camera.updated_at.isoformat(),
+        }
+
+    def configure_stream(
+        self,
+        camera_key: str,
+        *,
+        scheme: str,
+        host: str,
+        port: int,
+        path: str,
+        profile_token: str,
+        transport: str,
+        codec: str | None,
+        width: int | None,
+        height: int | None,
+        fps: float | None,
+        actor: str,
+        request_id: str,
+    ) -> CameraStreamProfile:
+        if scheme not in {"rtsp", "rtsps"} or not SAFE_HOST.fullmatch(host):
+            raise ValueError("stream endpoint is invalid")
+        if not 1 <= port <= 65535:
+            raise ValueError("stream port is invalid")
+        if not path.startswith("/") or any(char in path for char in "?#@"):
+            raise ValueError("stream path must be non-secret and contain no query/userinfo")
+        if transport not in {"tcp", "udp"}:
+            raise ValueError("transport must be tcp or udp")
+        with self.sessions.begin() as session:
+            camera = self._camera(session, camera_key)
+            session.query(CameraStreamProfile).filter_by(camera_id=camera.id).update(
+                {"selected": False}
+            )
+            endpoint = session.scalar(
+                select(CameraEndpoint).where(
+                    CameraEndpoint.camera_id == camera.id,
+                    CameraEndpoint.kind == "rtsp",
+                    CameraEndpoint.host == host,
+                    CameraEndpoint.port == port,
+                )
+            )
+            if endpoint is None:
+                endpoint = CameraEndpoint(
+                    camera_id=camera.id,
+                    kind="rtsp",
+                    scheme=scheme,
+                    host=host,
+                    port=port,
+                    path="/",
+                )
+                session.add(endpoint)
+                session.flush()
+            profile = session.scalar(
+                select(CameraStreamProfile).where(
+                    CameraStreamProfile.camera_id == camera.id,
+                    CameraStreamProfile.profile_token == profile_token,
+                )
+            )
+            values = {
+                "endpoint_id": endpoint.id,
+                "path": path,
+                "transport": transport,
+                "codec": codec,
+                "width": width,
+                "height": height,
+                "fps": fps,
+                "available": True,
+                "selected": True,
+                "observed_at": utc_now(),
+            }
+            if profile is None:
+                profile = CameraStreamProfile(
+                    camera_id=camera.id, profile_token=profile_token, **values
+                )
+                session.add(profile)
+            else:
+                for key, value in values.items():
+                    setattr(profile, key, value)
+            camera.onboarding_state = (
+                "validating" if camera.onboarding_state != "online" else "online"
+            )
+            camera.row_version += 1
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="camera.stream.configure",
+                target_type="camera",
+                target_id=camera_key,
+                details={"profile_token": profile_token, "host": host, "port": port},
+            )
+            return profile
+
+    @staticmethod
+    def _validate_credential_document(document: dict[str, Any]) -> None:
+        allowed = {"username", "password", "query", "path_suffix"}
+        if set(document) - allowed:
+            raise ValueError("credential document contains unsupported fields")
+        for field in ("username", "password", "path_suffix"):
+            value = document.get(field)
+            if value is not None and (
+                not isinstance(value, str)
+                or len(value) > 1024
+                or any(ord(char) < 32 for char in value)
+            ):
+                raise ValueError(f"credential {field} is invalid")
+        query = document.get("query", {})
+        if not isinstance(query, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in query.items()
+        ):
+            raise ValueError("credential query must be a string mapping")
+
+    def rotate_credentials(
+        self,
+        camera_key: str,
+        document: dict[str, Any],
+        actor: str,
+        request_id: str,
+    ) -> CameraCredentialVersion:
+        self._validate_credential_document(document)
+        with self.sessions.begin() as session:
+            camera = self._camera(session, camera_key)
+            existing_audit = session.scalar(
+                select(AuditEvent).where(
+                    AuditEvent.request_id == request_id,
+                    AuditEvent.action == "camera.credentials.rotate",
+                    AuditEvent.target_id == camera_key,
+                )
+            )
+            if existing_audit is not None:
+                active = self._active_credential(session, camera.id)
+                if active is None:
+                    raise ValueError("idempotent credential result is unavailable")
+                return active
+            old = self._active_credential(session, camera.id)
+            highest = session.scalar(
+                select(func.max(CameraCredentialVersion.credential_version)).where(
+                    CameraCredentialVersion.camera_id == camera.id
+                )
+            ) or 0
+            credential_id = uuid.uuid4()
+            encrypted = self.keyring.encrypt(camera.id, credential_id, document)
+            key_meta = session.get(CredentialKeyVersion, encrypted.key_version)
+            if key_meta is None:
+                session.add(CredentialKeyVersion(version=encrypted.key_version))
+            now = utc_now()
+            if old is not None:
+                old.state = "superseded"
+                old.superseded_at = now
+                old.purge_after = now + timedelta(days=30)
+            credential = CameraCredentialVersion(
+                id=credential_id,
+                camera_id=camera.id,
+                credential_version=highest + 1,
+                ciphertext=encrypted.ciphertext,
+                nonce=encrypted.nonce,
+                key_version=encrypted.key_version,
+                aad_version=encrypted.aad_version,
+                state="active",
+                created_by=actor,
+                activated_at=now,
+            )
+            session.add(credential)
+            camera.onboarding_state = "validating"
+            camera.row_version += 1
+            session.flush()
+            if old is not None:
+                self._requeue_credential_consumers(
+                    session, camera.id, credential.id, actor, request_id
+                )
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="camera.credentials.rotate",
+                target_type="camera",
+                target_id=camera_key,
+                details={"credential_version": highest + 1},
+            )
+            return credential
+
+    @staticmethod
+    def _active_credential(
+        session: Session, camera_id: uuid.UUID
+    ) -> CameraCredentialVersion | None:
+        return session.scalar(
+            select(CameraCredentialVersion).where(
+                CameraCredentialVersion.camera_id == camera_id,
+                CameraCredentialVersion.state == "active",
+            )
+        )
+
+    def set_camera_enabled(
+        self, camera_key: str, enabled: bool, actor: str, request_id: str
+    ) -> Camera:
+        with self.sessions.begin() as session:
+            camera = self._camera(session, camera_key)
+            if enabled:
+                profile_id = session.scalar(
+                    select(CameraStreamProfile.id).where(
+                        CameraStreamProfile.camera_id == camera.id,
+                        CameraStreamProfile.selected.is_(True),
+                    )
+                )
+                if profile_id is None:
+                    raise ValueError("camera requires a selected stream profile")
+                credential = self._active_credential(session, camera.id)
+                credential_filter = (
+                    CameraValidationAttempt.credential_version_id
+                    == credential.id
+                    if credential is not None
+                    else CameraValidationAttempt.credential_version_id.is_(None)
+                )
+                validated = session.scalar(
+                    select(CameraValidationAttempt.id).where(
+                        CameraValidationAttempt.camera_id == camera.id,
+                        CameraValidationAttempt.profile_id == profile_id,
+                        credential_filter,
+                        CameraValidationAttempt.status == "succeeded",
+                        CameraValidationAttempt.result_code == "OK",
+                    )
+                )
+                if validated is None:
+                    raise ValueError(
+                        "camera requires successful validation of its selected "
+                        "stream and current credentials"
+                    )
+                camera.enabled = True
+                if camera.onboarding_state == "disabled":
+                    camera.onboarding_state = "validating"
+            else:
+                camera.enabled = False
+                camera.onboarding_state = "disabled"
+            camera.row_version += 1
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="camera.enable" if enabled else "camera.disable",
+                target_type="camera",
+                target_id=camera_key,
+            )
+            return camera
+
+    def queue_validation(
+        self, camera_key: str, trigger: str, actor: str, request_id: str
+    ) -> CameraValidationAttempt:
+        with self.sessions.begin() as session:
+            camera = self._camera(session, camera_key)
+            profile = session.scalar(
+                select(CameraStreamProfile).where(
+                    CameraStreamProfile.camera_id == camera.id,
+                    CameraStreamProfile.selected.is_(True),
+                )
+            )
+            if profile is None:
+                raise ValueError("camera requires a selected stream profile")
+            credential = self._active_credential(session, camera.id)
+            attempt = CameraValidationAttempt(
+                camera_id=camera.id,
+                profile_id=profile.id,
+                credential_version_id=credential.id if credential else None,
+                trigger=trigger,
+            )
+            session.add(attempt)
+            camera.onboarding_state = "validating"
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="camera.validation.queue",
+                target_type="camera",
+                target_id=camera_key,
+            )
+            return attempt
+
+    def record_validation_result(
+        self,
+        attempt_id: uuid.UUID,
+        *,
+        result_code: str,
+        safe_result: dict[str, Any],
+        actor: str,
+        request_id: str,
+    ) -> CameraValidationAttempt:
+        with self.sessions.begin() as session:
+            attempt = session.get(CameraValidationAttempt, attempt_id)
+            if attempt is None:
+                raise ValueError("unknown validation attempt")
+            if attempt.status not in {"queued", "running"}:
+                raise ValueError("validation attempt is already complete")
+            success = result_code == "OK"
+            attempt.status = "succeeded" if success else "failed"
+            attempt.result_code = result_code
+            attempt.safe_result = redact(safe_result)
+            attempt.finished_at = utc_now()
+            camera = session.get(Camera, attempt.camera_id)
+            if camera is None:
+                raise ValueError("validation camera is missing")
+            camera.onboarding_state = "online" if success else "invalid"
+            status = session.get(CameraStatus, camera.id)
+            if status is None:
+                status = CameraStatus(camera_id=camera.id)
+                session.add(status)
+            status.validation_code = result_code
+            status.last_validated_at = attempt.finished_at
+            status.consecutive_failures = 0 if success else status.consecutive_failures + 1
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="camera.validation.result",
+                target_type="camera",
+                target_id=camera.camera_key,
+                result=attempt.status,
+                details={"result_code": result_code},
+            )
+            return attempt
+
+    def queue_discovery(
+        self, trigger: str, actor: str, request_id: str
+    ) -> DiscoveryRun:
+        with self.sessions.begin() as session:
+            site = self.current_site(session)
+            run = DiscoveryRun(site_id=site.id, trigger=trigger)
+            session.add(run)
+            session.flush()
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="discovery.queue",
+                target_type="discovery_run",
+                target_id=str(run.id),
+            )
+            return run
+
+    def register_deployment(
+        self,
+        bundle: dict[str, Any],
+        namespace: str,
+        registry: str,
+        actor: str,
+        request_id: str,
+    ) -> SolutionDeployment:
+        candidate = copy.deepcopy(bundle)
+        apply_registry(candidate, registry)
+        validate_tvt_bundle(candidate)
+        candidate = canonical_bundle(candidate)
+        with self.sessions.begin() as session:
+            site = self.current_site(session)
+            key = candidate["deployment_id"]
+            deployment = session.scalar(
+                select(SolutionDeployment).where(
+                    SolutionDeployment.site_id == site.id,
+                    SolutionDeployment.deployment_key == key,
+                )
+            )
+            if deployment is None:
+                deployment = SolutionDeployment(
+                    site_id=site.id,
+                    deployment_key=key,
+                    solution_id=candidate["solution"]["solution_id"],
+                    namespace=namespace,
+                    registry=registry,
+                )
+                session.add(deployment)
+                session.flush()
+            else:
+                if deployment.solution_id != candidate["solution"]["solution_id"]:
+                    raise ValueError(
+                        "a deployment ID cannot be reused for another solution"
+                    )
+                if (
+                    deployment.namespace != namespace
+                    and session.get(DeploymentSyncState, deployment.id) is not None
+                ):
+                    raise ValueError(
+                        "deployment namespace cannot change after assignments are committed"
+                    )
+                deployment.namespace = namespace
+                deployment.registry = registry
+            self._store_bundle_revision(session, deployment, candidate, "register", actor)
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="deployment.register",
+                target_type="deployment",
+                target_id=key,
+                details={"bundle_sha256": bundle_sha256(candidate)},
+            )
+            return deployment
+
+    @staticmethod
+    def _store_bundle_revision(
+        session: Session,
+        deployment: SolutionDeployment,
+        bundle: dict[str, Any],
+        action: str,
+        actor: str,
+    ) -> SolutionBundleRevision:
+        digest = bundle_sha256(bundle)
+        existing = session.scalar(
+            select(SolutionBundleRevision).where(
+                SolutionBundleRevision.deployment_id == deployment.id,
+                SolutionBundleRevision.bundle_sha256 == digest,
+            )
+        )
+        if existing is not None:
+            return existing
+        value = SolutionBundleRevision(
+            deployment_id=deployment.id,
+            bundle_sha256=digest,
+            canonical_bundle=canonical_bundle(bundle),
+            action=action,
+            actor=actor,
+        )
+        session.add(value)
+        session.flush()
+        return value
+
+    def commit_assignments(
+        self,
+        deployment_key: str,
+        assignments: list[dict[str, Any]],
+        actor: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> DeploymentAssignmentSet:
+        with self.sessions.begin() as session:
+            deployment = self._deployment_for_update(session, deployment_key)
+            existing = session.scalar(
+                select(DeploymentAssignmentSet).where(
+                    DeploymentAssignmentSet.deployment_id == deployment.id,
+                    DeploymentAssignmentSet.idempotency_key == idempotency_key,
+                )
+            )
+            if existing is not None:
+                return existing
+            template = session.scalar(
+                select(SolutionBundleRevision)
+                .where(SolutionBundleRevision.deployment_id == deployment.id)
+                .order_by(SolutionBundleRevision.created_at.desc())
+                .limit(1)
+            )
+            if template is None:
+                raise ValueError("deployment has no registered bundle")
+            site = session.get(Site, deployment.site_id)
+            if site is None:
+                raise ValueError("deployment site is missing")
+            resolved: list[tuple[Camera, CameraStreamProfile, CameraCredentialVersion | None, dict[str, Any]]] = []
+            bundle_cameras: list[BundleCamera] = []
+            for position, item in enumerate(assignments):
+                camera = self._camera(session, item["camera_id"])
+                if camera.site_id != site.id or not camera.enabled or camera.onboarding_state != "online":
+                    raise ValueError(f"camera {camera.camera_key!r} is not enabled and online")
+                profile = session.scalar(
+                    select(CameraStreamProfile).where(
+                        CameraStreamProfile.camera_id == camera.id,
+                        CameraStreamProfile.selected.is_(True),
+                    )
+                )
+                if profile is None:
+                    raise ValueError(f"camera {camera.camera_key!r} has no selected profile")
+                credential = self._active_credential(session, camera.id)
+                apps = tuple(item["apps"])
+                fps = int(item.get("fps", 8))
+                bundle_cameras.append(BundleCamera(camera.camera_key, fps, apps))
+                resolved.append((camera, profile, credential, {**item, "ordinal": position}))
+            bundle = instantiate_traffic_bundle(
+                template.canonical_bundle, site.edge_id, bundle_cameras
+            )
+            bundle_revision = self._store_bundle_revision(
+                session, deployment, bundle, "assignment_commit", actor
+            )
+            assignment_set = DeploymentAssignmentSet(
+                deployment_id=deployment.id,
+                bundle_revision_id=bundle_revision.id,
+                desired_revision=deployment.next_desired_revision,
+                idempotency_key=idempotency_key,
+                actor=actor,
+            )
+            deployment.next_desired_revision += 1
+            session.add(assignment_set)
+            session.flush()
+            for camera, profile, credential, item in resolved:
+                camera_assignment = CameraDeploymentAssignment(
+                    assignment_set_id=assignment_set.id,
+                    camera_id=camera.id,
+                    stream_profile_id=profile.id,
+                    credential_version_id=credential.id if credential else None,
+                    ordinal=item["ordinal"],
+                    requested_fps=int(item.get("fps", 8)),
+                )
+                session.add(camera_assignment)
+                session.flush()
+                for use_case in item["apps"]:
+                    session.add(
+                        CameraApplicationAssignment(
+                            camera_assignment_id=camera_assignment.id,
+                            bundle_application=item.get("bundle_application", "runtime"),
+                            use_case_key=use_case,
+                        )
+                    )
+            self._set_desired(session, deployment.id, assignment_set.id)
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="deployment.assignments.commit",
+                target_type="deployment",
+                target_id=deployment_key,
+                details={
+                    "desired_revision": assignment_set.desired_revision,
+                    "camera_ids": [item.camera_key for item in bundle_cameras],
+                },
+            )
+            return assignment_set
+
+    @staticmethod
+    def _deployment_for_update(session: Session, deployment_key: str) -> SolutionDeployment:
+        deployment = session.scalar(
+            select(SolutionDeployment)
+            .where(
+                SolutionDeployment.deployment_key == deployment_key,
+                SolutionDeployment.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+        if deployment is None:
+            raise ValueError(f"unknown deployment {deployment_key!r}")
+        return deployment
+
+    @staticmethod
+    def _set_desired(
+        session: Session, deployment_id: uuid.UUID, assignment_set_id: uuid.UUID
+    ) -> None:
+        sync = session.get(DeploymentSyncState, deployment_id)
+        if sync is None:
+            session.add(
+                DeploymentSyncState(
+                    deployment_id=deployment_id,
+                    desired_assignment_set_id=assignment_set_id,
+                    state="pending",
+                )
+            )
+        else:
+            sync.desired_assignment_set_id = assignment_set_id
+            sync.state = "pending"
+            sync.next_attempt_at = None
+            sync.last_error_code = None
+
+    def _requeue_credential_consumers(
+        self,
+        session: Session,
+        camera_id: uuid.UUID,
+        credential_id: uuid.UUID,
+        actor: str,
+        request_id: str,
+    ) -> None:
+        states = session.scalars(select(DeploymentSyncState)).all()
+        for sync in states:
+            source = session.get(DeploymentAssignmentSet, sync.desired_assignment_set_id)
+            if source is None:
+                continue
+            consumes = session.scalar(
+                select(CameraDeploymentAssignment.id).where(
+                    CameraDeploymentAssignment.assignment_set_id == source.id,
+                    CameraDeploymentAssignment.camera_id == camera_id,
+                )
+            )
+            if consumes is None:
+                continue
+            deployment = session.get(SolutionDeployment, sync.deployment_id)
+            if deployment is None:
+                continue
+            self._clone_assignment_set(
+                session,
+                deployment,
+                source,
+                source.bundle_revision_id,
+                actor,
+                f"credential:{request_id}:{deployment.deployment_key}",
+                {camera_id: credential_id},
+            )
+
+    def _clone_assignment_set(
+        self,
+        session: Session,
+        deployment: SolutionDeployment,
+        source: DeploymentAssignmentSet,
+        bundle_revision_id: uuid.UUID,
+        actor: str,
+        idempotency_key: str,
+        credential_overrides: dict[uuid.UUID, uuid.UUID | None] | None = None,
+    ) -> DeploymentAssignmentSet:
+        clone = DeploymentAssignmentSet(
+            deployment_id=deployment.id,
+            bundle_revision_id=bundle_revision_id,
+            desired_revision=deployment.next_desired_revision,
+            idempotency_key=idempotency_key,
+            actor=actor,
+        )
+        deployment.next_desired_revision += 1
+        session.add(clone)
+        session.flush()
+        assignments = session.scalars(
+            select(CameraDeploymentAssignment)
+            .where(CameraDeploymentAssignment.assignment_set_id == source.id)
+            .order_by(CameraDeploymentAssignment.ordinal)
+        ).all()
+        for original in assignments:
+            credential_id = (credential_overrides or {}).get(
+                original.camera_id, original.credential_version_id
+            )
+            copied = CameraDeploymentAssignment(
+                assignment_set_id=clone.id,
+                camera_id=original.camera_id,
+                stream_profile_id=original.stream_profile_id,
+                credential_version_id=credential_id,
+                ordinal=original.ordinal,
+                requested_fps=original.requested_fps,
+            )
+            session.add(copied)
+            session.flush()
+            apps = session.scalars(
+                select(CameraApplicationAssignment).where(
+                    CameraApplicationAssignment.camera_assignment_id == original.id
+                )
+            ).all()
+            for app in apps:
+                session.add(
+                    CameraApplicationAssignment(
+                        camera_assignment_id=copied.id,
+                        bundle_application=app.bundle_application,
+                        use_case_key=app.use_case_key,
+                        configuration=copy.deepcopy(app.configuration),
+                    )
+                )
+        self._set_desired(session, deployment.id, clone.id)
+        return clone
+
+    def set_lifecycle(
+        self,
+        deployment_key: str,
+        desired_state: str,
+        actor: str,
+        request_id: str,
+    ) -> DeploymentAssignmentSet:
+        if desired_state not in {"Running", "Stopped"}:
+            raise ValueError("desired_state must be Running or Stopped")
+        with self.sessions.begin() as session:
+            deployment = self._deployment_for_update(session, deployment_key)
+            sync = session.get(DeploymentSyncState, deployment.id)
+            if sync is None:
+                raise ValueError("deployment has no committed assignments")
+            source = session.get(DeploymentAssignmentSet, sync.desired_assignment_set_id)
+            if source is None:
+                raise ValueError("desired assignment set is missing")
+            current_bundle = session.get(SolutionBundleRevision, source.bundle_revision_id)
+            if current_bundle is None:
+                raise ValueError("desired bundle revision is missing")
+            bundle = copy.deepcopy(current_bundle.canonical_bundle)
+            for application in bundle["applications"]:
+                application.setdefault("lifecycle", {})["desired_state"] = desired_state
+            validate_tvt_bundle(bundle)
+            revision = self._store_bundle_revision(
+                session, deployment, bundle, desired_state.lower(), actor
+            )
+            deployment.lifecycle_intent = desired_state
+            clone = self._clone_assignment_set(
+                session,
+                deployment,
+                source,
+                revision.id,
+                actor,
+                f"lifecycle:{request_id}",
+            )
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action=f"deployment.{desired_state.lower()}",
+                target_type="deployment",
+                target_id=deployment_key,
+                details={"desired_revision": clone.desired_revision},
+            )
+            return clone
+
+    def rollback(
+        self,
+        deployment_key: str,
+        target_bundle_sha256: str,
+        actor: str,
+        request_id: str,
+    ) -> DeploymentAssignmentSet:
+        with self.sessions.begin() as session:
+            deployment = self._deployment_for_update(session, deployment_key)
+            target = session.scalar(
+                select(SolutionBundleRevision).where(
+                    SolutionBundleRevision.deployment_id == deployment.id,
+                    SolutionBundleRevision.bundle_sha256 == target_bundle_sha256,
+                )
+            )
+            if target is None:
+                raise ValueError("unknown target bundle revision")
+            source = session.scalar(
+                select(DeploymentAssignmentSet)
+                .where(DeploymentAssignmentSet.bundle_revision_id == target.id)
+                .order_by(DeploymentAssignmentSet.desired_revision.desc())
+                .limit(1)
+            )
+            if source is None:
+                raise ValueError("target bundle has no assignment snapshot")
+            overrides: dict[uuid.UUID, uuid.UUID | None] = {}
+            assignments = session.scalars(
+                select(CameraDeploymentAssignment).where(
+                    CameraDeploymentAssignment.assignment_set_id == source.id
+                )
+            ).all()
+            for assignment in assignments:
+                camera = session.get(Camera, assignment.camera_id)
+                if camera is None or camera.deleted_at is not None or not camera.enabled:
+                    raise ValueError("rollback camera is unavailable")
+                current = self._active_credential(session, camera.id)
+                if assignment.credential_version_id is not None and current is None:
+                    raise ValueError(
+                        f"camera {camera.camera_key!r} requires replacement credentials"
+                    )
+                overrides[camera.id] = current.id if current else None
+            clone = self._clone_assignment_set(
+                session,
+                deployment,
+                source,
+                target.id,
+                actor,
+                f"rollback:{request_id}",
+                overrides,
+            )
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="deployment.rollback",
+                target_type="deployment",
+                target_id=deployment_key,
+                details={
+                    "target_bundle_sha256": target_bundle_sha256,
+                    "desired_revision": clone.desired_revision,
+                },
+            )
+            return clone
+
+    def list_deployments(self) -> list[dict[str, Any]]:
+        with self.sessions() as session:
+            deployments = session.scalars(
+                select(SolutionDeployment)
+                .where(SolutionDeployment.deleted_at.is_(None))
+                .order_by(SolutionDeployment.deployment_key)
+            ).all()
+            result = []
+            for deployment in deployments:
+                sync = session.get(DeploymentSyncState, deployment.id)
+                desired = (
+                    session.get(DeploymentAssignmentSet, sync.desired_assignment_set_id)
+                    if sync
+                    else None
+                )
+                applied = (
+                    session.get(DeploymentAssignmentSet, sync.applied_assignment_set_id)
+                    if sync and sync.applied_assignment_set_id
+                    else None
+                )
+                result.append(
+                    {
+                        "deployment_id": deployment.deployment_key,
+                        "solution_id": deployment.solution_id,
+                        "namespace": deployment.namespace,
+                        "lifecycle_intent": deployment.lifecycle_intent,
+                        "sync_state": sync.state if sync else "unconfigured",
+                        "desired_revision": desired.desired_revision if desired else None,
+                        "applied_revision": applied.desired_revision if applied else None,
+                        "last_error_code": sync.last_error_code if sync else None,
+                    }
+                )
+            return result
+
+    def delete_camera(
+        self, camera_key: str, actor: str, request_id: str
+    ) -> None:
+        with self.sessions.begin() as session:
+            camera = self._camera(session, camera_key)
+            live_sets = select(
+                DeploymentSyncState.desired_assignment_set_id
+            ).union(
+                select(DeploymentSyncState.applied_assignment_set_id).where(
+                    DeploymentSyncState.applied_assignment_set_id.is_not(None)
+                )
+            )
+            in_use = session.scalar(
+                select(CameraDeploymentAssignment.id).where(
+                    CameraDeploymentAssignment.camera_id == camera.id,
+                    CameraDeploymentAssignment.assignment_set_id.in_(live_sets),
+                )
+            )
+            if in_use is not None:
+                raise ValueError(
+                    "camera remains in a desired or applied deployment revision"
+                )
+            credentials = session.scalars(
+                select(CameraCredentialVersion).where(
+                    CameraCredentialVersion.camera_id == camera.id,
+                    CameraCredentialVersion.destroyed_at.is_(None),
+                )
+            ).all()
+            now = utc_now()
+            for credential in credentials:
+                credential.ciphertext = None
+                credential.nonce = None
+                credential.state = "revoked"
+                credential.destroyed_at = now
+            camera.enabled = False
+            camera.onboarding_state = "deleted"
+            camera.deleted_at = now
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="camera.delete",
+                target_type="camera",
+                target_id=camera_key,
+            )
+
+    def clear_credentials(
+        self, camera_key: str, actor: str, request_id: str
+    ) -> None:
+        with self.sessions.begin() as session:
+            camera = self._camera(session, camera_key)
+            live_sets = select(
+                DeploymentSyncState.desired_assignment_set_id
+            ).union(
+                select(DeploymentSyncState.applied_assignment_set_id).where(
+                    DeploymentSyncState.applied_assignment_set_id.is_not(None)
+                )
+            )
+            in_use = session.scalar(
+                select(CameraDeploymentAssignment.id).where(
+                    CameraDeploymentAssignment.camera_id == camera.id,
+                    CameraDeploymentAssignment.assignment_set_id.in_(live_sets),
+                )
+            )
+            if in_use is not None:
+                raise ValueError(
+                    "credentials remain referenced by desired or applied deployment state"
+                )
+            credentials = session.scalars(
+                select(CameraCredentialVersion).where(
+                    CameraCredentialVersion.camera_id == camera.id,
+                    CameraCredentialVersion.destroyed_at.is_(None),
+                )
+            ).all()
+            now = utc_now()
+            for credential in credentials:
+                credential.ciphertext = None
+                credential.nonce = None
+                credential.state = "revoked"
+                credential.destroyed_at = now
+            camera.onboarding_state = "needs_credentials"
+            camera.enabled = False
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="camera.credentials.destroy",
+                target_type="camera",
+                target_id=camera_key,
+            )
+
+    def apply_retention(self, now=None) -> dict[str, int]:
+        """Apply bounded history retention without deleting referenced state."""
+
+        now = now or utc_now()
+        cutoffs = {
+            "observations": now - timedelta(days=30),
+            "validation": now - timedelta(days=90),
+            "sync": now - timedelta(days=180),
+            "audit": now - timedelta(days=365),
+            "bundles": now - timedelta(days=365),
+        }
+        counts: dict[str, int] = {}
+        with self.sessions.begin() as session:
+            counts["camera_observations"] = session.query(CameraObservation).filter(
+                CameraObservation.observed_at < cutoffs["observations"]
+            ).delete(synchronize_session=False)
+            counts["discovery_runs"] = session.query(DiscoveryRun).filter(
+                DiscoveryRun.created_at < cutoffs["observations"],
+                ~DiscoveryRun.id.in_(select(CameraObservation.run_id)),
+            ).delete(synchronize_session=False)
+            counts["validation_attempts"] = session.query(
+                CameraValidationAttempt
+            ).filter(
+                CameraValidationAttempt.created_at < cutoffs["validation"]
+            ).delete(synchronize_session=False)
+            old_attempt_ids = select(DeploymentSyncAttempt.id).where(
+                DeploymentSyncAttempt.started_at < cutoffs["sync"]
+            )
+            counts["kubernetes_resource_refs"] = session.query(
+                KubernetesResourceRef
+            ).filter(
+                KubernetesResourceRef.sync_attempt_id.in_(old_attempt_ids)
+            ).delete(synchronize_session=False)
+            counts["sync_attempts"] = session.query(DeploymentSyncAttempt).filter(
+                DeploymentSyncAttempt.started_at < cutoffs["sync"]
+            ).delete(synchronize_session=False)
+            counts["audit_events"] = session.query(AuditEvent).filter(
+                AuditEvent.created_at < cutoffs["audit"]
+            ).delete(synchronize_session=False)
+            counts["operations"] = session.query(ManagementOperation).filter(
+                ManagementOperation.created_at < cutoffs["audit"],
+                ~ManagementOperation.id.in_(select(DeploymentSyncAttempt.operation_id)),
+                ~ManagementOperation.id.in_(
+                    select(AuditEvent.operation_id).where(AuditEvent.operation_id.is_not(None))
+                ),
+            ).delete(synchronize_session=False)
+            credentials = session.scalars(
+                select(CameraCredentialVersion).where(
+                    CameraCredentialVersion.state == "superseded",
+                    CameraCredentialVersion.destroyed_at.is_(None),
+                    CameraCredentialVersion.purge_after <= now,
+                )
+            ).all()
+            live_assignment_set_ids: set[uuid.UUID] = set()
+            for sync_state in session.scalars(select(DeploymentSyncState)).all():
+                live_assignment_set_ids.add(sync_state.desired_assignment_set_id)
+                if sync_state.applied_assignment_set_id is not None:
+                    live_assignment_set_ids.add(sync_state.applied_assignment_set_id)
+            destroyed_credentials = 0
+            for credential in credentials:
+                still_live = session.scalar(
+                    select(CameraDeploymentAssignment.id).where(
+                        CameraDeploymentAssignment.credential_version_id
+                        == credential.id,
+                        CameraDeploymentAssignment.assignment_set_id.in_(
+                            live_assignment_set_ids
+                        ),
+                    )
+                )
+                superseded_at = credential.superseded_at
+                # SQLite drops timezone metadata even for timezone-aware
+                # columns; PostgreSQL preserves it. Keep the repository layer
+                # portable for unit tests and the one-shot migration tooling.
+                if (
+                    superseded_at is not None
+                    and superseded_at.tzinfo is None
+                    and now.tzinfo is not None
+                ):
+                    superseded_at = superseded_at.replace(tzinfo=now.tzinfo)
+                hard_expired = (
+                    superseded_at is not None
+                    and superseded_at <= now - timedelta(days=90)
+                )
+                if still_live is not None and not hard_expired:
+                    continue
+                credential.ciphertext = None
+                credential.nonce = None
+                credential.state = "revoked"
+                credential.destroyed_at = now
+                destroyed_credentials += 1
+            counts["credential_material_destroyed"] = destroyed_credentials
+            protected_bundle_ids = set(
+                session.scalars(select(DeploymentAssignmentSet.bundle_revision_id)).all()
+            )
+            deleted_bundles = 0
+            deployments = session.scalars(select(SolutionDeployment)).all()
+            for deployment in deployments:
+                revisions = session.scalars(
+                    select(SolutionBundleRevision)
+                    .where(SolutionBundleRevision.deployment_id == deployment.id)
+                    .order_by(SolutionBundleRevision.created_at.desc())
+                ).all()
+                for value in revisions[20:]:
+                    if (
+                        value.created_at < cutoffs["bundles"]
+                        and value.id not in protected_bundle_ids
+                    ):
+                        session.delete(value)
+                        deleted_bundles += 1
+            counts["bundle_revisions"] = deleted_bundles
+        return counts
