@@ -670,7 +670,290 @@ Initial Grafana dashboards:
 Dashboard variables must use bounded dimensions. Do not build variables from
 request IDs, frame IDs, people, or plates.
 
-## 15. Deferred remote access
+## 15. Central monitoring communication and edge enrollment
+
+This section defines the communication boundary used when multiple TVT edge
+deployments report to a central monitoring plane. It extends the single-edge
+topology above without exposing an edge-local Prometheus, Loki, Kubernetes API,
+database, management API, or shell endpoint to the public WAN.
+
+Communication is outbound-only from the edge. The central monitoring plane does
+not scan customer networks or initiate a new inbound connection to an edge:
+
+```mermaid
+flowchart LR
+    subgraph Edge[TVT edge deployment]
+        Apps[Applications and exporters]
+        Prom[Edge Prometheus]
+        Alloy[Grafana Alloy]
+        Heartbeat[Host heartbeat agent]
+        Events[Host event outbox and sender]
+    end
+
+    subgraph Public[Public TLS boundary]
+        Gateway[Central ingestion gateway<br/>HTTPS 443]
+    end
+
+    subgraph Central[Private central monitoring plane]
+        Metrics[Central metrics storage and rules]
+        LokiCentral[Central Loki]
+        Registry[Edge registry]
+        EventReceiver[Edge-event receiver]
+        CentralAM[Central Alertmanager]
+        CentralDispatcher[Central alert dispatcher]
+        CentralGrafana[Central Grafana]
+    end
+
+    Apps -->|local scrape| Prom
+    Prom -->|Prometheus Remote Write over mTLS| Gateway
+    Alloy -->|Loki write over mTLS| Gateway
+    Heartbeat -->|authenticated heartbeat over mTLS| Gateway
+    Events -->|low-frequency event webhook over mTLS| Gateway
+    Gateway --> Metrics
+    Gateway --> LokiCentral
+    Gateway --> Registry
+    Gateway --> EventReceiver
+    Metrics --> CentralAM
+    EventReceiver --> CentralAM
+    CentralAM --> CentralDispatcher
+    Metrics --> CentralGrafana
+    LokiCentral --> CentralGrafana
+```
+
+The public boundary is a hardened ingestion gateway, not the monitoring
+backends themselves. Only the documented enrollment, certificate-renewal,
+metrics-write, logs-write, heartbeat, and edge-event routes are reachable on
+TCP 443. Grafana may have a separately authenticated operator endpoint. All
+query APIs, Alertmanager, the dispatcher, databases, and Kubernetes control
+planes remain private.
+
+### 15.1 Central inventory and enrollment
+
+The central plane discovers an edge through explicit registration and
+authenticated heartbeats, not network scanning. Before installation, an
+administrator creates a pending inventory record containing at least:
+
+```text
+customer_id
+site_id
+edge_id
+expected hardware serial or approved device identity
+state = pending-enrollment
+```
+
+The central plane creates a single-use enrollment credential bound to that
+record. It expires after 30 minutes, can enroll only the named edge, grants no
+telemetry-query or control permission, and is delivered through a protected
+installation channel. It must not be placed in shell arguments, tracked files,
+logs, metrics, or bundle YAML.
+
+At first installation, the edge:
+
+1. Generates its private device key locally, using a TPM-backed non-exportable
+   key where available or a root-readable `0600` file otherwise.
+2. Creates a certificate-signing request and connects to the enrollment route
+   using server-authenticated TLS and the one-time credential.
+3. Submits the CSR, claimed `edge_id`, hardware identity, enrollment-agent
+   version, and a bounded nonce. The central service takes customer/site/edge
+   identity from the pending record rather than trusting CSR subject fields.
+4. Proves possession of the CSR private key. The central service validates the
+   unused credential, expiry, expected device, request size, and rate limit.
+5. Receives a device certificate, certificate chain, trust bundle, assigned
+   identity, central endpoint configuration, and renewal policy.
+6. Verifies and atomically installs the response, performs an authenticated
+   activation call, and destroys the one-time credential.
+7. Obtains the separately scoped metrics, logs, heartbeat, and event-sender
+   credentials used by the runtime services.
+
+Enrollment is idempotent for the same enrollment record and public-key
+fingerprint during a short recovery window. If the response is lost after the
+server commits it, an identical retry returns the same issued identity rather
+than consuming a second device identity.
+
+Unknown devices and devices presenting an identity that conflicts with the
+pending record are rejected. A device may be revoked centrally without access
+to the physical edge.
+
+### 15.2 Certificate and authorization model
+
+Every connection verifies the central server certificate. Fleet deployments
+use mutual TLS so the gateway also verifies a unique edge client identity. A
+managed backend that cannot accept client certificates may use a unique,
+revocable, write-only token over server-verified TLS, but credentials must
+still be provisioned per edge rather than shared across the fleet.
+
+The device identity is used only to activate the edge and obtain or renew
+short-lived service credentials. Metrics, logs, heartbeat, events, and any
+future control channel use distinct authorization scopes. A suitable identity
+shape is:
+
+```text
+spiffe://tvt.example/customer/<customer>/site/<site>/edge/<edge>/<role>
+```
+
+The ingestion gateway derives authoritative `customer_id`, `site_id`,
+`edge_id`, tenant, and allowed route from the authenticated identity. It
+rejects conflicting identity labels and does not allow an edge to select
+another tenant with a request header. Product services may supply only their
+bounded service, camera, use-case, error-code, and version dimensions.
+
+Telemetry certificates are short-lived and rotated automatically before one
+third of their lifetime remains. The identity service writes replacements
+atomically and causes Prometheus, Alloy, the heartbeat agent, and the event
+sender to reload them. Revocation, expiry, renewal success, and renewal failure
+are auditable central fleet events.
+
+### 15.3 Metrics and log channels
+
+The edge Prometheus continues to discover and scrape individual local Pod and
+host targets. It adds stable external labels and sends samples to the central
+metrics receiver with Prometheus Remote Write over mTLS:
+
+```text
+application /metrics, exporters and host metrics
+  -> edge Prometheus scrape
+  -> local Prometheus write-ahead log
+  -> outbound HTTPS/mTLS Remote Write
+  -> central metrics ingestion and rule evaluation
+```
+
+The local write-ahead log provides bounded retry during a temporary central or
+WAN outage. Queue age, retry count, rejected samples, and discarded samples are
+themselves observable. Backfilled samples retain their original timestamps.
+
+Alloy reads local CRI files, journald, selected Kubernetes Events, and its
+persisted positions as described in section 11. It batches and sends entries to
+the central Loki write route over mTLS. Local CRI and journal retention provide
+the bounded outage buffer; if an outage exceeds that retention, old logs may be
+lost and the loss must be reported after reconnection.
+
+Remote Write and Loki ingestion are the only paths for routine metrics and
+logs. A generic JSON webhook must not replace either protocol.
+
+### 15.4 Heartbeat and edge discovery
+
+A host `systemd` service outside K3s sends a small authenticated heartbeat every
+30 seconds. It reports only safe, bounded state such as edge software version,
+K3s readiness, telemetry-queue health, and certificate-expiry state. The
+central receipt time is authoritative; device time is retained only as
+diagnostic context.
+
+The central registry uses heartbeats to maintain `pending`, `online`,
+`suspected_offline`, `offline`, `maintenance`, `retired`, and `revoked` states.
+Initial thresholds are:
+
+- `online`: a valid heartbeat arrived within 90 seconds;
+- `suspected_offline`: no heartbeat for 90 seconds; and
+- `offline`: no heartbeat for five minutes outside an approved maintenance
+  window.
+
+An offline alert states that the edge is unreachable. From the central plane
+alone, absence cannot distinguish host, power, site-WAN, DNS, firewall, or
+network failure. The heartbeat is independent of K3s and the edge Prometheus so
+the central plane can distinguish telemetry-pipeline degradation from the
+disappearance of the entire host when the host agent remains available.
+
+### 15.5 Where the edge-event webhook fits
+
+The edge-event webhook is a low-frequency fallback for host state transitions
+that cannot reliably use the normal metric path. Examples include:
+
+- local Prometheus or Alloy failure detected by an independent host check;
+- sustained K3s API failure or a bounded watchdog restart action;
+- telemetry credential renewal failure;
+- persistent local telemetry-queue exhaustion; and
+- a fixed host-infrastructure condition whose metric pipeline is unavailable.
+
+Routine camera, media, inference, HTTP, resource, and workload conditions use
+bounded metrics and central rules. Logs remain diagnostic evidence. Per-frame,
+per-request, or other high-volume events never use the webhook.
+
+The runtime responsibility is deliberately split:
+
+| Responsibility | Edge runtime | Central monitoring plane |
+|---|---:|---:|
+| Detect a local host condition | Yes | No |
+| Assign an allowlisted event code | Yes | No |
+| Redact sensitive fields | Yes | Validate again |
+| Create event ID and occurrence time | Yes | Validate |
+| Persist a bounded delivery outbox | Yes | No |
+| Send and retry the mTLS webhook | Yes | No |
+| Authenticate customer/site/edge identity | No | Yes |
+| Validate schema and replay window | No | Yes |
+| Deduplicate by event ID | No | Yes |
+| Correlate with metrics, logs and heartbeat | No | Yes |
+| Decide whether and when an alert fires | No | Yes |
+| Own acknowledgement and resolution state | No | Yes |
+| Select recipients and render/send email | No | Yes |
+
+The edge sender posts a versioned, allowlisted event schema to the central
+edge-event receiver over mTLS. The event includes a UUID event ID, stable event
+code, occurrence timestamp, safe bounded attributes, and local software
+version. It contains no recipient, template, command, raw log body, stack trace,
+credential, RTSP URL, face, plate, or person data.
+
+The sender persists an event before its first attempt, retries transient
+failures with exponential backoff and jitter, and marks it delivered only after
+the central receiver has durably committed it. Delivery is at-least-once. The
+central receiver therefore authenticates the edge, validates size/schema/time,
+and deduplicates the event ID before returning success. Permanent validation
+failure is retained locally as a bounded diagnostic record rather than retried
+forever.
+
+The central receiver converts accepted events into the same normalized alert
+pipeline used by centrally evaluated metric alerts. Central Alertmanager and
+the central dispatcher own inhibition, maintenance windows, acknowledgement,
+reminders, recovery eligibility, delivery history, and SMTP. The edge never
+requests a recipient or asks the central plane to send a particular email.
+
+This fleet webhook is distinct from the local Alertmanager-to-host-dispatcher
+webhook in section 10. In fleet mode, notification ownership must be configured
+once so the local and central paths do not send duplicate email for the same
+occurrence. The recommended fleet policy makes the central alert instance and
+notification outbox canonical; the local path supplies on-site state and a
+bounded forwarding fallback.
+
+### 15.6 Boot, reconnect, and outage behavior
+
+There is no reusable one-time TLS handshake. Each runtime service performs a
+normal TLS/mTLS handshake whenever it opens or reopens its HTTPS connection.
+Host startup ordering is:
+
+```text
+network-online
+  -> edge identity and certificate service
+  -> Prometheus, Alloy, heartbeat agent and event sender
+  -> optional, separately authorized control-plane agent
+```
+
+If central monitoring is unavailable at boot, local inference, Kubernetes
+reconciliation, host recovery, and the local UI continue. Each sender retries
+with bounded exponential backoff and jitter. Metrics remain in the Remote Write
+WAL, logs remain in locally retained CRI/journal sources, and webhook events
+remain in their bounded outbox. When connectivity returns, retained telemetry
+is sent with original timestamps and the central plane records the outage and
+any buffer loss.
+
+The central plane monitors stale heartbeats independently. This is the only
+path in this design that detects complete edge disappearance while the edge is
+unable to report its own failure.
+
+### 15.7 Central-to-edge control boundary
+
+Monitoring requires no central-initiated connection to an edge. The central
+Grafana and alerting services query centrally stored telemetry. No public HTTP
+listener is added to the edge agent.
+
+If a future control plane must deliver desired state, use a separate protocol
+and credentials. The edge either polls a central desired-state API or opens a
+long-lived outbound mTLS WebSocket, gRPC, or message-broker connection over
+which the central plane can respond. Commands must never travel in Remote
+Write, Loki ingestion, heartbeat responses, or monitoring-event webhook
+responses. A control channel requires a strict operation allowlist, signed and
+versioned desired state, expiry, replay protection, idempotency, result
+persistence, and complete audit.
+
+## 16. Deferred remote access
 
 Off-site remote access is not installed, configured, or accepted in V1. The
 management UI is available only from the on-site management network. An on-site
@@ -701,7 +984,7 @@ networking, or all Pods are unavailable, without exposing SSH directly to the
 public internet, and would map an authorized tailnet identity to an existing
 non-root Linux account.
 
-### 15.1 Why Tailscale SSH is the candidate
+### 16.1 Why Tailscale SSH is the candidate
 
 Tailscale SSH centralizes network admission and SSH authorization in the
 tailnet policy. Engineers authenticate through the approved organization
@@ -722,7 +1005,7 @@ purpose, access, retention, and deletion behavior because terminal output can
 contain camera credentials, faces, number plates, tokens, or other sensitive
 information.
 
-### 15.2 Tailscale SSH vs OpenSSH
+### 16.2 Tailscale SSH vs OpenSSH
 
 Tailscale plus normal OpenSSH would require two identity and credential
 lifecycles: the organization identity used to enter the tailnet and separate
@@ -733,7 +1016,7 @@ still evaluating separate tailnet network and SSH authorization rules. The
 single-identity model is simpler for this deployment; the Linux account and
 `sudo` policy remain independent host-level controls.
 
-### 15.3 Future host and tailnet controls
+### 16.3 Future host and tailnet controls
 
 A future remote-access configuration would have to:
 
@@ -774,7 +1057,7 @@ edge-management API would not be made generally reachable through the tailnet.
 Direct inspection of a local administrative endpoint would use an explicitly
 authorized, incident-scoped Tailscale SSH local port forward.
 
-### 15.4 Availability boundaries
+### 16.4 Availability boundaries
 
 Tailscale remote access depends on the deployed site having a functioning WAN
 path. If that internet path fails:
@@ -791,7 +1074,7 @@ stopped `tailscaled` process, or broken host networking. The external heartbeat
 must report loss of the server independently; hardware out-of-band management
 is a future deployment choice rather than part of this software tunnel.
 
-### 15.5 Support workflow
+### 16.5 Support workflow
 
 For a future remote incident, the engineer would:
 
@@ -809,7 +1092,7 @@ The support runbook must include `tailscale status`, `tailscale ping`, and
 `tailscale netcheck` so an engineer can distinguish direct, relayed, policy,
 DNS, and site-WAN failures from a Tailscale SSH authorization failure.
 
-## 16. Failure boundaries
+## 17. Failure boundaries
 
 | Failure | Observable by | Result |
 |---|---|---|
@@ -823,13 +1106,13 @@ DNS, and site-WAN failures from a Tailscale SSH authorization failure.
 | Alloy fails | Kubernetes/Prometheus | Logs remain in CRI/journal subject to local retention; forwarding pauses |
 | Loki fails | Kubernetes/Prometheus | Log queries/ingestion fail; metrics and alerts continue |
 | K3s API/control plane fails | Host edge-management service | Host UI records cluster outage independently |
-| Entire server fails | Nothing on the server | All local monitoring stops; external heartbeat is future work |
+| Entire server fails | Central heartbeat monitor | All local monitoring stops; the central plane raises an edge-unreachable alert after the missing-heartbeat threshold |
 
 An in-cluster Prometheus cannot be the sole detector of total K3s failure. The
 host edge-management service retains its independent systemd and API checks as
 defined in `HLD.md`.
 
-## 17. Retention and resource controls
+## 18. Retention and resource controls
 
 Monitoring runs on the same server as inference and must not exhaust resources
 needed by CV workloads.
@@ -872,7 +1155,7 @@ non-durable CV/business stub data are excluded. The UPS must signal the host OS
 and provide enough runtime for an orderly PostgreSQL checkpoint, monitoring
 shutdown, and filesystem sync.
 
-## 18. Verification and acceptance criteria
+## 19. Verification and acceptance criteria
 
 The monitoring implementation is accepted when it demonstrates that:
 
@@ -906,11 +1189,26 @@ The monitoring implementation is accepted when it demonstrates that:
     email.
 18. Restarting Alloy resumes from its persisted positions without replaying all
     locally retained logs, and position-loss behavior is documented and tested.
-19. The public WAN cannot reach the management UI, monitoring endpoints,
-    Kubernetes API, database, or a remote shell; the approved on-site
-    management network can reach only its documented endpoints.
+19. The public WAN cannot reach any edge-local management UI, Prometheus, Loki,
+    monitoring query endpoint, Kubernetes API, database, or remote shell. It
+    can reach only the separately hosted central ingestion gateway's documented
+    write/enrollment routes and any separately authenticated central Grafana
+    endpoint.
+20. A pending edge can enroll once, cannot reuse its activation credential, and
+    cannot claim another customer, site, edge, tenant, or authorization role.
+21. Prometheus Remote Write, Alloy log writes, heartbeat, and the edge-event
+    webhook mutually authenticate with separately scoped edge credentials.
+22. A complete edge shutdown produces a central missing-heartbeat alert after
+    the configured threshold without requiring any process on that edge.
+23. A WAN interruption retains telemetry within the configured local bounds,
+    reconnects with backoff, and reports buffer loss if the outage exceeds
+    those bounds.
+24. Duplicate edge-event webhook delivery creates one canonical central event
+    and no duplicate notification job.
+25. A compromised metrics or logs credential cannot query telemetry, submit as
+    another edge, invoke control actions, select a recipient, or render email.
 
-## 19. References
+## 20. References
 
 - `HLD.md` for system boundaries, host monitoring, recovery, and camera flow.
 - `APEXFABRIC_ARCHITECTURE.md` for the underlying K3s, node reporting,
@@ -919,6 +1217,8 @@ The monitoring implementation is accepted when it demonstrates that:
   metric instrumentation.
 - [`prometheus_client` multiprocess mode](https://prometheus.github.io/client_python/multiprocess/)
   for worker aggregation and limitations.
+- [Prometheus Remote Write](https://prometheus.io/docs/specs/prw/remote_write_spec/)
+  for the metrics transport protocol between an edge and the central receiver.
 - [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack)
   for the Prometheus Operator, Prometheus, Alertmanager, Grafana, and exporters.
 - [Prometheus alerting practices](https://prometheus.io/docs/practices/alerting/)
@@ -931,6 +1231,10 @@ The monitoring implementation is accepted when it demonstrates that:
   for Helm-based collector configuration.
 - [Grafana Alloy Loki components](https://grafana.com/docs/alloy/latest/reference/components/loki/)
   for file, journal, Kubernetes Event, processing, and write components.
+- [Grafana Loki authentication](https://grafana.com/docs/loki/latest/operations/authentication/)
+  for TLS termination and verified client-certificate configuration.
+- [SPIFFE workload identity](https://spiffe.io/docs/latest/spiffe/concepts/)
+  for short-lived, automatically rotated workload identities and trust bundles.
 - [Tailscale connection types](https://tailscale.com/docs/reference/connection-types)
   for direct, peer-relay, and DERP-relay connectivity behavior.
 - [Tailscale firewall guidance](https://tailscale.com/docs/reference/faq/firewall-ports)
