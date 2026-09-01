@@ -1,0 +1,67 @@
+api_version: apexfabric.com/v1alpha1
+kind: DeploymentBundle
+deployment_id: traffic-pilot-people-285h
+solution:
+  solution_id: traffic-pilot-people
+  version: 1.0.0
+applications:
+  - name: pipeline
+    image:
+      repository: __APEXFABRIC_REGISTRY__/apexfabric/traffic-pilot
+      tag: "1.0"
+      pull_policy: IfNotPresent
+    replicas: 1
+    lifecycle:
+      desired_state: Running
+      termination_grace_period_seconds: 60
+    resources:
+      # Initial requests only. Qualify these values under the intended camera
+      # count and resolution before treating them as production limits.
+      cpu: {request: "2000m", limit: "8000m"}
+      memory: {request: "2Gi", limit: "8Gi"}
+      accelerators: {decoder: 0, metis: 1}
+    cameras: []
+    camera_contract:
+      configuration_owner: application-api
+      transport: rtsp
+      required_for_readiness: false
+      scheduling_mode: runtime-connectivity
+    configuration:
+      persistent_data_path: /data
+      persistent_data_size: 2Gi
+      expected_voyager_runtime: 1.6.1
+      model_compiler_runtime: 1.6.0
+    placement:
+      runtime_profile: intel-285h-metis
+      node_class: cv
+      architecture: amd64
+      requires_qualified_node: true
+      requires_camera_labels: false
+      characteristics:
+        decoder: vaapi
+        metis: "true"
+        hardware-profile: intel-285h
+    persistent_volumes:
+      - name: data
+        mount_path: /data
+        size: 2Gi
+        storage_class: local-path
+    health:
+      startup: {path: /readyz, port: api, period_seconds: 5, timeout_seconds: 4, failure_threshold: 24}
+      readiness: {path: /readyz, port: api, period_seconds: 10, timeout_seconds: 4, failure_threshold: 3}
+      liveness: {path: /healthz, port: api, initial_delay_seconds: 30, period_seconds: 15, timeout_seconds: 4, failure_threshold: 4}
+    ports:
+      - {name: ui, container_port: 5173, protocol: TCP}
+      - {name: api, container_port: 8077, protocol: TCP}
+    telemetry:
+      metrics: {path: /api/metrics, port: api, format: json}
+      events: {path: /api/events/ws, port: api, protocol: websocket}
+    environment:
+      PEOPLE_CONFIDENCE: "0.45"
+      PEOPLE_MIN_TRACK_HITS: "3"
+      LIVE_FPS: "10"
+      CAMERA_STALE_S: "30"
+configuration:
+  workload_profile: intel-285h-metis
+  source_bundle: traffic-pilot-people-285h
+  camera_configuration_owner: application-api

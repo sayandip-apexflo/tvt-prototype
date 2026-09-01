@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apexfabric.local/schemas/analytics-event-1.0.0.json",
+  "title": "ApexFabric CV Analytics Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "deployment_id", "solution_id", "application", "node_id", "pod_id", "camera_id", "timestamp", "event_type", "payload"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "deployment_id": {"type": "string", "minLength": 1},
+    "solution_id": {"type": "string", "minLength": 1},
+    "application": {"type": "string", "minLength": 1},
+    "node_id": {"type": "string", "minLength": 1},
+    "pod_id": {"type": "string", "minLength": 1},
+    "camera_id": {"type": "string", "minLength": 1},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "event_type": {"enum": ["vehicle_detected", "vehicle_entered_zone", "vehicle_exited_zone", "vehicle_count", "occupancy", "alert"]},
+    "payload": {"type": "object"}
+  }
+}

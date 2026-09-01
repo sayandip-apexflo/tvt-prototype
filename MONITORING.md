@@ -94,7 +94,6 @@ flowchart TB
 
     subgraph K3s[Single-node K3s cluster]
         subgraph Apps[Product workloads]
-            Gateway[Stream gateway Pods]
             CV[CV use-case Pods]
             Reporting[Reporting/API Pods]
         end
@@ -113,7 +112,6 @@ flowchart TB
     end
 
     Edge -->|/metrics| Prom
-    Gateway -->|/metrics| Prom
     CV -->|/metrics| Prom
     Reporting -->|/metrics| Prom
     KSM --> Prom
@@ -127,7 +125,6 @@ flowchart TB
     DB --> UI
     Prom --> Grafana
 
-    Gateway -->|JSON stdout| Alloy
     CV -->|JSON stdout| Alloy
     Reporting -->|JSON stdout| Alloy
     Edge -->|JSON stdout captured by systemd| Journal
@@ -213,16 +210,15 @@ edge_camera_validation_duration_seconds{camera_id}
 edge_camera_sync_pending{camera_id}
 ```
 
-Stream gateway:
+Direct CV camera-source sessions:
 
 ```text
-stream_up{camera_id}
-stream_last_media_timestamp_seconds{camera_id}
-stream_upstream_bitrate_bytes_per_second{camera_id}
-stream_reconnects_total{camera_id,reason}
-stream_packets_received_total{camera_id}
-stream_packets_dropped_total{camera_id,reason}
-stream_consumer_count{camera_id}
+cv_source_up{camera_id,use_case}
+cv_source_last_media_timestamp_seconds{camera_id,use_case}
+cv_source_bitrate_bytes_per_second{camera_id,use_case}
+cv_source_reconnects_total{camera_id,use_case,reason}
+cv_source_packets_received_total{camera_id,use_case}
+cv_source_packets_dropped_total{camera_id,use_case,reason}
 ```
 
 CV inference:
@@ -408,7 +404,7 @@ Initial product alerts:
 | `CameraRTSPInvalid` | Enabled camera fails authenticated RTSP validation | 2 minutes |
 | `CameraMediaMissing` | Last upstream media timestamp is stale | 2 minutes |
 | `CameraReconnectStorm` | Reconnect count exceeds the allowed window | 5 minutes |
-| `StreamGatewayUnavailable` | Gateway has no available replica | 2 minutes |
+| `CVSourceUnavailable` | An assigned workload cannot read its physical camera source | 2 minutes |
 | `CVWorkloadUnavailable` | Desired CV Deployment has no available replica | 2 minutes |
 | `CVNoSuccessfulInference` | Media flows but inference success timestamp is stale | Use-case specific |
 | `CVHighErrorRate` | Error/attempt rate exceeds its threshold | 5 minutes |
@@ -479,7 +475,7 @@ back to that spool.
 Acknowledgement stops future reminders but does not clear an alert or suppress
 its recovery email. A recovery email is generated only if a firing email for
 the same occurrence was successfully delivered. Root-cause inhibition covers
-Node/K3s-down, gateway-down, camera-offline, and PostgreSQL-down cascades.
+Node/K3s-down, camera-offline, workload-down, and PostgreSQL-down cascades.
 
 ### 10.2 SendGrid SMTP and outbox policy
 
@@ -518,7 +514,7 @@ Required fields:
 {
   "timestamp": "2026-08-28T12:10:00.123Z",
   "level": "error",
-  "service": "stream-gateway",
+  "service": "face-recognition",
   "event": "rtsp_connection_failed",
   "error_code": "RTSP_AUTH_FAILED",
   "message": "RTSP authentication failed",
@@ -566,7 +562,7 @@ Do not promote `request_id`, session ID, camera IP, stack trace, message, or
 timestamp to Loki labels. Query them from parsed JSON:
 
 ```logql
-{service="stream-gateway"} | json | request_id="c86ce151-6779-4ce3-985a-e59662532660"
+{service="face-recognition"} | json | request_id="c86ce151-6779-4ce3-985a-e59662532660"
 ```
 
 `camera_id` may remain structured metadata rather than an indexed label. With
@@ -633,8 +629,8 @@ job boundaries, rather than adding it to every internal function signature.
 
 Use an `operation_id` for camera discovery/onboarding and report generation, an
 `event_id` for an asynchronous application event, and a `stream_session_id` for
-one upstream RTSP connection lifetime. Propagate the appropriate ID in job or
-event payloads.
+one workload-to-camera RTSP connection lifetime. Propagate the appropriate ID
+in job or event payloads.
 
 These IDs belong in logs, not Prometheus labels.
 
@@ -663,7 +659,8 @@ Initial Grafana dashboards:
    Node status, and monitoring-stack health.
 2. **Camera overview:** discovered/enabled cameras, RTSP status, last media age,
    reconnect rate, and bitrate.
-3. **Stream gateway:** packets, drops, consumers, reconnects, and Pod resources.
+3. **Direct camera sessions:** source status by camera and use case, packets,
+   drops, bitrate, reconnects, session count, and connection-limit risk.
 4. **CV workloads:** input/processed FPS, error rate, latency percentiles, queue
    depth, frame drops, model readiness, Pod restarts, and GPU metrics when a
    vendor exporter is added.

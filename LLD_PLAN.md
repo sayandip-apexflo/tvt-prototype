@@ -1,6 +1,6 @@
 # TVT prototype: sample low-level design plan
 
-**Status:** Proposed for review  
+**Status:** Design updated; implementation pending
 **Scope:** Single physical server, single-node K3s, five initially installed cameras with a design ceiling of eight  
 **Reference implementation:** `../k3s-prototype`  
 **Related TVT documents:** `README.md`, `HLD.md`, `MONITORING.md`, `APEXFABRIC_ARCHITECTURE.md`
@@ -27,10 +27,9 @@ camera candidates, validates RTSP media, persists camera inventory in
 PostgreSQL, serves the management API/UI, and synchronizes enabled camera
 configuration into K3s.
 
-This revision also proposes a separate host alert-dispatcher service for
-durable alert email. That is an intentional scope extension: `HLD.md` and
-`MONITORING.md` currently list external email alert delivery as out of scope.
-Those documents must be updated if this LLD decision is approved.
+V1 includes the approved host alert-dispatcher service for durable alert
+email. `HLD.md` and `MONITORING.md` define the matching SendGrid SMTP,
+outbox, retry, acknowledgement, and recovery-email contracts.
 
 This plan deliberately excludes:
 
@@ -64,18 +63,17 @@ path, or credentials are not known.
 | Camera discovery | ONVIF WS-Discovery first, neighbor-table candidates second, rate-limited TCP probes last | Avoids blind full-network scans where possible |
 | RTSP validation | PyAV/FFmpeg in killable child processes with hard deadlines | Verifies packets/keyframes while containing native-library hangs |
 | Credential storage | AES-256-GCM ciphertext in PostgreSQL; versioned key stored as a protected host file | Keeps browser/API/database views free of plaintext credentials |
-| Camera-to-K3s contract | Installer-owned `ConfigMap/tvt-camera-sources` and `Secret/tvt-camera-credentials` | Smaller V1 than a new CRD and compatible with current renderer/mount patterns |
-| Gateway topology | One gateway Pod containing independent per-camera pipelines | Five to eight streams do not justify one Pod per camera initially |
-| Gateway implementation | MediaMTX plus a small TVT configuration/health adapter, subject to a short load PoC | Supplies one upstream RTSP pull with compressed cluster-local fan-out |
-| CV camera access | CV Pods use `rtsp://tvt-stream-gateway.apexfabric.svc:8554/<camera_id>` | Hides mutable camera addresses and credentials from CV applications |
+| Camera-to-K3s contract | Reference per-deployment desired-state and camera-source Secrets, mounted through `external_mounts` | Preserves the implemented Solution Pack and image contract |
+| CV camera access | Each assigned CV workload reads `file:/run/secrets/apexfabric/<camera_id>.rtsp` and opens the physical camera directly | Matches `k3s-prototype` exactly and removes the gateway layer |
 | Network-camera scheduling | `runtime-connectivity` and `requires_camera_labels: false` | LAN RTSP cameras are not node-local Kubernetes devices |
-| Reconciliation | Reuse bundle schema, semantic validator, renderer, field manager, ownership labels, and prune rules | Preserves the proven K3s-plane behavior |
+| Reconciliation | Copy the reference bundle schema, semantic validator, camera-locality logic, renderer, field manager, ownership labels, Namespace output, prune rules, and tests unchanged | Preserves the proven K3s-plane behavior and one Solution Pack implementation |
 | Monitoring | Follow `MONITORING.md`: Prometheus metrics, JSON logs, Alloy, Loki, Alertmanager | Keeps monitoring contracts separate from business data |
-| Alert email | Host `tvt-alert-dispatcher.service` with authenticated webhooks, PostgreSQL outbox, and TLS SMTP | Preserves delivery/audit state and can report K3s outages without depending on an in-cluster sender |
+| Alert email | Host `tvt-alert-dispatcher.service` with authenticated webhooks, PostgreSQL outbox, and SendGrid SMTP over STARTTLS | Preserves delivery/audit state and can report K3s outages without depending on an in-cluster sender |
 
-The gateway product is a proposed default, not a locked dependency. The PoC
-must prove supported codecs, reconnect behavior, one-upstream-session fan-out,
-latency, and eight-camera load before it is accepted.
+There is no stream gateway in V1. When several deployments use one camera,
+each deployment opens a separate physical RTSP session. Field acceptance must
+prove that the configured assignments remain within camera session limits and
+the server/LAN capacity envelope.
 
 ## 3. Reference implementation mapping
 
@@ -85,13 +83,15 @@ latency, and eight-camera load before it is accepted.
 | `apexfabric/node_management/discovery/` | Reuse host hardware discovery; do not confuse it with new TVT camera discovery |
 | `apexfabric/node_management/reporter/` | Reuse as the local-node DaemonSet reporter |
 | `apexfabric/node_management/status_controller/` | Reuse freshness, identity, readiness, architecture, and device validation |
-| `apexfabric/solution_management/validation.py` | Reuse JSON Schema plus semantic validation and add TVT application-profile rules |
-| `apexfabric/solution_management/renderer.py` | Reuse deterministic rendering, affinity, probes, configuration mounts, Services, policies, PVCs, apply, and prune; stop rendering the Namespace because the installer owns it |
+| `apexfabric/solution_management/validation.py` | Copy and use unchanged |
+| `apexfabric/solution_management/camera_locality.py` | Copy and use unchanged |
+| `apexfabric/solution_management/renderer.py` | Copy and use unchanged, including Namespace rendering, deterministic revision, Secret/configuration mounts, affinity, probes, Services, policies, PVCs, server-side apply, field manager, and prune behavior |
 | `apexfabric/solution_management/catalog.py` | Retain digest resolution; move catalog records into the TVT PostgreSQL database |
-| `solution-packs/schema/deployment-bundle.schema.json` | Copy as the initial TVT bundle contract and version changes explicitly |
-| `deploy/k8s/apexfabric-foundation.yaml` | Reuse namespace and namespace-scoped reconciler RBAC, then narrow where possible |
+| Traffic-runtime `secret_inputs` helpers in `apexfabric/control_plane/server.py` | Reuse the validation, bundle-derived Secret naming, apply, redaction, and changed-Secret rollout behavior; expose it only through the TVT allowlisted Apply adapter |
+| `solution-packs/` | Copy the reference folder structure, schemas, traffic definitions, desired-state example, and tests as the initial TVT Solution Pack implementation |
+| `deploy/k8s/apexfabric-foundation.yaml` | Copy and use the reference foundation behavior required by the unchanged renderer |
 | `deploy/k8s/apexfabric-node-management.yaml` | Reuse CRD, reporter, status controller, RBAC, and probes |
-| failure, rollout, and rollback tests | Port to TVT and add camera/gateway failure scenarios |
+| Solution Pack validation, renderer, failure, rollout, and rollback tests | Copy unchanged, then add TVT end-to-end tests without altering reference assertions |
 | `apexfabric_controller` enrollment/provisioning RPCs | Omit |
 | `edge_seed`, `edge_bundle`, `edge_installer`, `node_bootstrap` | Omit |
 | `driver_build_service`, `driver_build_worker`, driver bundle tooling | Omit |
@@ -120,8 +120,7 @@ flowchart TB
             API[Kubernetes API and scheduler]
             Reporter[Node reporter DaemonSet]
             Status[Node-status controller]
-            CameraObjects[Camera ConfigMap + Secret]
-            Gateway[Stream gateway + config adapter]
+            CameraSecrets[Per-deployment desired-state<br/>and camera-source Secrets]
             Face[Face-recognition workload]
             ANPR[ANPR workload]
             Presence[Inside/outside workload]
@@ -130,22 +129,23 @@ flowchart TB
         end
     end
 
-    SMTP[Organization SMTP relay]
+    SMTP[SendGrid SMTP relay]
 
     Operator --> Edge
     Edge <--> DB
     Edge --> Key
     Edge -->|discover and validate| Cameras
-    Edge -->|scoped reconcile| CameraObjects
-    Edge -->|bundle reconcile and health reads| API
+    Edge -->|bundle, validated secret inputs,<br/>reconcile and health reads| API
     Registry -->|image pull| K3s
     Reporter --> API
     API --> Status
-    CameraObjects --> Gateway
-    Cameras -->|one upstream pull per enabled camera| Gateway
-    Gateway -->|stable internal RTSP paths| Face
-    Gateway -->|stable internal RTSP paths| ANPR
-    Gateway -->|stable internal RTSP paths| Presence
+    API --> CameraSecrets
+    CameraSecrets --> Face
+    CameraSecrets --> ANPR
+    CameraSecrets --> Presence
+    Face -->|direct RTSP| Cameras
+    ANPR -->|direct RTSP| Cameras
+    Presence -->|direct RTSP| Cameras
     Face --> Reporting
     ANPR --> Reporting
     Presence --> Reporting
@@ -213,11 +213,7 @@ tvt-prototype/
     monitoring/
   solution-packs/
     schema/
-    platform/
-    face/
-    anpr/
-    attendance/
-    reporting/
+    traffic/
   tests/
     unit/
     integration/
@@ -226,9 +222,15 @@ tvt-prototype/
   scripts/
 ```
 
-The `apexfabric` package initially stays close to the reference tree so that
-upstream differences remain reviewable. TVT-specific behavior belongs under
-`tvt_edge`, not inside remote provisioning modules.
+The initial `solution-packs/` tree and the referenced validation,
+camera-locality, renderer, and test modules are copied exactly from the
+reference commit. New face, ANPR, attendance, and reporting pack directories
+are added only when their images and contracts arrive; they follow the same
+one-directory-per-pack convention. The TVT PostgreSQL catalog adapter and
+allowlisted Apply API remain outside those unchanged modules. Other
+`apexfabric` packages stay close to the reference tree so upstream differences
+remain reviewable. TVT-specific behavior belongs under `tvt_edge`, not inside
+remote provisioning modules.
 
 ## 6. Host edge-management service
 
@@ -357,10 +359,11 @@ DECODE_FAILED
 PROBE_INTERNAL_ERROR
 ```
 
-For enabled cameras, continuous media health comes from the gateway. The host
-does not maintain a second continuous RTSP session. It performs a direct probe
-only during onboarding, explicit revalidation, or when the gateway is
-unavailable and diagnosis is required.
+The host performs onboarding, scheduled and operator-requested direct probes.
+Each CV workload independently reports last packet, last successful inference,
+failure category and reconnect state for its assigned camera sessions. Health
+aggregation keeps host validation distinct from each workload observation;
+there is no shared gateway health source.
 
 ### 7.4 Camera state machine
 
@@ -373,8 +376,8 @@ stateDiagram-v2
     validating --> online: packets and keyframe valid
     validating --> invalid: categorized validation failure
     invalid --> validating: retry or configuration change
-    online --> offline: gateway media stale
-    offline --> online: gateway media fresh
+    online --> offline: host validation or all assigned workloads stale
+    offline --> online: host validation or an assigned workload is fresh
     online --> disabled: operator disables
     offline --> disabled: operator disables
     invalid --> disabled: operator disables
@@ -382,8 +385,8 @@ stateDiagram-v2
 ```
 
 `enabled` is an operator intent, while `online` is an observation. An enabled
-camera may be offline; disabling it removes it from the next K3s camera-set
-revision.
+camera may be offline; disabling it removes it from future Solution Pack secret
+input and causes affected deployment camera assignments to be reconciled.
 
 ## 8. PostgreSQL model
 
@@ -398,8 +401,8 @@ representations.
 | `camera_streams` | `id`, `camera_id FK`, `profile_token`, `rtsp_port`, `path`, `transport`, `codec`, `width`, `height`, `fps`, `selected`, `updated_at`; one selected stream per camera |
 | `camera_credentials` | `camera_id PK/FK`, one encrypted credential-document `ciphertext`, unique `nonce`, `key_version`, `updated_at`; no plaintext columns and no nonce reuse across encryptions |
 | `camera_observations` | `id`, `camera_id FK NULL`, `operation_id`, `method`, `address`, `result_code`, bounded JSON metadata, `observed_at`; time-based retention |
-| `camera_health` | `camera_id PK/FK`, `validation_code`, `last_validated_at`, `last_packet_at`, `last_keyframe_at`, `gateway_up`, `consecutive_failures`, `next_retry_at` |
-| `camera_sync_state` | singleton/site row containing `desired_revision`, `applied_revision`, `status`, `last_attempt_at`, `last_error` |
+| `camera_health` | `camera_id PK/FK`, `validation_code`, `last_validated_at`, aggregate assigned-workload media state, `consecutive_failures`, `next_retry_at` |
+| `camera_deployment_sync` | one row per deployment containing camera assignment revision, desired/applied Secret revision, rollout status, last attempt, and bounded last error |
 | `alert_instances` | stable fingerprint, source, severity, state, first/last seen, occurrence count, acknowledgement fields, resolved time, and last Alertmanager group key |
 | `alert_transitions` | alert FK, transition type, source timestamp, received timestamp, redacted payload, and unique idempotency key |
 | `notification_policies` | severity/alert matchers, recipients or recipient-group reference, initial/repeat interval, resolved-email policy, enabled state |
@@ -413,10 +416,11 @@ pending validation, pending synchronization, active alerts, due outbox rows,
 and recent audit events. Observation, alert-transition, delivery-attempt, and
 audit retention are bounded by scheduled database jobs.
 
-The transaction which changes camera configuration also increments the desired
-camera-set revision and marks synchronization pending. A background loop claims
-pending work with `SELECT ... FOR UPDATE SKIP LOCKED` so a future process split
-does not require a data-model rewrite.
+The transaction which changes a camera address, path, credential, enablement or
+assignment increments every affected deployment's desired secret-input
+revision and marks synchronization pending. A background loop claims pending
+work with `SELECT ... FOR UPDATE SKIP LOCKED` so a future process split does not
+require a data-model rewrite.
 
 ## 9. Host API contract
 
@@ -426,7 +430,7 @@ Passwords are write-only and are represented in reads only by
 
 | Method and route | Purpose |
 |---|---|
-| `GET /api/v1/health` | Independent host, database, K3s API, Node, gateway, and workload health |
+| `GET /api/v1/health` | Independent host, database, K3s API, Node, camera validation, Secret synchronization, and workload health |
 | `GET /api/v1/cameras` | List cameras, configuration state, and last-known health |
 | `GET /api/v1/cameras/{camera_id}` | Detailed non-secret camera record and observations |
 | `POST /api/v1/discovery-runs` | Start a bounded discovery run; returns `operation_id` |
@@ -453,46 +457,44 @@ reachable from the Pod network, requires a dedicated bearer credential, limits
 payload size and alert count, and accepts no operator-supplied command or
 template.
 
-## 10. Camera synchronization into K3s
+## 10. Per-deployment camera synchronization into K3s
 
-The installer creates these fixed objects before dropping privileges:
+Camera configuration follows the unchanged Traffic runtime Apply contract from
+`k3s-prototype`. A stored `DeploymentBundle` contains camera IDs, mount
+references and non-secret configuration, while an operator Apply request
+supplies ephemeral `secret_inputs` containing desired state and complete RTSP
+URLs. The control path validates both before creating the installation-owned
+Secrets named by that bundle.
 
-- `ConfigMap/tvt-camera-sources`;
-- `Secret/tvt-camera-credentials`;
-- a service account and kubeconfig limited to `get`, `patch`, and `update` for
-  those named objects; and
-- read-only permissions for the required Nodes, Deployments, Pods, Services,
-  Events, and `ApexNodeStatus` objects.
-
-The ConfigMap contains a canonical JSON document with non-secret fields:
+The desired-state Secret contains a canonical JSON document:
 
 ```json
 {
-  "schema_version": "1.0",
+  "edge_id": "tvt-plant-01",
   "revision": 12,
   "cameras": [
     {
       "camera_id": "camera-01",
-      "role": "main-entrance",
-      "direction": "entry",
-      "secret_file": "/run/secrets/tvt/camera-01.rtsp",
-      "internal_path": "camera-01",
-      "transport": "tcp"
+      "source": "file:/run/secrets/apexfabric/camera-01.rtsp",
+      "solution_pack": "face-recognition",
+      "fps": 8,
+      "apps": ["face-recognition"]
     }
   ]
 }
 ```
 
-The Secret contains the same revision and one complete RTSP URL per camera.
-Keys are `<camera_id>.rtsp`. Credential-bearing URLs are never placed in the
-ConfigMap, bundle, Pod environment, annotation, Event, API response, or log.
+The corresponding camera-source Secret contains one complete physical RTSP URL
+per assigned camera, keyed as `<camera_id>.rtsp`. Credential-bearing values are
+never placed in the bundle, ConfigMap, Pod environment, annotation, Event, API
+response, job record, audit event, log or metric.
 
-The two-object update is not atomic. Both objects therefore carry the desired
-revision. The gateway adapter retains its last-good in-memory configuration
-until both projected files have the same revision and the new complete set
-validates. A mismatch produces a metric and alert; it never partially applies
-a new camera set. Both objects are mounted as directories, not with Kubernetes
-`subPath`, so projected updates can become visible without Pod replacement.
+The reference renderer mounts each Secret key read-only using `subPath` at the
+path declared by `external_mounts`. Kubernetes does not refresh a `subPath`
+mount in an already running container, so a successful camera-source Secret
+change is followed by a controlled Deployment rollout restart. If the Secret
+update or rollout fails, the database retains the pending desired revision and
+the UI shows the deployment out of sync.
 
 Synchronization is idempotent:
 
@@ -501,76 +503,59 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant Edge as Edge service
     participant API as Kubernetes API
-    participant Adapter as Gateway adapter
-    participant Gateway as Stream gateway
+    participant Secret as Deployment Secrets
+    participant Pod as CV workload
 
-    Edge->>DB: Claim pending desired revision N
-    Edge->>API: Patch Secret with revision N
-    Edge->>API: Patch ConfigMap with revision N
-    Edge->>DB: Record applied revision N
-    Adapter->>Adapter: Wait for matching projected revisions
-    Adapter->>Adapter: Validate complete camera set
-    Adapter->>Gateway: Atomically activate revision N
-    Gateway-->>Adapter: Per-camera media status
+    Edge->>DB: Claim pending deployment revision N
+    Edge->>Edge: Build reference secret_inputs from encrypted inventory
+    Edge->>API: Apply desired-state and camera-source Secrets
+    API-->>Secret: Persist revision N inputs
+    Edge->>API: Reconcile unchanged DeploymentBundle
+    Edge->>API: Restart Deployment when an existing Secret changed
+    API-->>Pod: Mount assigned source files and start
+    Pod-->>Edge: Report readiness and per-camera source telemetry
+    Edge->>DB: Record applied revision and rollout result
 ```
 
-`applied_revision` means accepted by the Kubernetes API, not active in the
-gateway. Gateway metrics expose `tvt_gateway_config_revision`, and health
-aggregation reports the difference.
+`applied_revision` means the Secrets and bundle were accepted and the required
+rollout completed. It does not mean inference succeeded; readiness and
+per-camera workload telemetry report runtime source and inference state.
 
-## 11. Stream gateway contract
+## 11. Direct camera workload contract
 
-The gateway Deployment contains:
+TVT uses the reference ApexFabric V1 Solution Image Contract without a gateway.
+For each assigned camera, the bundle declares:
 
-- one MediaMTX container;
-- one unprivileged TVT adapter container which reads projected camera files,
-  configures MediaMTX through loopback, and exposes product metrics/health;
-- read-only camera ConfigMap and Secret volumes;
-- a writable `emptyDir` for generated runtime configuration only;
-- a ClusterIP Service named `tvt-stream-gateway`; and
-- startup, liveness, and readiness probes.
+- the camera ID in `applications[].cameras`;
+- `camera_contract.configuration_owner: platform`;
+- `camera_contract.transport: rtsp`;
+- `camera_contract.scheduling_mode: runtime-connectivity`;
+- `placement.requires_camera_labels: false`;
+- one `camera_streams` unit for every independently decoded source; and
+- an `external_mounts` entry referencing the bundle-named camera-source Secret.
 
-For each enabled camera, there is exactly one logical upstream source and a
-stable internal path equal to `camera_id`. Multiple CV consumers attach to the
-internal path. The acceptance test must verify from camera/gateway connection
-metrics that adding consumers does not add upstream sessions.
+The desired-state document refers to
+`file:/run/secrets/apexfabric/<camera_id>.rtsp`. The plan-compiler init
+container and main image receive the same read-only source file and declared
+device mounts exactly as in `k3s-prototype`. The physical RTSP URL, including
+credentials when required, is the file content. The CV application opens that
+source directly and owns reconnect, decode, readiness and metrics.
 
-This matches [MediaMTX's documented path
-model](https://mediamtx.org/docs/features/architecture): one path is fed by one
-publisher or external source and broadcast to readers. Its documented
-RTSP-source, Control API, metrics, and hot-reload capabilities make it a
-reasonable PoC candidate, but the TVT load test remains authoritative for
-acceptance.
+Every CV Pod must have egress to DNS and the explicitly configured camera
+subnet because it reaches physical cameras. The unchanged reference renderer
+does not render egress policy, so the installer applies an additive TVT
+namespace camera-egress policy rather than modifying Solution Pack code. A CV
+Pod receives no Kubernetes API token and only the camera Secret keys assigned
+to its deployment. If two deployments use the same camera, both receive their
+own Secret reference and open independent sessions. V1 accepts that duplication
+and measures it during capacity testing.
 
-Probe meanings are:
-
-- startup: adapter has loaded a syntactically valid matching revision and the
-  gateway API is responsive;
-- liveness: both adapter and gateway processes respond; camera outages do not
-  fail liveness;
-- readiness: the gateway can serve consumers and at least the configured
-  readiness policy is met;
-- per-camera availability: separate metric/status, never collapsed into Pod
-  liveness.
-
-Recommended internal endpoints are:
-
-```text
-RTSP  rtsp://tvt-stream-gateway.apexfabric.svc:8554/<camera_id>
-HTTP  /healthz
-HTTP  /readyz
-HTTP  /metrics
-HTTP  /api/v1/streams
-```
-
-The NetworkPolicy allows gateway egress only to configured camera subnets and
-DNS where needed. CV namespaces/labels may reach the internal RTSP port; they
-cannot reach physical camera subnets directly. The Pod receives no Kubernetes
-API token.
-
-If the MediaMTX PoC fails a required codec, latency, or resource criterion, the
-same adapter contract can manage GStreamer restream pipelines instead. The
-camera database and CV endpoint contract do not change.
+Startup means the application and model/runtime initialization completed.
+Readiness reflects whether the pack's declared camera requirement and inference
+contract can currently be served. Liveness detects a wedged application but
+does not restart a healthy process merely because a camera is offline. Each
+application exports bounded per-camera last-media, reconnect, failure and
+inference-success metrics.
 
 ## 12. K3s platform behavior
 
@@ -586,9 +571,11 @@ must:
 5. apply the `ApexNodeStatus` CRD, reporter, and status controller;
 6. label only the local node as reporter-enabled and with its configured
    hardware profile;
-7. apply the stream gateway and camera sync objects;
-8. install the monitoring stack with bounded resources; and
-9. install and enable host PostgreSQL, edge service, and watchdog units.
+7. install the unchanged reference Solution Pack schema, reconciler and
+   camera-secret Apply path;
+8. apply the additive TVT camera-subnet egress policy;
+9. install the monitoring stack with bounded resources; and
+10. install and enable host PostgreSQL, edge service, and watchdog units.
 
 No agent join token, approval state, enrollment certificate, driver bundle, or
 remote install transaction exists in this sequence.
@@ -631,13 +618,13 @@ the reference implementation:
 8. deliberate retention of PVCs; and
 9. rollout observation and audit.
 
-The renderer emits Deployments, Services, ConfigMaps, Secret references, PVCs,
+The renderer is copied unchanged. It emits the Namespace, Deployments,
+Services, ConfigMaps, bundle Secrets, external Secret references, PVCs,
 NetworkPolicies, resource requests, affinity, probes, telemetry annotations,
-security contexts, and termination grace periods. It does not assign
-`nodeName`; the default scheduler selects the qualified local Node. Unlike the
-reference renderer, the TVT renderer does not emit a Namespace object. Namespace
-creation is an installer responsibility and remains outside the namespace-
-scoped reconciliation credential.
+security contexts, device mounts and termination grace periods. It does not
+assign `nodeName`; the default scheduler selects the qualified local Node. The
+reconciler retains the reference field manager, ownership labels and RBAC
+required for its Namespace output.
 
 Network-camera applications use:
 
@@ -652,14 +639,16 @@ placement:
   requires_camera_labels: false
 ```
 
-Camera credentials are references to gateway endpoints, not direct physical
-camera URLs. A CV application receives only the camera IDs assigned to it.
+The host Apply adapter supplies physical credential-bearing RTSP URLs as
+ephemeral secret inputs, using the same validation and Secret naming contract
+as the reference Traffic runtime. A CV application receives only the camera
+IDs and Secret keys assigned to its deployment. Secret changes trigger rollout
+restart so the reference `subPath` mounts are refreshed.
 
 ### 12.4 TVT Solution Packs
 
-The platform contract should support independent bundles for:
+The unchanged Solution Pack contract should support independent bundles for:
 
-- stream gateway;
 - face recognition;
 - face enrollment API/UI integration;
 - ANPR;
@@ -696,8 +685,8 @@ does not identify a vehicle-lane camera or say whether one of these five views
 has suitable plate angle, resolution, illumination, and shutter behavior.
 
 Camera-to-use-case assignment is desired state stored outside application
-images. A camera may feed several CV workloads through the gateway, but each
-physical camera still has only one gateway upstream session.
+images. A camera may feed several CV workloads, and each independently deployed
+consumer opens its own physical RTSP session.
 
 ## 14. Observability and error handling
 
@@ -712,7 +701,8 @@ physical camera still has only one gateway upstream session.
 - Alertmanager firing and resolved notifications to an authenticated host
   webhook;
 - active/acknowledged/cleared alert state in PostgreSQL; and
-- dashboards for server, camera, gateway, CV workload, and errors.
+- dashboards for server, camera, direct CV source sessions, CV workload, and
+  errors.
 
 Neither metrics nor logs may contain camera credentials, direct RTSP URLs,
 faces, embeddings, person names, or number plates. Business events require a
@@ -731,7 +721,7 @@ important.
 Alertmanager remains responsible for grouping, inhibition, deduplication, and
 initial webhook timing. The dispatcher receives Alertmanager's firing and
 resolved webhooks, stores alert state, applies site email/reminder policy, and
-delivers mail through the organization SMTP relay. Alertmanager documents its
+delivers mail through SendGrid's SMTP relay. Alertmanager documents its
 routing and timing controls, including `group_wait`, `group_interval`,
 `repeat_interval`, and `send_resolved`, in its [configuration
 reference](https://prometheus.io/docs/alerting/latest/configuration/).
@@ -792,7 +782,7 @@ Every accepted alert contains:
     "site_id": "tvt-plant-01",
     "alertname": "CameraMediaMissing",
     "severity": "critical",
-    "service": "stream-gateway",
+    "service": "face-recognition",
     "camera_id": "camera-03"
   },
   "annotations": {
@@ -875,8 +865,7 @@ enqueue an extra transition email.
 
 Required inhibition rules include:
 
-- Node or K3s down inhibits gateway, Pod, and CV workload alerts;
-- stream gateway down inhibits per-camera inference-stalled alerts;
+- Node or K3s down inhibits Pod and CV workload alerts;
 - a camera-offline alert inhibits source/inference alerts for that camera; and
 - PostgreSQL down inhibits secondary edge-API database symptoms.
 
@@ -887,9 +876,9 @@ the dispatcher implements it explicitly from its delivery records.
 ### 15.6 Email outbox and SMTP delivery
 
 The worker claims due outbox rows using `SELECT ... FOR UPDATE SKIP LOCKED`,
-renders a versioned local template, and submits mail over certificate-verified
-TLS to the configured SMTP relay. It never accepts templates, recipients,
-headers, or SMTP settings from the alert payload.
+renders a versioned local template, and submits mail to
+`smtp.sendgrid.net:587` over certificate-verified STARTTLS. It never accepts
+templates, recipients, headers, or SMTP settings from the alert payload.
 
 The emergency filesystem spool is used only for fixed host-infrastructure
 alerts when PostgreSQL cannot accept the normal transaction. It has strict file
@@ -946,8 +935,8 @@ path returns.
 | Failure | Detection | V1 response |
 |---|---|---|
 | Discovery/validation child hangs | Parent deadline | Kill child, categorize timeout, back off, keep API responsive |
-| One camera disappears | Gateway media age and host observations | Mark camera offline, alert, reconnect with jitter; other pipelines remain active |
-| Gateway process exits | Kubelet liveness/Deployment | Restart container or replace Pod; rebuild all paths from mounted desired state |
+| One camera disappears | Host validation and assigned-workload media age | Mark camera offline, alert, and let each affected workload reconnect with jitter; other camera sessions remain active |
+| One workload RTSP session fails | Workload media metrics and readiness | That workload reconnects independently; other workloads and sources continue |
 | CV process wedges | Liveness probe | Kubelet restarts container |
 | CV is alive but cannot serve | Readiness probe | Remove Pod from Service endpoints without destroying diagnostics |
 | Edge service exits | `systemd` | Restart; K3s continues with last active camera revision |
@@ -956,7 +945,7 @@ path returns.
 | SMTP relay/WAN is unavailable | Dispatcher delivery result | Retain committed outbox rows and retry with bounded backoff; show oldest pending age in UI |
 | K3s process exits | `systemd` | Restart and reconcile Deployments |
 | K3s API stays unhealthy | Root-owned fixed watchdog | One controlled restart after sustained failure, then cooldown and alert |
-| Host reboots | `systemd` ordering and declarative state | Restore database, edge API, K3s, gateway, and CV workloads |
+| Host reboots | `systemd` ordering and declarative state | Restore database, edge API, K3s, per-deployment Secrets, and CV workloads |
 | Complete host/power/disk failure | Future off-box heartbeat | All local functions stop; not HA |
 
 The watchdog accepts no API-supplied command or argument. Initial timing is the
@@ -965,18 +954,21 @@ then wait ten minutes before another action.
 
 ## 17. Security boundaries
 
-- Bind the prototype UI to loopback until authentication and CSRF protection
-  are implemented. Exposure to a management LAN is a separate review gate.
+- Bind the UI only to the approved on-site management interface. Require the
+  installer-created local administrator, forced first-login password change,
+  server-side session, CSRF, throttling, and TLS controls defined in `HLD.md`
+  before allowing management-LAN access.
 - Run the edge service as an unprivileged `tvt` user.
 - Store the AES-GCM master key at `/etc/tvt/credential-keys/v1.key`, owned by
   `root:tvt`, mode `0640`; support explicit key versions and rotation.
-- Give the edge kubeconfig named-object camera update rights and bounded
-  read-only status rights only.
-- Precreate fixed camera objects because Kubernetes RBAC cannot restrict a
-  general `create` verb to future object names using `resourceNames`.
-- Mount only gateway-internal RTSP credentials into the gateway. CV Pods receive
-  no physical-camera password.
-- Disable service-account token automount for gateway and CV Pods.
+- Give the edge Apply path the same Solution Pack reconciliation permissions as
+  the reference implementation; restrict APIs to validated bundle and secret-
+  input operations rather than exposing arbitrary Kubernetes actions.
+- Create only bundle-named desired-state and camera-source Secrets after
+  validating that camera IDs, desired state, mount paths and secret keys match.
+- Mount physical credential-bearing RTSP URLs only into CV deployments assigned
+  those cameras; never expose them in bundle YAML or observability data.
+- Disable service-account token automount for CV Pods.
 - Use non-root UIDs, read-only roots, dropped Linux capabilities, RuntimeDefault
   seccomp, and explicit writable mounts unless an approved accelerator profile
   temporarily requires more privilege.
@@ -1031,10 +1023,11 @@ Use containerized fake ONVIF/RTSP devices and recorded non-sensitive video:
 - validate H.264/H.265 support as required;
 - preserve identity after an address change;
 - converge PostgreSQL revision to matching K3s objects;
-- retain last-good gateway configuration during a revision mismatch;
-- add two internal consumers while preserving one upstream session;
-- disconnect one source without affecting the others;
-- restart the edge service, PostgreSQL, gateway Pod, and K3s; and
+- update a camera-source Secret and verify the required Deployment restart;
+- assign one camera to two deployments and verify two independent direct
+  sessions within the fake camera's configured connection limit;
+- disconnect one source without affecting unrelated cameras or workloads;
+- restart the edge service, PostgreSQL, a CV Pod, and K3s; and
 - process duplicate/out-of-order firing and resolved webhooks;
 - queue email while a fake SMTP relay is down and deliver it after recovery;
 - stop PostgreSQL, queue only the allowlisted emergency database alert on the
@@ -1054,9 +1047,9 @@ Port the reference lifecycle suite and retain its concrete assertions:
 - an unhealthy revision never replaces the healthy endpoint set; and
 - an explicit rollback restores the recorded healthy revision.
 
-Add TVT assertions for camera ConfigMap/Secret revision matching, gateway
-session count, per-camera reconnect, alert delivery, and host-UI availability
-while K3s is stopped.
+Add TVT assertions for desired-state/camera-source Secret validation, direct
+session count, Secret-change rollout, per-workload reconnect, alert delivery,
+and host-UI availability while K3s is stopped.
 
 ### 18.4 Capacity and field acceptance
 
@@ -1096,13 +1089,15 @@ The alert-dispatcher path is accepted when:
 
 ### Phase 0: Freeze contracts
 
-- Confirm camera/LAN/hardware inputs and the open questions below.
+- Record the deferred site inputs and benchmark thresholds before the phase
+  that consumes each value.
 - Copy the reference bundle schema and add contract-version tests.
 - Record the exact `k3s-prototype` commit used as the baseline.
 - Produce a module-by-module reuse/omit diff.
 
-**Exit:** Approved scope, camera source contract, gateway PoC criteria, and
-business-data boundary.
+**Exit:** Approved scope, unchanged reference Solution Pack baseline, direct
+camera Secret contract, camera session-capacity criteria, and business-data
+boundary.
 
 ### Phase 1: Establish the single-node K3s plane
 
@@ -1136,21 +1131,25 @@ round-trip and redaction tests pass.
 **Exit:** New cameras are discovered, protected streams can be configured, and
 IP changes do not duplicate a strong identity.
 
-### Phase 4: Synchronize cameras and fan out streams
+### Phase 4: Synchronize direct camera inputs
 
-- Install fixed ConfigMap/Secret and scoped kubeconfig.
-- Implement revisioned, idempotent sync.
-- Complete MediaMTX/GStreamer gateway PoC and select the gateway.
-- Implement adapter, probes, metrics, internal paths, and NetworkPolicies.
+- Implement the reference `secret_inputs` validation and bundle-named desired-
+  state/camera-source Secret Apply workflow.
+- Implement per-deployment revision tracking and idempotent synchronization.
+- Restart affected Deployments after `subPath` Secret changes.
+- Apply the additive TVT camera-subnet egress policy without changing the
+  reference Solution Pack renderer.
+- Add direct-session, reconnect and camera connection-limit metrics/tests.
 
-**Exit:** One physical session feeds two CV consumers, revision mismatch is
-safe, and one camera disconnect does not interrupt the others.
+**Exit:** Every CV workload receives only its assigned physical RTSP sources,
+Secret updates roll out safely, two consumers create the expected two direct
+sessions, and unrelated sources remain available during one camera failure.
 
 ### Phase 5: Integrate TVT Solution Packs
 
 - Define application image/event/config contracts.
 - Add face, ANPR, presence/attendance, and reporting bundle skeletons.
-- Map cameras to use cases without direct physical URLs.
+- Map cameras to use cases through validated physical-URL Secret inputs.
 - Validate start, stop, update, failed rollout, and rollback.
 
 **Exit:** Each available application is independently deployable and reports
@@ -1172,35 +1171,32 @@ data design is approved.
 **Exit:** The documented acceptance suites and sustained-load test pass with a
 stored evidence bundle and recovery measurements.
 
-## 20. Questions for review
+## 20. Deferred site inputs and acceptance measurements
 
-These answers are not required to review the overall structure, but they are
-required before the associated phase is closed.
+The architecture choices are settled. The following values are intentionally
+site-configured or measured rather than hard-coded:
 
-1. What are the exact camera makes/models, ONVIF support, codecs, resolutions,
-   FPS, authentication modes, and DHCP/static-address behavior?
-2. Which configured subnet and host interface may discovery scan? Are cameras
-   on a dedicated VLAN?
-3. Is compressed cluster-local RTSP fan-out acceptable, even though every CV
-   Pod decodes its own copy, or is shared decoded-frame transport a V1
-   requirement?
-4. Does one of the five listed cameras provide a qualified ANPR view, or is a
-   separate vehicle-lane camera expected?
-5. What exact server CPU, memory, storage, GPU/NPU/accelerator, and Ubuntu
-   version form the supported hardware profile?
-6. Are face enrollment, attendance history, vehicle history, and generated
-   reports required to survive restart in this prototype? If yes, what are the
-   retention, backup, deletion, privacy, and audit requirements?
-7. Will the management UI remain loopback-only, or must it be reachable on a
-   customer management LAN? If reachable, what identity provider or local-user
-   authentication is required?
-8. Is an organization SMTP relay reachable from the site, which recipient
-   groups receive critical/warning alerts, and what sender domain and
-   credential-storage mechanism are approved?
-9. What recovery target qualifies as "within a few minutes" for camera
-   reconnect, Pod replacement, K3s restart, and full host reboot?
-10. Should the local OCI registry and monitoring data survive OS
-    reinstallation, and what backup/restore medium is acceptable?
+1. Exact camera makes, profiles, codecs, resolutions, frame rates,
+   authentication modes, and addressing behavior. The implementation must
+   discover capabilities and accept configured profiles instead of assuming a
+   particular camera model.
+2. The allowlisted camera subnet and host interface. Discovery and CV Pod
+   egress remain disabled outside this configured boundary.
+3. Each camera's simultaneous RTSP-client limit. Because every assigned CV
+   workload connects directly, the final assignment is accepted only after
+   its session count and LAN/decode load pass the field benchmark.
+4. A SendGrid-verified sender and reachable test recipient to replace the
+   documentation-only `tvt-alerts@tvt.example` and
+   `tvt-test-operator@tvt.example` identities.
+5. The encrypted external USB device or approved network share used for the
+   V1 management-data, registry, and monitoring backup set.
+
+Camera specifications and production CV inputs are deferred as requested.
+One or more installed cameras are assumed to provide a suitable ANPR view.
+The frozen server profile, non-durable CV/business stub data, on-site
+management-network access, local authentication, SendGrid transport, and
+measurable recovery targets are defined in `HLD.md` and are no longer open
+design questions.
 
 ## 21. Definition of the first usable increment
 
@@ -1211,8 +1207,10 @@ of every CV business feature. It is accepted when:
 2. a camera is discovered without K3s;
 3. an operator can configure and validate its authenticated RTSP stream;
 4. an enabled camera revision converges into K3s without exposing credentials;
-5. the gateway provides a stable internal path and one upstream pull;
-6. two synthetic CV Pods consume the same internal stream;
+5. a reference-format Solution Pack mounts a physical camera URL through its
+   bundle-named Secret and the CV Pod opens it directly;
+6. two synthetic CV Pods assigned the same camera create two direct sessions
+   and stay within the tested camera/LAN capacity;
 7. camera, Pod, edge-service, PostgreSQL, and K3s recovery behavior is tested;
 8. the UI remains available during a K3s outage; and
 9. metrics, JSON logs, and alerts identify failures without requiring shell

@@ -1,0 +1,16 @@
+{
+  "intel-285h": {
+    "architecture": "amd64",
+    "camera_streams": 30,
+    "device_supplemental_groups": [44, 992],
+    "required_device_nodes": ["/dev/dri/renderD128", "/dev/accel/accel0"],
+    "required_kernel_modules": ["i915|xe", "intel_vpu"]
+  },
+  "jetson-orin": {
+    "architecture": "arm64",
+    "camera_streams": 25
+  },
+  "generic-amd64": {
+    "architecture": "amd64"
+  }
+}

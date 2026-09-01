@@ -1,0 +1,28 @@
+api_version: apexfabric.com/v1alpha1
+kind: DeploymentBundle
+deployment_id: traffic-demo-local
+solution: {solution_id: traffic, version: 1.0.0}
+applications:
+  - name: traffic-cv
+    image: {repository: ghcr.io/apexfabric/traffic-cv, tag: 1.0.0, pull_policy: IfNotPresent}
+    replicas: 1
+    resources:
+      cpu: {request: "2", limit: "2"}
+      memory: {request: 4Gi, limit: 4Gi}
+      accelerators: {decoder: 2, metis: 1}
+    cameras: [camera-01, camera-02]
+    configuration: {confidence_threshold: 0.5, analytics_interval_seconds: 5}
+    placement:
+      requires_qualified_node: true
+      node_class: cv
+      architecture: amd64
+      characteristics: {decoder: vaapi, metis: "true"}
+    health:
+      readiness: {path: /health, port: http, initial_delay_seconds: 5, period_seconds: 10, timeout_seconds: 2, failure_threshold: 3}
+      liveness: {path: /health, port: http, initial_delay_seconds: 15, period_seconds: 20, timeout_seconds: 2, failure_threshold: 3}
+      startup: {path: /health, port: http, period_seconds: 5, timeout_seconds: 2, failure_threshold: 30}
+    ports: [{name: http, container_port: 8080, protocol: TCP}]
+    environment: {LOG_LEVEL: INFO, CAMERA_TRANSPORT: rtsp}
+    secrets: {demo-api-token: replace-before-production}
+    secret_environment: {TRAFFIC_API_TOKEN: demo-api-token}
+configuration: {site_id: apex-lab, deployment_mode: test}

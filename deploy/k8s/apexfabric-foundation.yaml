@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apexfabric
+  labels:
+    app.kubernetes.io/part-of: apexfabric
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-agent
+  namespace: apexfabric
+  labels:
+    app.kubernetes.io/name: node-agent
+    app.kubernetes.io/part-of: apexfabric
+automountServiceAccountToken: false
+---
+# Namespace-scoped reconciliation permissions. Namespace creation remains an
+# installer/control-plane responsibility and does not require a broad ClusterRole.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: node-agent-reconciler
+  namespace: apexfabric
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "persistentvolumeclaims", "pods", "secrets", "services"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: node-agent-reconciler
+  namespace: apexfabric
+subjects:
+  - kind: ServiceAccount
+    name: node-agent
+    namespace: apexfabric
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: node-agent-reconciler

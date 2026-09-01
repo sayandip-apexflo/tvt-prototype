@@ -1,0 +1,178 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: apexnodestatuses.apexfabric.com
+spec:
+  group: apexfabric.com
+  scope: Cluster
+  names:
+    plural: apexnodestatuses
+    singular: apexnodestatus
+    kind: ApexNodeStatus
+    shortNames: [ans]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources: {status: {}}
+      additionalPrinterColumns:
+        - {name: Node, type: string, jsonPath: .spec.nodeName}
+        - {name: Accepted, type: boolean, jsonPath: .status.accepted}
+        - {name: Reason, type: string, jsonPath: .status.reason}
+        - {name: Observed, type: date, jsonPath: .spec.observedAt}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [nodeName, reporterVersion, observedAt, capabilities]
+              properties:
+                nodeName: {type: string, minLength: 1}
+                reporterVersion: {type: string, minLength: 1}
+                observedAt: {type: string, format: date-time}
+                capabilities:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              properties:
+                accepted: {type: boolean}
+                reason: {type: string}
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: node-reporter, namespace: apexfabric}
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: apexfabric-node-reporter}
+rules:
+  - apiGroups: [apexfabric.com]
+    resources: [apexnodestatuses]
+    verbs: [create, get, patch, update]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [nodes/status]
+    verbs: [get, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: apexfabric-node-reporter}
+subjects:
+  - {kind: ServiceAccount, name: node-reporter, namespace: apexfabric}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: apexfabric-node-reporter}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-reporter
+  namespace: apexfabric
+  labels: {app.kubernetes.io/name: node-reporter, app.kubernetes.io/part-of: apexfabric}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: node-reporter}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: node-reporter, app.kubernetes.io/part-of: apexfabric}
+    spec:
+      serviceAccountName: node-reporter
+      nodeSelector: {apexfabric.com/node-reporter-enabled: "true"}
+      tolerations:
+        - {operator: Exists}
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: reporter
+          image: __APEXFABRIC_REGISTRY__/apexfabric/node-reporter:0.1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}
+            - {name: REPORT_INTERVAL_SECONDS, value: "30"}
+          ports: [{name: metrics, containerPort: 9100}]
+          startupProbe: {httpGet: {path: /health, port: metrics}, periodSeconds: 2, failureThreshold: 30}
+          readinessProbe: {httpGet: {path: /ready, port: metrics}, periodSeconds: 10, failureThreshold: 3}
+          livenessProbe: {httpGet: {path: /health, port: metrics}, periodSeconds: 20, failureThreshold: 3}
+          resources:
+            requests: {cpu: 25m, memory: 48Mi}
+            limits: {cpu: 250m, memory: 192Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 0
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: host-sys, mountPath: /sys, readOnly: true}
+            - {name: host-machine-id, mountPath: /etc/machine-id, readOnly: true}
+            - {name: host-os-release, mountPath: /etc/os-release, readOnly: true}
+            - {name: host-dri, mountPath: /dev/dri, readOnly: true}
+            - {name: host-accel, mountPath: /dev/accel, readOnly: true}
+      volumes:
+        - {name: host-sys, hostPath: {path: /sys, type: Directory}}
+        - {name: host-machine-id, hostPath: {path: /etc/machine-id, type: File}}
+        - {name: host-os-release, hostPath: {path: /etc/os-release, type: File}}
+        - {name: host-dri, hostPath: {path: /dev/dri, type: DirectoryOrCreate}}
+        - {name: host-accel, hostPath: {path: /dev/accel, type: DirectoryOrCreate}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: node-status-controller, namespace: apexfabric}
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: apexfabric-node-status-controller}
+rules:
+  - apiGroups: [apexfabric.com]
+    resources: [apexnodestatuses]
+    verbs: [get, list, watch]
+  - apiGroups: [apexfabric.com]
+    resources: [apexnodestatuses/status]
+    verbs: [get, patch, update]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: apexfabric-node-status-controller}
+subjects:
+  - {kind: ServiceAccount, name: node-status-controller, namespace: apexfabric}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: apexfabric-node-status-controller}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: node-status-controller
+  namespace: apexfabric
+  labels: {app.kubernetes.io/name: node-status-controller, app.kubernetes.io/part-of: apexfabric}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app.kubernetes.io/name: node-status-controller}}
+  template:
+    metadata: {labels: {app.kubernetes.io/name: node-status-controller, app.kubernetes.io/part-of: apexfabric}}
+    spec:
+      serviceAccountName: node-status-controller
+      nodeSelector: {apexfabric.com/control-plane: "true"}
+      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: controller
+          image: __APEXFABRIC_REGISTRY__/apexfabric/node-status-controller:0.1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: RECONCILE_INTERVAL_SECONDS, value: "15"}
+            - {name: REPORT_STALE_SECONDS, value: "120"}
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}

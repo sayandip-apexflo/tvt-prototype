@@ -37,8 +37,9 @@ scheduling, probe, and failure-recovery model described in
 - Operator entry of camera credentials and selection of an RTSP profile/path.
 - Authenticated RTSP validation and continuous camera-health reporting.
 - A host-served React UI that remains available during a K3s outage.
-- One logical stream-ingestion pipeline per enabled camera inside K3s.
-- Fan-out of one camera stream to multiple, independently deployed CV Pods.
+- Direct authenticated RTSP consumption by each assigned CV workload.
+- Per-deployment camera-source Secrets following the reference Solution Pack
+  contract.
 - Automatic recovery from process, Pod, and ordinary K3s service failures
   within a few minutes.
 - Alerts displayed in the local UI.
@@ -100,26 +101,28 @@ the management UI to remain useful while K3s is down.
 This PostgreSQL instance stores management-plane data only. It is not the
 application database for recognition, attendance, ANPR, or report history.
 
-### 3.3 Read each physical camera once
+### 3.3 Let Solution Pack workloads read cameras directly
 
-CV Pods must not connect independently to a physical camera. Multiple direct
-connections increase camera load and LAN traffic and can exceed a camera's
-client-session limit.
+TVT uses the camera-input contract already implemented by `k3s-prototype`.
+For every deployed solution, the management plane creates the installation-
+owned desired-state and camera-source Secrets expected by its
+`DeploymentBundle`. Each assigned camera URL is mounted read-only at
+`/run/secrets/apexfabric/<camera_id>.rtsp`; the init container and CV runtime
+read the source through the existing `file:` desired-state reference.
 
-K3s therefore runs a **stream gateway** with one logical ingest pipeline for
-each enabled camera. Each pipeline establishes the upstream RTSP session,
-handles reconnects, timestamps stream-health observations, and exposes an
-internal stream endpoint. Any number of authorized CV Pods can consume that
-internal endpoint.
+Each CV workload therefore establishes and owns its physical RTSP session,
+decode, reconnect policy, readiness, and per-camera telemetry. If several
+independent workloads use the same camera, the camera receives several RTSP
+sessions and the credential-bearing URL exists in each deployment's camera-
+source Secret. Camera connection limits and aggregate LAN traffic must be
+verified during field acceptance. There is no GStreamer, MediaMTX, internal
+restreaming Service, or one-upstream-session guarantee in V1.
 
-The V1 gateway is implemented with GStreamer and re-publishes the compressed
-stream over cluster-local RTSP. Each CV Pod performs its own decode. Pipelines
-are assembled from discovered stream metadata and configuration instead of
-camera-model-specific code. The initial acceptance profile covers H.264 and
-H.265 RTSP cameras; additional codecs and transports can be added as GStreamer
-pipeline profiles without changing the camera or CV endpoint contracts.
-Sharing decoded frames across Pods is a future optimization that should be
-considered only after measurements show decoding to be the bottleneck.
+Because the reference renderer mounts individual Secret keys with Kubernetes
+`subPath`, changing an address, path, or password requires updating every
+affected deployment Secret and restarting the corresponding Deployment. The
+host database remains the authoritative credential store and records pending
+and applied synchronization per deployment.
 
 ### 3.4 Separate discovery from scheduling authority
 
@@ -128,6 +131,13 @@ configuration. It does not label Kubernetes Nodes or directly choose a Node
 for a workload. The existing node-status controller retains ownership of
 scheduling labels, and the Solution Pack reconciler retains ownership of CV
 Deployments and Services.
+
+The `solution-packs/` tree, DeploymentBundle schema, semantic validator,
+camera-locality logic, renderer, field manager, labels, Namespace rendering,
+server-side apply, pruning, retained-PVC behavior, and their tests are copied
+from the approved `k3s-prototype` baseline without TVT-specific forks. TVT adds
+camera discovery and supplies validated secret inputs to that existing Apply
+workflow; it does not introduce a second bundle format or renderer.
 
 ### 3.5 Keep alert delivery outside K3s
 
@@ -177,8 +187,7 @@ flowchart TB
             Controller[Node-status controller]
             Reconciler[Solution Pack reconciler]
             Alertmanager[Alertmanager]
-            Sync[Camera configuration<br/>ConfigMap and Secret]
-            Gateway[Stream gateway<br/>one logical ingest per camera]
+            Secrets[Per-deployment desired-state<br/>and camera-source Secrets]
             Face[Face-recognition Pod]
             ANPR[ANPR Pod]
             Other[Other CV and reporting Pods]
@@ -191,7 +200,7 @@ flowchart TB
     UI --> Edge
     Edge <--> DB
     Edge -->|discovery and RTSP validation| Cameras
-    Edge -->|approved cameras; scoped API access| Sync
+    Edge -->|validated secret inputs for Apply| Reconciler
     Edge -->|health reads| API
     Edge -->|host alerts| Dispatcher
     Systemd --> Edge
@@ -199,11 +208,13 @@ flowchart TB
     Systemd --> DB
     Systemd --> API
     Watchdog --> API
-    Cameras -->|one upstream RTSP session per camera| Gateway
-    Sync --> Gateway
-    Gateway -->|cluster-local streams| Face
-    Gateway -->|cluster-local streams| ANPR
-    Gateway -->|cluster-local streams| Other
+    Reconciler --> Secrets
+    Secrets --> Face
+    Secrets --> ANPR
+    Secrets --> Other
+    Face -->|direct authenticated RTSP| Cameras
+    ANPR -->|direct authenticated RTSP| Cameras
+    Other -->|direct authenticated RTSP| Cameras
     Reporter --> API
     API --> Controller
     Reconciler --> API
@@ -227,13 +238,13 @@ or database.
 | K3s health watchdog | Host `systemd` timer/service | Detect sustained API failure and perform bounded recovery | General cluster orchestration |
 | Node reporter | K3s DaemonSet Pod | Report host capabilities through `ApexNodeStatus` | Active camera discovery or Node labelling |
 | Node-status controller | K3s | Validate reports and own scheduling labels | Camera inventory or Solution Pack deployment |
-| Solution Pack reconciler | K3s | Materialize CV Deployments, Services, configuration, and probes | Selecting a concrete Node |
-| GStreamer stream gateway | K3s | Maintain upstream RTSP sessions, reconnect, and fan out compressed internal RTSP streams | CV inference or long-term recording |
-| CV use-case Pods | K3s | Run one or more packaged CV functions and emit results/metrics | Connecting directly to physical cameras |
+| Solution Pack reconciler | K3s | Materialize the reference DeploymentBundle as Namespace, Deployments, Services, configuration, Secrets, PVCs, policies and probes | Selecting a concrete Node |
+| CV use-case Pods | K3s | Read assigned RTSP URLs from mounted Secrets, connect directly to cameras, decode, reconnect and emit results/metrics | Camera discovery, credential ownership or Kubernetes reconciliation |
 
 A Solution Pack may contain one CV use case or a compatible group of use
 cases. Separate Solution Packs or Deployments remain isolated even when they
-consume the same gateway stream.
+consume the same physical camera. Each such consumer creates its own camera
+session.
 
 ## 6. Camera discovery and onboarding
 
@@ -340,7 +351,7 @@ sequenceDiagram
     participant Edge as Edge management service
     participant DB as Host PostgreSQL
     participant API as Kubernetes API
-    participant Gateway as Stream gateway
+    participant Secrets as Per-deployment Secrets
     participant CV as CV Pods
 
     Edge->>Edge: Discover camera on allowed LAN
@@ -349,72 +360,61 @@ sequenceDiagram
     Operator->>UI: Assign role, credentials, and RTSP profile
     UI->>Edge: Save and validate
     Edge->>DB: Store configuration and validation result
-    Edge->>API: Reconcile non-secret source data and credential Secret
-    API-->>Gateway: Apply desired camera sources
-    Gateway->>Gateway: Start/reload one logical ingest pipeline
-    Gateway-->>CV: Publish stable cluster-local stream endpoint
+    Edge->>API: Apply bundle plus validated secret inputs
+    API->>Secrets: Store desired state and physical RTSP URLs
+    Secrets-->>CV: Mount assigned source files read-only
+    CV->>CV: Compile plan and open physical RTSP source
 ```
 
-The edge service uses a dedicated kubeconfig and least-privilege RBAC. It may
-create or update only the named camera ConfigMap/Secret or a future
-`CameraSource` custom resource in the product namespace. It cannot create
-arbitrary workloads, label Nodes, or read unrelated Secrets.
+The edge service invokes the same allowlisted Apply path as the reference
+control plane. That workflow validates the bundle and ephemeral secret inputs,
+creates the bundle-named desired-state and camera-source Secrets, and runs the
+unchanged Solution Pack reconciler. Secret values never enter the stored
+bundle, preview, job log, result, or audit record.
 
 If K3s is unavailable, the database update succeeds locally and synchronization
 is marked pending. Reconciliation is idempotently retried after the Kubernetes
-API recovers. Cluster-side configuration retains the last successfully applied
+API recovers. Per-deployment Secrets retain the last successfully applied
 camera set during a temporary host-service outage.
 
 Credentials are encrypted at rest using a host-held key, redacted from logs and
-API responses, and placed in a Kubernetes Secret only when a camera is enabled.
-RTSP URLs exposed to CV Pods must not contain inline passwords in logs or
-metrics.
+API responses, and copied only into camera-source Secrets for deployments
+assigned that camera. Updating a source also triggers a controlled rollout
+restart because the unchanged reference renderer uses `subPath` Secret mounts.
+Credential-bearing RTSP URLs must never appear in bundles, ConfigMaps, Pod
+environment, annotations, Events, API responses, logs, metrics, or alerts.
 
-## 8. Stream and inference flow
+## 8. Direct stream and inference flow
 
 ```mermaid
 flowchart LR
-    Camera[Physical camera] -->|single RTSP pull| Ingest[Per-camera logical ingest]
-    Ingest -->|internal RTSP| Face[Face recognition Pod]
-    Ingest -->|internal RTSP| ANPR[ANPR Pod]
-    Ingest -->|internal RTSP| Presence[Inside/outside Pod]
+    Secrets[Per-deployment camera-source Secrets] --> Face[Face recognition Pod]
+    Secrets --> ANPR[ANPR Pod]
+    Secrets --> Presence[Inside/outside Pod]
+    Face -->|direct RTSP session| Camera[Physical camera]
+    ANPR -->|direct RTSP session| Camera
+    Presence -->|direct RTSP session| Camera
     Face --> Events[Ephemeral event path]
     ANPR --> Events
     Presence --> Events
     Events --> Reports[Reporting Pods]
 ```
 
-The internal endpoint is stable for a `camera_id`; consumers do not use the
-camera's mutable LAN address. Gateway readiness is false until upstream media
-is flowing. Consumers report a distinct `source_unavailable` state rather than
-crash-looping when their stream is temporarily offline.
+Each application owns source readiness. It reports `source_unavailable` and
+retries with bounded backoff rather than crash-looping during a camera outage.
+One application's failure or reconnect must not interrupt another application,
+although both are independently affected by the same camera or LAN failure.
 
-The initial implementation runs one gateway Pod with independent GStreamer
-pipelines for all enabled cameras. A failed pipeline is rebuilt without
-restarting the other pipelines. A process-level fault can still restart the
-shared Pod, which is accepted for the five-to-eight-camera V1 ceiling.
-
-The gateway must remain camera-model agnostic, but “any camera specification”
-does not mean every codec can be accepted without a compatible GStreamer
-element. Unsupported media is reported as a categorized validation failure.
-The initial field benchmark uses eight simultaneous 1080p, 15 FPS H.264 or
-H.265 streams at up to 4 Mbit/s each, with two internal consumers per stream.
-It must demonstrate:
-
-- exactly one upstream camera session per enabled camera;
-- eight hours of sustained operation without pipeline or Pod restart;
-- no interruption longer than two seconds on unaffected streams when one
-  camera is disconnected;
-- disconnected-camera recovery within 60 seconds after media becomes
-  reachable;
-- no sustained packet-drop ratio above 0.1% on a healthy LAN;
-- less than 500 ms p95 gateway-added latency; and
-- less than 60% aggregate CPU, 4 GiB gateway memory, 70% hardware-decode
-  utilization, and no thermal throttling on the supported server.
-
-These are V1 engineering acceptance values, not accuracy or production sizing
-guarantees. Higher resolutions, frame rates, bitrates, or codecs require a new
-measured capacity record rather than a code rewrite.
+The initial field benchmark uses all assigned CV consumers against up to eight
+simultaneous 1080p, 15 FPS H.264 or H.265 sources at up to 4 Mbit/s per session.
+It measures the actual number of direct sessions per camera, camera session
+limits, aggregate camera-LAN bandwidth, reconnect time, packet loss, inference
+latency, CPU, memory, hardware-decode utilization and thermals for eight hours.
+The accepted assignment must stay within camera connection limits, reconnect
+within 60 seconds after media becomes reachable, sustain packet loss below
+0.1% on a healthy LAN, and avoid host thermal throttling. Adding another CV
+consumer is a capacity change because it adds another physical RTSP session and
+decode path.
 
 ## 9. Health, alerts, and UI behavior
 
@@ -429,8 +429,9 @@ The edge management service exposes independent status for:
 - `k3s.service` process state;
 - Kubernetes API readiness;
 - local Kubernetes Node readiness;
-- stream-gateway desired/ready state and per-camera media flow; and
-- CV Deployment desired/available replicas and Pod conditions.
+- per-deployment camera Secret synchronization; and
+- CV Deployment desired/available replicas, Pod conditions, and direct-source
+  media status.
 
 These signals must not be collapsed into one red/green value. For example,
 `k3s.service` can be active while its API is not ready, and a camera can answer
@@ -446,7 +447,7 @@ alert conditions include:
 - RTSP authentication or media validation failure;
 - camera configuration waiting for K3s synchronization;
 - K3s API unavailable or Node not Ready;
-- stream gateway unavailable or repeatedly reconnecting;
+- CV source unavailable or repeatedly reconnecting;
 - CV Deployment unavailable; and
 - host disk, memory, or temperature threshold exceeded.
 
@@ -486,8 +487,8 @@ process-level failures. This is not a promise of uninterrupted processing.
 | Failure | Detection | Expected behavior and recovery |
 |---|---|---|
 | One CV process or Pod fails | Kubernetes probes and Deployment status | Kubelet restarts the container or the Deployment replaces the Pod |
-| One upstream RTSP session fails | Gateway media timeout | Gateway reconnects with bounded exponential backoff; other camera pipelines continue |
-| Camera becomes unreachable | Host validation and gateway health | UI alert is raised; consumers expose `source_unavailable`; automatic retry continues |
+| One workload RTSP session fails | Workload media timeout | That workload reconnects with bounded exponential backoff; other workloads continue independently |
+| Camera becomes unreachable | Host validation and workload source telemetry | UI alert is raised; every assigned consumer exposes `source_unavailable`; automatic retry continues |
 | Edge management service fails | `systemd` | Service restarts; K3s inference continues using last-applied configuration |
 | PostgreSQL fails | `systemd` and edge-service check | PostgreSQL restarts; UI reports degraded management state; existing K3s inference continues |
 | Alert dispatcher fails | `systemd` | Dispatcher restarts; Alertmanager retries uncommitted webhook delivery and committed outbox work resumes |
@@ -519,7 +520,7 @@ Initial measurable recovery targets are:
 |---|---|
 | Camera media returns after a transient disconnect | Within 60 seconds |
 | Failed container or ordinary Pod replacement | Within 2 minutes |
-| Stream-gateway process or Pod recovery | Within 3 minutes |
+| CV source-session recovery after media returns | Within 60 seconds |
 | PostgreSQL service recovery | Within 2 minutes |
 | K3s API and workloads after a K3s service restart | Within 5 minutes |
 | Management plane and workloads after a normal host reboot | Within 10 minutes |
@@ -605,29 +606,27 @@ must load when K3s is down, and K3s must run when the edge service is down.
 Synchronization converges when both are available.
 
 Within K3s, the node reporter and controllers establish Node eligibility;
-camera synchronization supplies enabled sources; the stream gateway becomes
-Ready when media flows; and CV Deployments start independently through the
-existing Solution Pack and scheduler flow.
+the reference Solution Pack Apply workflow supplies assigned camera Secrets;
+and CV Deployments start independently through the existing reconciler and
+scheduler flow.
 
 ## 14. Frozen V1 implementation profile
 
 - Reference baseline: `k3s-prototype` commit `bcb58030f89b`.
 - Hardware/OS: Intel Core Ultra 9 285H-class server, 64 GiB RAM, 1 TiB NVMe,
   and Ubuntu 24.04 LTS.
-- Runtime baseline: Python 3.12, PostgreSQL 16, K3s
-  `v1.36.3+k3s1`, and Ubuntu's tested GStreamer 1.24 package set with VA-API
-  plugins. Exact package builds, Helm chart versions, and image digests are
+- Runtime baseline: Python 3.12, PostgreSQL 16, and K3s
+  `v1.36.3+k3s1`. Exact package builds, Helm chart versions, and image digests are
   frozen in the installer lock manifest rather than floated at install time.
-- Gateway: one shared GStreamer gateway Pod with independent per-camera
-  pipelines and compressed cluster-local RTSP.
-- Camera integration: ONVIF WS-Discovery followed by GStreamer RTSP probing;
-  camera-specific behavior is configuration or an isolated pipeline profile.
+- Camera integration: ONVIF WS-Discovery followed by bounded host RTSP probing;
+  deployed CV applications connect directly to assigned physical sources.
 - Management persistence: host PostgreSQL with versioned migrations;
   AES-256-GCM camera credential encryption using a protected, versioned host
   key.
-- Camera-to-K3s contract: installer-owned
-  `ConfigMap/tvt-camera-sources` and `Secret/tvt-camera-credentials` in the
-  `apexfabric` namespace.
+- Camera-to-K3s contract: the unchanged reference `DeploymentBundle`, desired-
+  state Secret, per-deployment camera-source Secret, `external_mounts`,
+  `plan_compiler`, and `file:/run/secrets/apexfabric/<camera_id>.rtsp` image
+  contract.
 - UI: on-site management network only with the local administrator security
   controls in section 3.6. Tailscale and other off-site remote access are
   deferred.
@@ -646,8 +645,10 @@ The first implementation of this design is accepted when it demonstrates that:
    RTSP validation result.
 3. A known camera remains associated with the same database record after an IP
    address change when stable identity data is available.
-4. One physical RTSP session is fanned out to at least two different CV Pods.
-5. Disconnecting one camera does not interrupt other camera pipelines.
+4. A generated reference-format Solution Pack mounts only its assigned camera
+   URLs and its CV Pod opens those physical streams directly.
+5. Two workloads assigned the same camera create two measured direct sessions,
+   remain within the camera's connection limit, and reconnect independently.
 6. A failed CV Pod is automatically restored.
 7. Restarting K3s leaves the host UI and camera inventory available and restores
    cluster workloads within the measured few-minute recovery target.
