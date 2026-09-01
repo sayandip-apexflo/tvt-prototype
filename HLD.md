@@ -19,11 +19,12 @@ stream concurrently. The initial use cases from `README.md` are:
 
 A small host management plane remains available when K3s is unavailable. It
 discovers cameras, validates RTSP connectivity, records camera inventory in
-PostgreSQL, reports host and K3s health, and serves the React management UI.
+PostgreSQL, reports host and K3s health, serves the React management UI, and
+delivers durable operational alert email through a separate host dispatcher.
 
 This design extends the node reporting, Solution Pack reconciliation,
 scheduling, probe, and failure-recovery model described in
-`ARCHITECTURE.md`. It does not move CV inference out of the cluster.
+`APEXFABRIC_ARCHITECTURE.md`. It does not move CV inference out of the cluster.
 
 ## 2. Scope and assumptions
 
@@ -41,12 +42,16 @@ scheduling, probe, and failure-recovery model described in
 - Automatic recovery from process, Pod, and ordinary K3s service failures
   within a few minutes.
 - Alerts displayed in the local UI.
+- Durable, auditable firing, reminder, and recovery email for configured
+  operational alerts.
+- On-site access to the management UI from a dedicated management network.
 
 ### 2.2 Out of scope for this version
 
 - Control-plane or server high availability.
 - Automatic configuration of server NICs, VLANs, routes, switches, or cameras.
-- Remote email, SMS, or cloud alert delivery.
+- SMS, paging, and arbitrary cloud notification channels other than the
+  approved SMTP relay.
 - Detection of a total server, power, or site-network outage from outside the
   box.
 - Durable retention of video, snapshots, CV events, attendance data, or
@@ -57,8 +62,11 @@ scheduling, probe, and failure-recovery model described in
 Camera inventory is operational configuration and is persisted in PostgreSQL.
 The statement that CV data need not survive locally does not apply to that
 inventory. Face enrollment and daily reporting will eventually require a
-defined durable data store; until that is added, those use cases cannot offer
-restart-safe history or enrollment records.
+defined durable data store. Face enrollment, recognition, ANPR, attendance,
+vehicle history, and business-reporting components are therefore integration
+stubs until application images and a durable business-data design are supplied;
+their records are not required to survive restart in V1. Operational alert and
+email-delivery records are management-plane data and remain durable.
 
 ## 3. Architecture decisions
 
@@ -104,10 +112,14 @@ handles reconnects, timestamps stream-health observations, and exposes an
 internal stream endpoint. Any number of authorized CV Pods can consume that
 internal endpoint.
 
-For the first version, the gateway may re-publish the compressed stream over
-cluster-local RTSP. Each CV Pod then performs its own decode. Sharing decoded
-frames across Pods is a future optimization that should be considered only
-after measurements show decoding to be the bottleneck.
+The V1 gateway is implemented with GStreamer and re-publishes the compressed
+stream over cluster-local RTSP. Each CV Pod performs its own decode. Pipelines
+are assembled from discovered stream metadata and configuration instead of
+camera-model-specific code. The initial acceptance profile covers H.264 and
+H.265 RTSP cameras; additional codecs and transports can be added as GStreamer
+pipeline profiles without changing the camera or CV endpoint contracts.
+Sharing decoded frames across Pods is a future optimization that should be
+considered only after measurements show decoding to be the bottleneck.
 
 ### 3.4 Separate discovery from scheduling authority
 
@@ -116,6 +128,33 @@ configuration. It does not label Kubernetes Nodes or directly choose a Node
 for a workload. The existing node-status controller retains ownership of
 scheduling labels, and the Solution Pack reconciler retains ownership of CV
 Deployments and Services.
+
+### 3.5 Keep alert delivery outside K3s
+
+A separate host `tvt-alert-dispatcher.service` receives authenticated firing
+and resolved Alertmanager webhooks and fixed host-originated alerts. In one
+PostgreSQL transaction it records the alert transition, evaluates the site
+notification policy, and creates an email outbox item. A worker claims due
+items and delivers them through SendGrid's SMTP relay using certificate-
+verified STARTTLS.
+
+The dispatcher owns delivery retry, acknowledgement-aware reminders, recovery
+email, and redacted delivery history. Alertmanager continues to own PromQL
+evaluation, grouping, inhibition, and initial notification timing. A bounded
+filesystem emergency spool is used only for allowlisted host-infrastructure
+alerts when PostgreSQL is unavailable. The dispatcher is not used for daily
+business reports.
+
+### 3.6 Restrict and authenticate the on-site management UI
+
+The UI binds only to the approved on-site management interface and is blocked
+from camera, public-WAN, and general production-user networks. V1 uses an
+installer-created local administrator account, an Argon2id password hash,
+forced password replacement at first login, server-side sessions with Secure,
+HttpOnly, and SameSite cookies, CSRF protection on mutations, login throttling,
+and TLS using the site's certificate or installer-managed local CA. V1 has one
+administrator role; additional roles or identity-provider integration require
+a later access-control design.
 
 ## 4. System context
 
@@ -128,7 +167,8 @@ flowchart TB
         Systemd[systemd]
         UI[React UI]
         Edge[Edge management service<br/>Python runtime]
-        DB[(Host PostgreSQL<br/>camera inventory)]
+        Dispatcher[Alert dispatcher<br/>systemd service]
+        DB[(Host PostgreSQL<br/>camera inventory and alerts)]
         Watchdog[K3s health watchdog]
 
         subgraph Cluster[Single-node K3s cluster]
@@ -136,6 +176,7 @@ flowchart TB
             Reporter[Node reporter]
             Controller[Node-status controller]
             Reconciler[Solution Pack reconciler]
+            Alertmanager[Alertmanager]
             Sync[Camera configuration<br/>ConfigMap and Secret]
             Gateway[Stream gateway<br/>one logical ingest per camera]
             Face[Face-recognition Pod]
@@ -144,13 +185,17 @@ flowchart TB
         end
     end
 
+    SMTP[SendGrid SMTP relay]
+
     Operator --> UI
     UI --> Edge
     Edge <--> DB
     Edge -->|discovery and RTSP validation| Cameras
     Edge -->|approved cameras; scoped API access| Sync
     Edge -->|health reads| API
+    Edge -->|host alerts| Dispatcher
     Systemd --> Edge
+    Systemd --> Dispatcher
     Systemd --> DB
     Systemd --> API
     Watchdog --> API
@@ -162,6 +207,9 @@ flowchart TB
     Reporter --> API
     API --> Controller
     Reconciler --> API
+    Alertmanager -->|authenticated webhook| Dispatcher
+    Dispatcher <--> DB
+    Dispatcher -->|STARTTLS email| SMTP
 ```
 
 The React UI is built as static assets and served by the edge management
@@ -172,14 +220,15 @@ or database.
 
 | Component | Runs where | Responsibilities | Explicitly not responsible for |
 |---|---|---|---|
-| React UI | Host management plane | Camera onboarding, live status, K3s status, local alerts | Inference or direct Kubernetes access |
+| React UI | Host management plane | Camera onboarding, live status, K3s status, alert acknowledgement and delivery status | Inference or direct Kubernetes access |
 | Edge management service | Host `systemd` service | Discovery, inventory, RTSP validation, UI API, health aggregation, camera-config sync | CV processing, Node labels, unrestricted cluster administration |
-| Management PostgreSQL | Host `systemd` service | Camera records, status history, local alerts, discovery metadata | CV event or video retention |
+| Alert dispatcher | Host `systemd` service | Authenticated alert ingestion, durable outbox, acknowledgement-aware reminders, recovery email, SMTP retry and delivery audit | PromQL evaluation, business-report email, arbitrary templates or recipients from alert payloads |
+| Management PostgreSQL | Host `systemd` service | Camera records, status history, operational alerts, notification outbox and audit metadata | CV event, video, attendance, ANPR, or business-report retention |
 | K3s health watchdog | Host `systemd` timer/service | Detect sustained API failure and perform bounded recovery | General cluster orchestration |
 | Node reporter | K3s DaemonSet Pod | Report host capabilities through `ApexNodeStatus` | Active camera discovery or Node labelling |
 | Node-status controller | K3s | Validate reports and own scheduling labels | Camera inventory or Solution Pack deployment |
 | Solution Pack reconciler | K3s | Materialize CV Deployments, Services, configuration, and probes | Selecting a concrete Node |
-| Stream gateway | K3s | Maintain upstream RTSP sessions, reconnect, and fan out internal streams | CV inference or long-term recording |
+| GStreamer stream gateway | K3s | Maintain upstream RTSP sessions, reconnect, and fan out compressed internal RTSP streams | CV inference or long-term recording |
 | CV use-case Pods | K3s | Run one or more packaged CV functions and emit results/metrics | Connecting directly to physical cameras |
 
 A Solution Pack may contain one CV use case or a compatible group of use
@@ -193,6 +242,15 @@ consume the same gateway stream.
 Discovery is restricted to an operator-configured allowlist of local IPv4/IPv6
 subnets and interfaces. The service never scans arbitrary routes or the
 internet.
+
+The installer enumerates the server NICs and their directly connected subnets
+and requires the installer to select the camera-facing interface and subnet.
+For example, an on-site server might select `enp2s0` and
+`192.168.20.0/24`; these are deployment values, not hard-coded defaults. This
+selection answers two security and safety questions: where WS-Discovery is
+sent, and which addresses may receive bounded TCP probes. An explicit
+allowlist prevents the service from scanning the management LAN, customer
+office network, public routes, or another VLAN by accident.
 
 Discovery uses the following methods in order:
 
@@ -331,17 +389,32 @@ camera's mutable LAN address. Gateway readiness is false until upstream media
 is flowing. Consumers report a distinct `source_unavailable` state rather than
 crash-looping when their stream is temporarily offline.
 
-The initial implementation may run one gateway Pod containing all logical
-pipelines or one Pod per camera. One Pod per camera provides better failure and
-restart isolation; a shared Deployment has lower overhead. This is an
-implementation-time choice as long as the logical identity, one-upstream-pull
-rule, health model, and consumer endpoint remain unchanged.
+The initial implementation runs one gateway Pod with independent GStreamer
+pipelines for all enabled cameras. A failed pipeline is rebuilt without
+restarting the other pipelines. A process-level fault can still restart the
+shared Pod, which is accepted for the five-to-eight-camera V1 ceiling.
 
-Because codec, resolution, FPS, model size, and accelerator information are not
-yet known, support for eight streams is a design target rather than a capacity
-guarantee. A deployment benchmark must later verify decode sessions, GPU/CPU
-utilization, memory, thermals, end-to-end latency, and reconnect behavior with
-all intended use cases active.
+The gateway must remain camera-model agnostic, but “any camera specification”
+does not mean every codec can be accepted without a compatible GStreamer
+element. Unsupported media is reported as a categorized validation failure.
+The initial field benchmark uses eight simultaneous 1080p, 15 FPS H.264 or
+H.265 streams at up to 4 Mbit/s each, with two internal consumers per stream.
+It must demonstrate:
+
+- exactly one upstream camera session per enabled camera;
+- eight hours of sustained operation without pipeline or Pod restart;
+- no interruption longer than two seconds on unaffected streams when one
+  camera is disconnected;
+- disconnected-camera recovery within 60 seconds after media becomes
+  reachable;
+- no sustained packet-drop ratio above 0.1% on a healthy LAN;
+- less than 500 ms p95 gateway-added latency; and
+- less than 60% aggregate CPU, 4 GiB gateway memory, 70% hardware-decode
+  utilization, and no thermal throttling on the supported server.
+
+These are V1 engineering acceptance values, not accuracy or production sizing
+guarantees. Higher resolutions, frame rates, bitrates, or codecs require a new
+measured capacity record rather than a code rewrite.
 
 ## 9. Health, alerts, and UI behavior
 
@@ -363,7 +436,7 @@ These signals must not be collapsed into one red/green value. For example,
 `k3s.service` can be active while its API is not ready, and a camera can answer
 ONVIF while its RTSP stream fails authentication.
 
-### 9.2 Local alerts
+### 9.2 Durable operational alerts
 
 Alerts are stored in the management database and shown in the React UI. Initial
 alert conditions include:
@@ -377,22 +450,33 @@ alert conditions include:
 - CV Deployment unavailable; and
 - host disk, memory, or temperature threshold exceeded.
 
-Alerts have `active`, `acknowledged`, and `cleared` states. Repeated failures
-update one alert instead of creating an unbounded stream of duplicates.
+Alerts have `active`, `acknowledged`, and `resolved` states. Repeated failures
+update one logical alert instead of creating an unbounded stream of duplicates.
+Alertmanager sends firing and resolved events to the host dispatcher. The edge
+service sends host/control-plane alerts to its permission-restricted Unix
+socket, so K3s, Prometheus, and Alertmanager outages can still generate email.
 
-Because alerting is local-only, no alert can be delivered when the operator is
-not viewing the UI, the host is powered off, or its LAN connection is lost.
-This is an accepted limitation of this version.
+Critical alerts normally require a two-minute sustained condition, send after
+Alertmanager's 30-second grouping delay, and repeat every 30 minutes while
+active and unacknowledged. Warnings normally require five to ten minutes, send
+once after a five-minute grouping window, and repeat every four hours while
+active and unacknowledged. Informational alerts remain UI-only by default.
+Acknowledgement stops reminders but neither clears an alert nor suppresses a
+recovery email. Recovery email is sent only when a firing email for that alert
+occurrence was successfully delivered.
 
-### 9.3 Future external observability
+SendGrid is the default V1 SMTP relay. Its API key is stored in a root-readable
+host credential file and is never stored in YAML, PostgreSQL, Kubernetes, or
+logs. The initial non-delivering documentation identities are
+`tvt-alerts@tvt.example` and `tvt-test-operator@tvt.example`; deployment must
+replace them with a SendGrid-verified sender and a reachable test mailbox.
+Recipient and sender values come only from site configuration, never from an
+alert payload.
 
-The next operational increment should export structured metrics, logs, traces,
-and bounded diagnostic snapshots to a central dashboard. Remote shell access
-through a secure support tunnel should be a last-resort diagnostic mechanism,
-not the primary monitoring path. This extension can add off-box alert delivery
-and total-host heartbeat detection without changing the camera-ingest or CV
-workload boundaries in this design. It is not required for the current
-UI-only-alert phase.
+The dispatcher provides durable local queuing and audit, but cannot send while
+the host, storage, site power, or outbound network is unavailable. Queued mail
+resumes after connectivity returns. Detecting total-host failure still requires
+a future external heartbeat.
 
 ## 10. Failure recovery
 
@@ -406,6 +490,8 @@ process-level failures. This is not a promise of uninterrupted processing.
 | Camera becomes unreachable | Host validation and gateway health | UI alert is raised; consumers expose `source_unavailable`; automatic retry continues |
 | Edge management service fails | `systemd` | Service restarts; K3s inference continues using last-applied configuration |
 | PostgreSQL fails | `systemd` and edge-service check | PostgreSQL restarts; UI reports degraded management state; existing K3s inference continues |
+| Alert dispatcher fails | `systemd` | Dispatcher restarts; Alertmanager retries uncommitted webhook delivery and committed outbox work resumes |
+| SendGrid or site WAN is unavailable | SMTP result | Retain committed outbox items and retry with bounded backoff; show pending age in the UI |
 | K3s process exits | `systemd` | K3s restarts automatically; Deployments reconcile after the API returns |
 | K3s is active but API remains unhealthy | Host watchdog | After a sustained threshold, perform one controlled restart, then enter a cooldown and alert rather than restart-looping |
 | Server reboots | `systemd` ordering | Network, PostgreSQL, edge service, and K3s start automatically; camera and workload reconciliation resumes |
@@ -426,6 +512,20 @@ Exact thresholds must be tuned using boot and recovery measurements. Before a
 deployment is accepted, test Pod crash, camera disconnect/reconnect, K3s
 restart, PostgreSQL restart, management-service restart, host reboot, and disk
 pressure.
+
+Initial measurable recovery targets are:
+
+| Recovery event | V1 target |
+|---|---|
+| Camera media returns after a transient disconnect | Within 60 seconds |
+| Failed container or ordinary Pod replacement | Within 2 minutes |
+| Stream-gateway process or Pod recovery | Within 3 minutes |
+| PostgreSQL service recovery | Within 2 minutes |
+| K3s API and workloads after a K3s service restart | Within 5 minutes |
+| Management plane and workloads after a normal host reboot | Within 10 minutes |
+
+Targets are measured from fault removal or restart initiation until the named
+component is healthy; they do not include repair of hardware or network faults.
 
 ## 11. Availability statement
 
@@ -448,10 +548,20 @@ Adding a second monitoring process on the same host improves diagnosis but does
 not protect against total host failure. True K3s control-plane availability
 would require additional physical server nodes and is outside this scope.
 
+Camera inventory, alert/outbox/audit records, the local OCI registry, and
+retained monitoring data must survive OS reinstallation through an encrypted
+backup on operator-provided external USB storage or an approved network share.
+Installation and upgrade procedures verify a backup before destructive work,
+and a quarterly restore test validates the recovery procedure. CV stub data,
+video, faces, plates, attendance, and generated business reports are not part
+of this V1 backup set. The approved UPS must signal the OS and provide enough
+runtime for an orderly PostgreSQL checkpoint and filesystem shutdown.
+
 ## 12. Security boundaries
 
-- The management UI must require authentication before it is exposed beyond
-  loopback or a dedicated management network.
+- The management UI binds only to the on-site management interface, requires
+  the local administrator authentication controls in section 3.6, and is not
+  exposed on the public WAN or camera VLAN.
 - Discovery is limited to configured interfaces and subnets and is rate
   limited.
 - Camera credentials are write-only from the browser's perspective, encrypted
@@ -464,8 +574,13 @@ would require additional physical server nodes and is outside this scope.
   receive Kubernetes API credentials or host filesystem access.
 - PostgreSQL binds locally and uses a dedicated database role for the edge
   service.
+- The dispatcher has its own service account and database role. Alertmanager's
+  webhook credential and the SendGrid SMTP API key are separate, rotatable,
+  protected host credentials.
+- Alert email contains no RTSP URLs, camera credentials, faces, embeddings,
+  people, number plates, Secret values, log bodies, or stack traces.
 - Production images should be pinned by digest and supplied through the
-  controlled image workflow described in `ARCHITECTURE.md`.
+  controlled image workflow described in `APEXFABRIC_ARCHITECTURE.md`.
 
 ## 13. Deployment and startup order
 
@@ -475,6 +590,10 @@ Host services are enabled at boot with these dependencies:
 network-online.target
   -> postgresql.service
   -> edge-management.service
+
+network-online.target
+  -> tvt-alert-dispatcher.service
+     (ordered after the PostgreSQL startup attempt, but does not Require it)
 
 network-online.target
   -> k3s.service
@@ -490,20 +609,32 @@ camera synchronization supplies enabled sources; the stream gateway becomes
 Ready when media flows; and CV Deployments start independently through the
 existing Solution Pack and scheduler flow.
 
-## 14. Open implementation choices
+## 14. Frozen V1 implementation profile
 
-These choices do not block the high-level architecture but must be resolved
-before implementation:
-
-- stream-gateway product/library and internal transport;
-- one gateway Pod per camera versus multiple logical pipelines per Pod;
-- ONVIF and RTSP client libraries;
-- PostgreSQL schema and credential-encryption mechanism;
-- exact React UI authentication and network exposure;
-- camera configuration resource shape (ConfigMap/Secret versus a dedicated
-  `CameraSource` CRD);
-- health and recovery thresholds; and
-- hardware capacity after camera and accelerator specifications are known.
+- Reference baseline: `k3s-prototype` commit `bcb58030f89b`.
+- Hardware/OS: Intel Core Ultra 9 285H-class server, 64 GiB RAM, 1 TiB NVMe,
+  and Ubuntu 24.04 LTS.
+- Runtime baseline: Python 3.12, PostgreSQL 16, K3s
+  `v1.36.3+k3s1`, and Ubuntu's tested GStreamer 1.24 package set with VA-API
+  plugins. Exact package builds, Helm chart versions, and image digests are
+  frozen in the installer lock manifest rather than floated at install time.
+- Gateway: one shared GStreamer gateway Pod with independent per-camera
+  pipelines and compressed cluster-local RTSP.
+- Camera integration: ONVIF WS-Discovery followed by GStreamer RTSP probing;
+  camera-specific behavior is configuration or an isolated pipeline profile.
+- Management persistence: host PostgreSQL with versioned migrations;
+  AES-256-GCM camera credential encryption using a protected, versioned host
+  key.
+- Camera-to-K3s contract: installer-owned
+  `ConfigMap/tvt-camera-sources` and `Secret/tvt-camera-credentials` in the
+  `apexfabric` namespace.
+- UI: on-site management network only with the local administrator security
+  controls in section 3.6. Tailscale and other off-site remote access are
+  deferred.
+- Alert transport: host dispatcher and SendGrid SMTP with durable PostgreSQL
+  outbox and the bounded emergency path defined in `LLD_PLAN.md`.
+- CV/business functions: non-durable integration stubs until images and data
+  contracts are supplied.
 
 ## 15. Acceptance criteria
 
@@ -523,15 +654,20 @@ The first implementation of this design is accepted when it demonstrates that:
 8. Restarting the edge management service does not stop existing inference.
 9. Camera passwords do not appear in browser responses, application logs,
    Kubernetes Events, or metrics.
-10. A full host shutdown is clearly documented as an undetectable local-only
-    failure until external monitoring is introduced.
+10. A sustained synthetic alert produces one firing email and one recovery
+    email through the approved SendGrid test configuration, with auditable
+    delivery state and no sensitive data.
+11. SMTP failure retains queued email across dispatcher restart and delivers it
+    after connectivity returns without duplicating the logical transition.
+12. A full host shutdown is clearly documented as undetectable until external
+    monitoring is introduced.
 
 ## 16. References
 
 - `README.md` for the requested TVT camera placement and CV use cases.
-- `ARCHITECTURE.md` for the ApexFabric node reporter, node-status controller,
-  Solution Pack reconciler, K3s scheduling, probes, monitoring, and trust
-  boundaries.
+- `APEXFABRIC_ARCHITECTURE.md` for the ApexFabric node reporter, node-status
+  controller, Solution Pack reconciler, K3s scheduling, probes, monitoring,
+  and trust boundaries.
 - [K3s architecture](https://docs.k3s.io/architecture) for single-server and
   high-availability topology.
 - [K3s quick-start guide](https://docs.k3s.io/quick-start) for service startup

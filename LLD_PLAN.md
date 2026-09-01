@@ -588,8 +588,7 @@ must:
    hardware profile;
 7. apply the stream gateway and camera sync objects;
 8. install the monitoring stack with bounded resources; and
-9. install and enable host PostgreSQL, edge service, alert dispatcher, and
-   watchdog units.
+9. install and enable host PostgreSQL, edge service, and watchdog units.
 
 No agent join token, approval state, enrollment certificate, driver bundle, or
 remote install transaction exists in this sequence.
@@ -748,11 +747,6 @@ TVT requires durable delivery history, UI acknowledgement, retry visibility,
 host-originated K3s-down alerts, and recipient policy in one place. A simpler
 deployment may use direct Alertmanager email only if those requirements are
 explicitly dropped.
-
-The unit starts after the network and PostgreSQL startup attempt, but it does
-not `Require=` PostgreSQL: it must remain running to use the bounded emergency
-path when the database is unavailable. It uses `Restart=on-failure`, a single
-webhook/Unix-socket receiver, and one outbox-worker loop in V1.
 
 ### 15.2 Input paths
 

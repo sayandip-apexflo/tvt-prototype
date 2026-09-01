@@ -16,6 +16,9 @@ The design makes three deliberate choices:
 3. Distributed tracing is not deployed. A request or operation ID is propagated
    through HTTP headers, job payloads, and explicit function boundaries and is
    included in structured logs.
+4. A host `tvt-alert-dispatcher.service` durably records Alertmanager and host
+   alerts, applies acknowledgement-aware email policy, and delivers through
+   SendGrid SMTP independently of K3s.
 
 This is a proportionate first version for two or three services with linear
 request flows. Metrics are the primary alert source; logs supply diagnostic
@@ -53,6 +56,7 @@ See the official
 - Preserve enough context to diagnose common failures without opening a shell
   on the server.
 - Display firing and resolved alerts in the host React UI.
+- Durably queue, retry, and audit operational alert email.
 - Support multiple Python worker processes inside a Pod.
 - Correlate logs across the small number of services without deploying a trace
   backend.
@@ -67,9 +71,11 @@ See the official
 - Exact storage of attendance, face, ANPR, or vehicle events in Prometheus or
   Loki.
 - Video, image, or diagnostic-snapshot storage in Loki.
-- External email, SMS, or paging in the first version.
+- SMS, paging, and notification channels other than the approved SendGrid SMTP
+  relay.
 - Monitoring that survives a complete power, disk, kernel, or server failure.
 - High availability for Prometheus, Alertmanager, Grafana, Loki, or Alloy.
+- Off-site remote shell access or Tailscale in V1.
 
 ## 5. Monitoring architecture
 
@@ -77,11 +83,14 @@ See the official
 flowchart TB
     subgraph Host[Linux host management plane]
         Edge[Edge management service<br/>Python]
+        Dispatcher[Alert dispatcher<br/>Python systemd service]
         Journal[systemd journal]
-        DB[(Host PostgreSQL<br/>alerts and camera inventory)]
+        DB[(Host PostgreSQL<br/>alerts, outbox and camera inventory)]
         UI[React UI]
         HostCheck[Independent K3s and service checks]
     end
+
+    SendGrid[SendGrid SMTP relay]
 
     subgraph K3s[Single-node K3s cluster]
         subgraph Apps[Product workloads]
@@ -110,7 +119,10 @@ flowchart TB
     KSM --> Prom
     NodeExporter --> Prom
     Prom -->|firing and resolved alerts| AM
-    AM -->|authenticated webhook| Edge
+    AM -->|authenticated webhook| Dispatcher
+    HostCheck -->|fixed host alerts over Unix socket| Dispatcher
+    Dispatcher <--> DB
+    Dispatcher -->|certificate-verified STARTTLS| SendGrid
     Edge --> DB
     DB --> UI
     Prom --> Grafana
@@ -119,6 +131,7 @@ flowchart TB
     CV -->|JSON stdout| Alloy
     Reporting -->|JSON stdout| Alloy
     Edge -->|JSON stdout captured by systemd| Journal
+    Dispatcher -->|JSON stdout captured by systemd| Journal
     Journal --> Alloy
     Alloy --> Loki
     Loki --> Grafana
@@ -233,6 +246,19 @@ http_requests_total{service,method,route,status_class}
 http_request_duration_seconds{service,method,route}
 http_requests_in_progress{service}
 application_errors_total{service,error_code}
+```
+
+Host alert dispatcher:
+
+```text
+tvt_alert_events_total{source,status,result}
+tvt_alerts_active{severity}
+tvt_notification_outbox_depth{state}
+tvt_notification_oldest_pending_age_seconds
+tvt_notification_delivery_attempts_total{result}
+tvt_notification_delivery_duration_seconds{result}
+tvt_notification_last_success_timestamp_seconds
+tvt_alert_emergency_spool_items
 ```
 
 Use normalized route templates such as `/cameras/{camera_id}`, not raw request
@@ -363,10 +389,11 @@ ServiceMonitor labels and namespace selectors must match the selectors in the
 Prometheus custom resource installed by the Helm release. A target is not
 considered integrated until it appears as healthy in Prometheus's Targets view.
 
-The host edge-management service runs outside K3s. It exposes a protected
-metrics endpoint on a host address reachable from the Prometheus Pod and is
-added with a narrowly scoped `ScrapeConfig` or equivalent static target. The
-endpoint is accessible only from the local Pod/management network.
+The host edge-management and alert-dispatcher services run outside K3s. Each
+exposes a protected metrics endpoint on a host address reachable from the
+Prometheus Pod and is added with a narrowly scoped `ScrapeConfig` or equivalent
+static target. The endpoints are accessible only from the local Pod/management
+network.
 
 ## 9. Alert rules
 
@@ -402,37 +429,88 @@ Standard stack alerts cover:
 Thresholds in this document are starting values, not final SLOs. Tune them with
 camera-disconnect, Pod-failure, load, and reboot measurements.
 
-## 10. Alert delivery to the host UI
+## 10. Durable alert delivery and host UI state
 
-Alertmanager uses an authenticated webhook receiver exposed by the host
-edge-management service:
+Alertmanager uses an authenticated webhook receiver exposed by the separate
+host alert-dispatcher service:
 
 ```text
 PrometheusRule
   -> Prometheus evaluates firing/resolved state
   -> Alertmanager groups and deduplicates
-  -> host webhook receives firing/resolved notification
-  -> host PostgreSQL stores current state/history
-  -> React UI displays it
+  -> dispatcher webhook receives firing/resolved notification
+  -> one PostgreSQL transaction stores the transition and outbox item
+  -> dispatcher worker retries SendGrid SMTP delivery independently
+  -> React UI displays alert, acknowledgement, and redacted delivery state
 ```
 
 Enable resolved notifications. Use stable alert labels such as `alertname`,
 `severity`, `service`, `camera_id`, and `use_case` to deduplicate records.
 Descriptions and runbook links belong in annotations.
 
-The webhook endpoint binds to a host address reachable from the Pod network,
-uses a dedicated credential, validates payload size, and accepts no command or
-shell input. UI acknowledgement is a local operator state; it does not silence
-Alertmanager unless a separately authorized silence integration is added.
+The webhook endpoint binds only to the host address reachable from the Pod
+network, uses a dedicated rotated bearer credential, validates content type,
+schema, timestamp, payload size, alert count, bounded fields, and allowed label
+values, and accepts no command, template, recipient, or shell input. UI
+acknowledgement is a local operator state; it does not silence Alertmanager.
+
+The transition idempotency key includes source, stable fingerprint, occurrence
+start time, transition status, and resolution time. Duplicate or retried
+webhooks update last-seen state without creating duplicate transition emails.
+Alertmanager owns grouping, inhibition, deduplication, and initial notification
+timing. The dispatcher owns acknowledgement-aware reminders, recovery-email
+eligibility, retry, expiry, and delivery audit.
+
+Host/control-plane checks enter through a permission-restricted Unix socket so
+K3s, Prometheus, or Alertmanager failure can still produce an alert. When
+PostgreSQL is unavailable, only allowlisted host-infrastructure alert types may
+enter a bounded, atomically written emergency filesystem spool. Normal
+Alertmanager webhook delivery receives a retryable failure instead of falling
+back to that spool.
+
+### 10.1 Initial notification policy
+
+| Severity | Alert timing | Email behavior |
+|---|---|---|
+| `critical` | Usually require 2 minutes; Alertmanager `group_wait` 30 seconds | Send after grouping; repeat every 30 minutes while active and unacknowledged |
+| `warning` | Usually require 5-10 minutes; group for 5 minutes | Send once; repeat every 4 hours while active and unacknowledged |
+| `info` | Record and display | No immediate email |
+
+Acknowledgement stops future reminders but does not clear an alert or suppress
+its recovery email. A recovery email is generated only if a firing email for
+the same occurrence was successfully delivered. Root-cause inhibition covers
+Node/K3s-down, gateway-down, camera-offline, and PostgreSQL-down cascades.
+
+### 10.2 SendGrid SMTP and outbox policy
+
+SendGrid SMTP is the V1 relay. The dispatcher connects to
+`smtp.sendgrid.net:587` with certificate-verified STARTTLS, SMTP username
+`apikey`, and a restricted SendGrid API key loaded from a protected host
+credential file. It never permits plaintext fallback.
+The documentation defaults are `tvt-alerts@tvt.example` and
+`tvt-test-operator@tvt.example`; installation must replace them with a
+SendGrid-verified sender and reachable test recipient.
+
+Retries use approximately 1, 2, 5, 10, and 30 minutes, then hourly until the
+notification is 24 hours old. Permanent SMTP failures are retained as failed;
+transient failures are retried. Delivery is at-least-once, so an ambiguous
+network failure after SMTP acceptance may produce a duplicate. A deterministic
+`Message-ID` and thread key make that behavior visible and groupable.
+
+Alert email is limited to site, severity, alert name, component, stable camera
+ID, safe summary, start time, duration, state, and approved dashboard/runbook
+links. It must not contain camera credentials, direct RTSP URLs, faces,
+embeddings, people, plates, Kubernetes Secret values, raw logs, or stack traces.
+The dispatcher is not the automated daily business-report mailer.
 
 ## 11. Structured JSON logging
 
 ### 11.1 Output contract
 
 Every service writes one complete JSON object per stdout line. Kubernetes
-captures Pod stdout in CRI log files; Alloy tails those files. For the host
-service, systemd captures stdout in journald and Alloy reads the journal through
-an explicitly mounted, read-only host path.
+captures Pod stdout in CRI log files; Alloy tails those files. For the host edge
+and alert-dispatcher services, systemd captures stdout in journald and Alloy
+reads the journal through an explicitly mounted, read-only host path.
 
 Required fields:
 
@@ -466,7 +544,7 @@ Alloy runs as one DaemonSet Pod on the single K3s node and collects:
 - monitoring-component Pod logs;
 - Kubernetes Events where configured;
 - K3s/containerd host logs required for operations; and
-- edge-management service journald entries.
+- edge-management and alert-dispatcher service journald entries.
 
 The Alloy pipeline uses Kubernetes discovery and relabeling to select local Pod
 log files. `loki.source.file` tails them, `loki.source.journal` reads the mounted
@@ -595,14 +673,20 @@ Initial Grafana dashboards:
 Dashboard variables must use bounded dimensions. Do not build variables from
 request IDs, frame IDs, people, or plates.
 
-## 15. Remote access
+## 15. Deferred remote access
 
-Remote access is a last-resort diagnostic path for an authorized engineer after
-the central metrics, alerts, logs, and bounded diagnostic snapshots have been
-inspected. It is not the normal monitoring path and is not a substitute for an
-external heartbeat or off-box telemetry.
+Off-site remote access is not installed, configured, or accepted in V1. The
+management UI is available only from the on-site management network. An on-site
+console or separately approved local support path is required for diagnostics
+that cannot be completed through the UI, metrics, and logs.
 
-The supported remote-access gateway is **Tailscale plus Tailscale SSH**:
+The remainder of this section records a possible later design and is
+non-normative until separately approved. Remote access would remain a
+last-resort diagnostic path and would not substitute for an external heartbeat
+or off-box telemetry.
+
+If later approved, the candidate remote-access gateway is **Tailscale plus
+Tailscale SSH**:
 
 ```text
 managed engineer device
@@ -613,14 +697,14 @@ managed engineer device
   -> explicitly authorized diagnostic or escalation actions
 ```
 
-`tailscaled` runs as a host `systemd` service independently of K3s and provides
-both private network reachability and the Tailscale SSH server. An engineer must
-therefore still be able to reach the host when the Kubernetes API, cluster
-networking, or all Pods are unavailable. Tailscale supplies private reachability
-across customer NAT without exposing SSH directly to the public internet and
-maps an authorized tailnet identity to an existing non-root Linux account.
+In that future design, `tailscaled` would run as a host `systemd` service
+independently of K3s and provide both private network reachability and the
+Tailscale SSH server. It would preserve access when the Kubernetes API, cluster
+networking, or all Pods are unavailable, without exposing SSH directly to the
+public internet, and would map an authorized tailnet identity to an existing
+non-root Linux account.
 
-### 15.1 Why Tailscale SSH is used
+### 15.1 Why Tailscale SSH is the candidate
 
 Tailscale SSH centralizes network admission and SSH authorization in the
 tailnet policy. Engineers authenticate through the approved organization
@@ -652,9 +736,9 @@ still evaluating separate tailnet network and SSH authorization rules. The
 single-identity model is simpler for this deployment; the Linux account and
 `sudo` policy remain independent host-level controls.
 
-### 15.3 Host and tailnet controls
+### 15.3 Future host and tailnet controls
 
-The remote-access configuration must:
+A future remote-access configuration would have to:
 
 - use an organization-owned tailnet connected to the approved identity
   provider with multifactor authentication;
@@ -681,18 +765,17 @@ The remote-access configuration must:
   and Alloy without logging credentials, command output, or transferred
   diagnostic data by default.
 
-The edge server is not configured as a Tailscale exit node. It does not
-advertise the camera LAN as a subnet route in the initial deployment. Engineers
-diagnose camera connectivity from the edge server using bounded tools so remote
-access does not create a general route from support devices into the camera
-network. Advertising selected camera routes requires a separate threat review,
-customer approval, and destination-specific access policy.
+The future edge configuration would not use a Tailscale exit node or advertise
+the camera LAN as a subnet route. Engineers would diagnose camera connectivity
+from the edge server using bounded tools so remote access could not create a
+general route from support devices into the camera network. Advertising
+selected camera routes would require a separate threat review, customer
+approval, and destination-specific access policy.
 
 Prometheus, Alertmanager, Grafana, Loki, PostgreSQL, the Kubernetes API, and the
-edge-management API are not made generally reachable through the tailnet.
-When direct inspection of a local administrative endpoint is necessary, the
-engineer uses an explicitly authorized Tailscale SSH local port forward for the
-incident and closes it with the SSH session.
+edge-management API would not be made generally reachable through the tailnet.
+Direct inspection of a local administrative endpoint would use an explicitly
+authorized, incident-scoped Tailscale SSH local port forward.
 
 ### 15.4 Availability boundaries
 
@@ -713,7 +796,7 @@ is a future deployment choice rather than part of this software tunnel.
 
 ### 15.5 Support workflow
 
-For a remote incident, the engineer:
+For a future remote incident, the engineer would:
 
 1. Reviews the central alert, dashboard, correlated logs, and available
    diagnostic snapshot before requesting shell access.
@@ -736,7 +819,10 @@ DNS, and site-WAN failures from a Tailscale SSH authorization failure.
 | One Python worker fails | Process manager, application metrics/logs | Worker restarts; multiprocess dead-worker cleanup runs |
 | Product Pod fails | Kubernetes and kube-prometheus-stack | Deployment replaces Pod; standard alert may fire |
 | Prometheus fails | Host edge check and Kubernetes | Metric collection/alerts pause; host UI remains available |
-| Alertmanager fails | Prometheus/Kubernetes and host stale-heartbeat check | Alert webhook delivery pauses |
+| Alertmanager fails | Prometheus/Kubernetes and host stale-heartbeat check | In-cluster webhook delivery pauses; the host path alerts independently |
+| Alert dispatcher fails | `systemd`, edge check, Alertmanager delivery failure | Dispatcher restarts; committed outbox work resumes and Alertmanager retries uncommitted webhooks |
+| SendGrid/WAN fails | Dispatcher SMTP result | Email remains in the durable outbox and retries until delivered, failed permanently, or expired |
+| PostgreSQL fails | Host checks and dispatcher | Normal alert persistence pauses; only allowlisted host alerts use the bounded emergency spool |
 | Alloy fails | Kubernetes/Prometheus | Logs remain in CRI/journal subject to local retention; forwarding pauses |
 | Loki fails | Kubernetes/Prometheus | Log queries/ingestion fail; metrics and alerts continue |
 | K3s API/control plane fails | Host edge-management service | Host UI records cluster outage independently |
@@ -762,8 +848,32 @@ Configure and verify:
 - alert-history retention in host PostgreSQL; and
 - disk alerts that fire before either monitoring backend fills the server.
 
-Retention duration and storage allocation remain deployment parameters until
-hardware capacity and incident-history requirements are agreed.
+Initial V1 limits for the 1 TiB server are:
+
+| Data | Retention/limit |
+|---|---|
+| Prometheus | 15 days and 20 GiB maximum |
+| Loki | 7 days and 20 GiB maximum |
+| Alloy on-disk queue/positions | 1 GiB maximum |
+| systemd journal | 7 days and 2 GiB maximum |
+| Camera observations | 30 days |
+| Alert instances and transitions | 180 days after resolution |
+| Notification attempts | 90 days |
+| Audit events | 365 days |
+| Emergency alert spool | 1,000 items or 100 MiB, whichever occurs first |
+
+Disk alerts fire at 70%, 80%, and 90% usage. Monitoring ingestion is throttled
+before it can consume capacity reserved for PostgreSQL, the local registry, or
+CV workloads. These defaults can be lowered after field measurements; raising
+them requires a storage-capacity review.
+
+Camera inventory, alert/outbox/audit data, the local OCI registry, and retained
+monitoring PVCs are included in the reinstall backup set. The installer writes
+encrypted backups to an operator-provided external USB or approved network
+share, verifies checksums, and requires a quarterly restore test. Video and
+non-durable CV/business stub data are excluded. The UPS must signal the host OS
+and provide enough runtime for an orderly PostgreSQL checkpoint, monitoring
+shutdown, and filesystem sync.
 
 ## 18. Verification and acceptance criteria
 
@@ -783,25 +893,25 @@ The monitoring implementation is accepted when it demonstrates that:
 9. Alloy collects Pod stdout and host edge-service journal logs into Loki.
 10. A request ID can be followed across all participating service logs.
 11. Alertmanager sends firing and resolved notifications to the host webhook.
-12. The React UI remains available and reports the outage when K3s or Prometheus
+12. A sustained synthetic critical alert creates one firing email, records its
+    SendGrid SMTP result, and creates one recovery email after resolution.
+13. Duplicate and out-of-order webhooks do not create duplicate logical
+    transitions or email jobs.
+14. Acknowledgement stops reminder email without clearing the alert or
+    suppressing recovery email.
+15. SMTP failure retains the notification across dispatcher restart and sends
+    it after recovery; PostgreSQL failure admits only allowlisted emergency
+    host alerts to the bounded spool.
+16. The React UI remains available and reports the outage when K3s or Prometheus
     is stopped.
-13. Camera credentials, faces, plates, and Secret values do not appear in
-    `/metrics`, logs, Loki labels, alert payloads, or dashboards.
-14. Restarting Alloy resumes from its persisted positions without replaying all
+17. Camera credentials, faces, plates, Secret values, and raw log bodies do not
+    appear in `/metrics`, logs, Loki labels, alert payloads, dashboards, or
+    email.
+18. Restarting Alloy resumes from its persisted positions without replaying all
     locally retained logs, and position-loss behavior is documented and tested.
-15. An approved engineer can reach Tailscale SSH while K3s and all
-    cluster workloads are stopped.
-16. An unapproved tailnet user or device cannot reach TCP port 22 on the edge
-    server, and the public WAN cannot reach a host shell service directly.
-17. Tailscale SSH `check` mode requires identity-provider reauthentication,
-    attributes access to an individual engineer, prohibits root and arbitrary
-    local-user mappings, and grants only the documented non-root diagnostic
-    permissions before escalation.
-18. The tailnet exposes neither the camera subnet nor unrestricted monitoring,
-    database, management, or Kubernetes API endpoints.
-19. Loss of site internet is documented and tested as loss of off-site
-    Tailscale SSH access while the separately approved on-site management path
-    remains available.
+19. The public WAN cannot reach the management UI, monitoring endpoints,
+    Kubernetes API, database, or a remote shell; the approved on-site
+    management network can reach only its documented endpoints.
 
 ## 19. References
 
@@ -816,6 +926,8 @@ The monitoring implementation is accepted when it demonstrates that:
   for the Prometheus Operator, Prometheus, Alertmanager, Grafana, and exporters.
 - [Prometheus alerting practices](https://prometheus.io/docs/practices/alerting/)
   for actionable symptom-based alerts.
+- [Twilio SendGrid SMTP integration](https://www.twilio.com/docs/sendgrid/for-developers/sending-email/integrating-with-the-smtp-api)
+  for the relay host, port, API-key authentication, and sender setup.
 - [Grafana Loki](https://grafana.com/docs/loki/latest/) for structured-log
   storage and querying.
 - [Grafana Alloy Kubernetes deployment](https://grafana.com/docs/alloy/latest/configure/kubernetes/)
