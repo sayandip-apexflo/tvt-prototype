@@ -7,7 +7,7 @@ video-analytics system described in `HLD.md`. The physical server runs one K3s
 server/worker node, a host edge-management service, and five to eight cameras.
 Stream ingestion and CV inference run in K3s Pods.
 
-The design makes three deliberate choices:
+The design makes four deliberate choices:
 
 1. Python services use `prometheus_client` directly, and the Prometheus server
    installed by `kube-prometheus-stack` scrapes their metrics.
@@ -24,30 +24,17 @@ This is a proportionate first version for two or three services with linear
 request flows. Metrics are the primary alert source; logs supply diagnostic
 detail.
 
-## 2. Grafana Alloy deployment constraints
+## 2. Deployment profile
 
-Grafana Alloy is the supported collector for this design. It runs only the log
-collection components needed to discover local sources, process entries, and
-write them to Loki; Alloy's optional metrics and tracing pipelines are not
-enabled.
+V1 runs on one physical server and uses one replica of each stateful monitoring
+component. It provides useful local monitoring, buffering, and recovery, but it
+does not claim high availability: replicas on the same host cannot protect
+against a host, disk, or site-power failure.
 
-The deployment must:
-
-- pin the Alloy Helm chart and container image to tested versions and mirror
-  the image into the controlled local registry;
-- run one Alloy DaemonSet Pod on each K3s node (one Pod in this deployment);
-- mount CRI Pod-log and systemd-journal paths read-only;
-- grant only the Kubernetes discovery and Events permissions used by the
-  configured components;
-- persist Alloy's per-node `--storage.path` so file offsets and journal cursors
-  survive ordinary Pod restarts; and
-- set explicit CPU, memory, batch, queue, and retry controls.
-
-The logging contract remains independent of the collector: applications write
-single-line JSON to stdout and the node collector forwards it to Loki.
-
-See the official
-[Grafana Alloy deployment documentation](https://grafana.com/docs/alloy/latest/set-up/deploy/).
+Fleet deployments add a central monitoring plane. Edge connections are
+outbound-only, and routine telemetry uses native Prometheus Remote Write and
+Loki ingestion rather than generic webhooks. Local inference, reconciliation,
+recovery, and the operator UI continue during a central-plane or WAN outage.
 
 ## 3. Goals
 
@@ -77,76 +64,158 @@ See the official
 - High availability for Prometheus, Alertmanager, Grafana, Loki, or Alloy.
 - Off-site remote shell access or Tailscale in V1.
 
-## 5. Monitoring architecture
+## 5. End-to-end monitoring architecture
+
+The monitoring system has four telemetry paths: metrics, logs, heartbeats, and
+low-frequency host events. Each edge produces its own telemetry and provides
+bounded buffering for metrics, logs, and events. It sends them through an
+authenticated write-only boundary and never exposes its Prometheus, Loki,
+Kubernetes API, database, or management API to the public WAN. The diagram
+shows fleet mode; a standalone installation uses the local destinations
+described below.
 
 ```mermaid
-flowchart TB
-    subgraph Host[Linux host management plane]
-        Edge[Edge management service<br/>Python]
-        Dispatcher[Alert dispatcher<br/>Python systemd service]
-        Journal[systemd journal]
-        DB[(Host PostgreSQL<br/>alerts, outbox and camera inventory)]
-        UI[React UI]
-        HostCheck[Independent K3s and service checks]
+flowchart LR
+    subgraph Edge["Edge server"]
+        Apps["Applications<br/>prometheus_client + JSON logs"]
+        Exporters["node-exporter<br/>kube-state-metrics<br/>Kubelet/cAdvisor"]
+        Prom["Edge Prometheus"]
+        Alloy["Grafana Alloy"]
+        Heartbeat["Host heartbeat agent"]
+        Events["Host event sender"]
     end
 
-    SendGrid[SendGrid SMTP relay]
-
-    subgraph K3s[Single-node K3s cluster]
-        subgraph Apps[Product workloads]
-            CV[CV use-case Pods]
-            Reporting[Reporting/API Pods]
-        end
-
-        subgraph KPS[kube-prometheus-stack]
-            Operator[Prometheus Operator]
-            Prom[Prometheus]
-            AM[Alertmanager]
-            Grafana[Grafana]
-            KSM[kube-state-metrics]
-            NodeExporter[node-exporter]
-        end
-
-        Alloy[Grafana Alloy DaemonSet]
-        Loki[Loki]
+    subgraph Boundary["Public HTTPS boundary"]
+        Gateway["Central ingestion gateway<br/>mTLS, TCP 443"]
     end
 
-    Edge -->|/metrics| Prom
-    CV -->|/metrics| Prom
-    Reporting -->|/metrics| Prom
-    KSM --> Prom
-    NodeExporter --> Prom
-    Prom -->|firing and resolved alerts| AM
-    AM -->|authenticated webhook| Dispatcher
-    HostCheck -->|fixed host alerts over Unix socket| Dispatcher
-    Dispatcher <--> DB
-    Dispatcher -->|certificate-verified STARTTLS| SendGrid
-    Edge --> DB
-    DB --> UI
-    Prom --> Grafana
+    subgraph Central["Central monitoring plane"]
+        Metrics["Central metrics storage<br/>and Prometheus rules"]
+        Loki["Central Loki"]
+        Registry["Edge registry"]
+        EventReceiver["Event receiver"]
+        AM["Central Alertmanager"]
+        Dispatcher["Alert dispatcher"]
+        Grafana["Central Grafana"]
+        Portal["Central website"]
+    end
 
-    CV -->|JSON stdout| Alloy
-    Reporting -->|JSON stdout| Alloy
-    Edge -->|JSON stdout captured by systemd| Journal
-    Dispatcher -->|JSON stdout captured by systemd| Journal
-    Journal --> Alloy
-    Alloy --> Loki
+    Apps -->|"/metrics"| Prom
+    Exporters -->|"infrastructure metrics"| Prom
+    Apps -->|"JSON stdout/journal"| Alloy
+
+    Prom -->|"Remote Write"| Gateway
+    Alloy -->|"Loki Write"| Gateway
+    Heartbeat -->|"heartbeat"| Gateway
+    Events -->|"event webhook"| Gateway
+
+    Gateway --> Metrics
+    Gateway --> Loki
+    Gateway --> Registry
+    Gateway --> EventReceiver
+
+    Metrics --> Grafana
     Loki --> Grafana
+    Metrics --> AM
+    EventReceiver --> AM
+    AM --> Dispatcher
 
-    HostCheck --> Edge
+    Registry --> Portal
+    Dispatcher --> Portal
+    Grafana -->|"embedded dashboard"| Portal
 ```
 
-The word Prometheus is used in two different ways:
+### 5.1 Edge telemetry production
 
-- `prometheus_client` is a Python library inside an application process. It
-  creates current metric values and exposes them through `/metrics`.
-- Prometheus in `kube-prometheus-stack` is the server that discovers targets,
-  scrapes `/metrics`, stores time series, evaluates rules, and sends alerts to
-  Alertmanager.
+Applications use `prometheus_client` to expose camera, media, inference, API,
+and error measurements at `/metrics`. They also write one structured JSON log
+per line to stdout. An actionable application failure normally increments a
+bounded metric and emits a correlated log in the same code path: the metric
+makes the condition measurable and alertable, while the log records its cause.
 
-The two are complementary. `kube-prometheus-stack` does not automatically know
-about frames, cameras, models, or inference errors; those metrics must be
-instrumented in the product services.
+Infrastructure exporters supply the measurements that applications should not
+reimplement. `node-exporter` covers the Linux host, `kube-state-metrics` exposes
+Kubernetes object state, and Kubelet/cAdvisor supplies Pod and container
+resource usage.
+
+The term Prometheus refers to two complementary components in this document:
+
+- `prometheus_client` is the application library that creates metric values
+  and exposes `/metrics`.
+- The Prometheus server discovers and scrapes targets, stores time series,
+  evaluates rules, and forwards samples to the central plane.
+
+Prometheus cannot infer product concepts such as frames, cameras, models, or
+inference errors; product services must instrument those measurements.
+
+### 5.2 Edge collection and buffering
+
+The Prometheus Operator translates `ServiceMonitor`, `PodMonitor`, and
+`PrometheusRule` resources into scrape targets and rules. Edge Prometheus
+scrapes application and infrastructure targets, adds stable edge identity
+labels, and forwards samples with Prometheus Remote Write. Its write-ahead log
+provides bounded retry during a temporary WAN or central-plane outage.
+
+Grafana Alloy discovers Pod logs, tails CRI files, reads selected systemd
+journals and Kubernetes Events, parses the records, and forwards batches to
+Loki. Persisted read positions prevent an ordinary Alloy restart from replaying
+all retained logs. The underlying CRI files and journals provide the bounded
+outage buffer for logs.
+
+The heartbeat agent runs outside K3s and reports edge liveness and coarse
+platform state every 30 seconds. A separate durable event sender carries only
+allowlisted host transitions that may not survive the normal metric path, such
+as Prometheus or Alloy being unavailable. Routine camera, inference, API, and
+resource conditions remain metrics; logs remain diagnostic evidence.
+
+### 5.3 Central ingestion, storage, and alerting
+
+All four channels use outbound HTTPS with mutual TLS and independently scoped
+credentials. The ingestion gateway authenticates the edge, derives the
+authoritative customer, site, edge, and tenant identity from that credential,
+and routes each write to the correct private backend:
+
+| Channel | Central destination | Purpose |
+|---|---|---|
+| Prometheus Remote Write | Central metrics storage | Dashboards, trends, and rule evaluation |
+| Loki Write | Central Loki | Structured-log search and diagnosis |
+| Heartbeat | Edge registry | Fleet inventory and online/offline state |
+| Edge-event webhook | Event receiver | Fallback alerting for monitoring-path failures |
+
+Central rules evaluate actionable conditions across the fleet. Metric alerts
+and accepted host events enter the same Alertmanager pipeline for grouping,
+deduplication, inhibition, and routing. The central dispatcher owns durable
+alert state, acknowledgement-aware reminders, notification history, and email
+delivery. In fleet mode this central alert record and outbox are canonical so
+the local and central paths do not send duplicate email.
+
+### 5.4 Grafana and the central website
+
+Central Grafana queries central metrics storage with PromQL-compatible queries
+and central Loki with LogQL. Dashboard variables select bounded dimensions such
+as customer, site, edge, service, camera, and use case. A metric panel can link
+to a Loki query constrained to the same edge, service, and time window, so an
+operator can move from a detected symptom to its diagnostic logs.
+
+Grafana never needs an inbound connection to an edge; it queries centrally
+stored telemetry. The central website can embed the authenticated Grafana
+dashboard and combine it with native fleet inventory, alert acknowledgement,
+and notification-delivery views. It must use shared SSO or an authenticated
+reverse proxy, retain Grafana authorization, and must not expose a service
+token or anonymous operational dashboard to the browser. Permit framing only
+from the central website's exact HTTPS origin; serving Grafana behind the same
+site reverse proxy is preferred because it simplifies session and cookie
+handling.
+
+Heartbeat registry state is not automatically a Grafana data source. The
+central website displays it directly, or the registry exports bounded derived
+metrics such as `tvt_edge_online` and
+`tvt_edge_last_heartbeat_age_seconds` for fleet dashboards.
+
+For a standalone deployment, local Grafana queries local Prometheus and Loki
+instead. The same dashboard definitions can be provisioned locally and
+centrally when their data-source names and fleet labels follow the same
+contract.
 
 ## 6. kube-prometheus-stack
 
@@ -163,9 +232,9 @@ Kubernetes workloads rather than one monitoring Pod:
 | kube-state-metrics | Deployment | Expose Kubernetes object state |
 | node-exporter | DaemonSet | Expose Linux host metrics |
 
-Only one replica of each stateful monitoring component is used. Multiple
-replicas on the same physical server do not protect against host failure and
-consume resources needed by CV workloads.
+Use the single-replica deployment profile in section 2 so monitoring does not
+consume resources needed by CV workloads without improving host-failure
+resilience.
 
 The chart values must be validated against K3s instead of accepted unchanged:
 
@@ -576,6 +645,11 @@ Alloy to the log sources and Kubernetes metadata it requires. The DaemonSet
 must expose Alloy's health and internal metrics to Prometheus so stalled reads,
 parse failures, and failed Loki writes are observable.
 
+Pin the Alloy Helm chart and image to tested versions, mirror the image into the
+controlled local registry, and set explicit CPU, memory, batch, queue, and retry
+limits. Only the log components described above are enabled; Alloy's optional
+metrics and tracing pipelines are out of scope.
+
 ### 11.3 Sensitive-data policy
 
 Logs must never contain:
@@ -648,10 +722,13 @@ Reconsider distributed tracing if the system grows beyond a few services,
 introduces asynchronous queues or complex request fan-out, calls remote APIs on
 the critical path, or repeatedly requires manual reconstruction of latency.
 
-## 14. Dashboards
+## 14. Dashboards and operator views
 
-Grafana is the administrator/debugging UI. The host React UI remains the normal
-operator UI and displays summarized health and alerts.
+Grafana is the administrator/debugging UI. A standalone edge uses local
+Grafana; a fleet uses central Grafana with customer, site, and edge variables.
+The host React UI remains the normal on-site operator UI and displays summarized
+health and alerts. The central website uses the integration described in
+section 5.4 for fleet inventory, alert workflow, and embedded dashboards.
 
 Initial Grafana dashboards:
 
@@ -677,48 +754,9 @@ deployments report to a central monitoring plane. It extends the single-edge
 topology above without exposing an edge-local Prometheus, Loki, Kubernetes API,
 database, management API, or shell endpoint to the public WAN.
 
-Communication is outbound-only from the edge. The central monitoring plane does
-not scan customer networks or initiate a new inbound connection to an edge:
-
-```mermaid
-flowchart LR
-    subgraph Edge[TVT edge deployment]
-        Apps[Applications and exporters]
-        Prom[Edge Prometheus]
-        Alloy[Grafana Alloy]
-        Heartbeat[Host heartbeat agent]
-        Events[Host event outbox and sender]
-    end
-
-    subgraph Public[Public TLS boundary]
-        Gateway[Central ingestion gateway<br/>HTTPS 443]
-    end
-
-    subgraph Central[Private central monitoring plane]
-        Metrics[Central metrics storage and rules]
-        LokiCentral[Central Loki]
-        Registry[Edge registry]
-        EventReceiver[Edge-event receiver]
-        CentralAM[Central Alertmanager]
-        CentralDispatcher[Central alert dispatcher]
-        CentralGrafana[Central Grafana]
-    end
-
-    Apps -->|local scrape| Prom
-    Prom -->|Prometheus Remote Write over mTLS| Gateway
-    Alloy -->|Loki write over mTLS| Gateway
-    Heartbeat -->|authenticated heartbeat over mTLS| Gateway
-    Events -->|low-frequency event webhook over mTLS| Gateway
-    Gateway --> Metrics
-    Gateway --> LokiCentral
-    Gateway --> Registry
-    Gateway --> EventReceiver
-    Metrics --> CentralAM
-    EventReceiver --> CentralAM
-    CentralAM --> CentralDispatcher
-    Metrics --> CentralGrafana
-    LokiCentral --> CentralGrafana
-```
+The end-to-end path is shown in section 5. Communication is outbound-only from
+the edge; the central plane neither scans customer networks nor initiates a new
+inbound connection to an edge.
 
 The public boundary is a hardened ingestion gateway, not the monitoring
 backends themselves. Only the documented enrollment, certificate-renewal,
@@ -1207,6 +1245,11 @@ The monitoring implementation is accepted when it demonstrates that:
     and no duplicate notification job.
 25. A compromised metrics or logs credential cannot query telemetry, submit as
     another edge, invoke control actions, select a recipient, or render email.
+26. Central Grafana queries only central metrics and Loki storage and requires
+    no inbound connection to an edge.
+27. The authenticated central website embeds a customer/site/edge-filtered
+    Grafana dashboard without anonymous access or a browser-visible service
+    credential, while unauthorized users cannot load the frame directly.
 
 ## 20. References
 
@@ -1233,6 +1276,10 @@ The monitoring implementation is accepted when it demonstrates that:
   for file, journal, Kubernetes Event, processing, and write components.
 - [Grafana Loki authentication](https://grafana.com/docs/loki/latest/operations/authentication/)
   for TLS termination and verified client-certificate configuration.
+- [Grafana dashboard sharing](https://grafana.com/docs/grafana/latest/visualizations/dashboards/share-dashboards-panels/)
+  for dashboard and panel embedding.
+- [Grafana auth proxy](https://grafana.com/docs/grafana/latest/setup-grafana/configure-access/configure-authentication/auth-proxy/)
+  for delegating central-website identity to a trusted reverse proxy.
 - [SPIFFE workload identity](https://spiffe.io/docs/latest/spiffe/concepts/)
   for short-lived, automatically rotated workload identities and trust bundles.
 - [Tailscale connection types](https://tailscale.com/docs/reference/connection-types)
