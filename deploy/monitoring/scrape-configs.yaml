@@ -1,0 +1,49 @@
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: ScrapeConfig
+metadata:
+  name: tvt-product-pods
+  namespace: monitoring
+  labels: {app.kubernetes.io/part-of: tvt-observability}
+spec:
+  kubernetesSDConfigs:
+    - role: Pod
+      namespaces: {names: [apexfabric]}
+  metricsPath: /metrics
+  relabelings:
+    - action: keep
+      sourceLabels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+      regex: "true"
+    - action: keep
+      sourceLabels: [__meta_kubernetes_pod_phase]
+      regex: Running
+    - action: replace
+      sourceLabels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+      targetLabel: __metrics_path__
+      regex: (.+)
+    - action: replace
+      sourceLabels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+      targetLabel: __address__
+      regex: ([^:]+)(?::\d+)?;(\d+)
+      replacement: $1:$2
+    - action: replace
+      sourceLabels: [__meta_kubernetes_namespace]
+      targetLabel: namespace
+    - action: replace
+      sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+      targetLabel: service
+    - action: labeldrop
+      regex: "(pod_uid|container_id|request_id|operation_id|stream_session_id|camera_ip|rtsp_url)"
+---
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: ScrapeConfig
+metadata:
+  name: tvt-host-services
+  namespace: monitoring
+  labels: {app.kubernetes.io/part-of: tvt-observability}
+spec:
+  staticConfigs:
+    - targets: [__TVT_HOST_ADDRESS__:9108]
+      labels: {service: edge-management}
+    - targets: [__TVT_HOST_ADDRESS__:8090]
+      labels: {service: alert-dispatcher}
+  metricsPath: /metrics

@@ -14,6 +14,7 @@ dependencies = [
   "fastapi>=0.115,<0.116",
   "jsonschema>=4.23,<5",
   "psycopg[binary]>=3.2,<4",
+  "prometheus-client>=0.21,<1",
   "pydantic>=2.10,<2.12",
   "PyYAML>=6.0,<7",
   "SQLAlchemy>=2.0.36,<3",
@@ -26,6 +27,7 @@ dev = ["httpx>=0.28,<1", "pytest>=8.3,<9"]
 [project.scripts]
 tvt-k3s = "tvt_runtime.cli:main"
 tvt-edge = "tvt_edge.cli:main"
+tvt-alert-dispatcher = "tvt_edge.alerting.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["apexfabric*", "tvt_edge*", "tvt_runtime*"]

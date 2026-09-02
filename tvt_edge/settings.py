@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,8 @@ class Settings:
     credential_key_dir: Path = Path("/etc/tvt/credential-keys")
     listen_host: str = "127.0.0.1"
     listen_port: int = 8088
+    metrics_host: str = "127.0.0.1"
+    metrics_port: int = 9108
     kubeconfig: str | None = None
     sync_namespace: str = "apexfabric"
     sync_worker_id: str = "tvt-edge"
@@ -23,11 +26,14 @@ class Settings:
     @classmethod
     def from_environment(cls) -> "Settings":
         port = int(os.getenv("TVT_LISTEN_PORT", "8088"))
+        metrics_port = int(os.getenv("TVT_METRICS_LISTEN_PORT", "9108"))
         timeout = int(os.getenv("TVT_ROLLOUT_TIMEOUT", "180"))
         onvif_timeout = float(os.getenv("TVT_DISCOVERY_ONVIF_TIMEOUT", "1.0"))
         tcp_timeout = float(os.getenv("TVT_DISCOVERY_TCP_TIMEOUT", "1.0"))
         if not 1 <= port <= 65535:
             raise ValueError("TVT_LISTEN_PORT must be between 1 and 65535")
+        if not 1 <= metrics_port <= 65535 or metrics_port == port:
+            raise ValueError("TVT_METRICS_LISTEN_PORT must be a distinct valid port")
         if not 1 <= timeout <= 3600:
             raise ValueError("TVT_ROLLOUT_TIMEOUT must be between 1 and 3600")
         if onvif_timeout <= 0 or onvif_timeout > 10:
@@ -37,6 +43,13 @@ class Settings:
         host = os.getenv("TVT_LISTEN_HOST", "127.0.0.1")
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("the Slice 3 API must bind to loopback")
+        metrics_host = os.getenv("TVT_METRICS_LISTEN_HOST", "127.0.0.1")
+        try:
+            metrics_address = ipaddress.ip_address(metrics_host)
+        except ValueError as error:
+            raise ValueError("TVT_METRICS_LISTEN_HOST must be an explicit IP address") from error
+        if metrics_address.is_unspecified:
+            raise ValueError("TVT_METRICS_LISTEN_HOST must not expose every host interface")
         return cls(
             database_url=os.getenv("TVT_DATABASE_URL", cls.database_url),
             credential_key_dir=Path(
@@ -44,6 +57,8 @@ class Settings:
             ),
             listen_host=host,
             listen_port=port,
+            metrics_host=metrics_host,
+            metrics_port=metrics_port,
             kubeconfig=os.getenv("TVT_KUBECONFIG") or None,
             sync_namespace=os.getenv("TVT_SYNC_NAMESPACE", "apexfabric"),
             sync_worker_id=os.getenv("TVT_SYNC_WORKER_ID", "tvt-edge"),

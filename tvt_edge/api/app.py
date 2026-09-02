@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from typing import Any
 
@@ -12,7 +13,16 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
 from apexfabric.solution_management.renderer import Kubectl
+from tvt_edge.alerting import AlertingService
 from tvt_edge.cluster import ClusterStatusReader
+from tvt_edge.observability import (
+    EdgeMetrics,
+    bind_log_context,
+    get_logger,
+    render_metrics,
+    request_id_or_new,
+    reset_log_context,
+)
 from tvt_edge.security import CredentialKeyring, redact_text
 from tvt_edge.service import ManagementService
 from tvt_edge.status import aggregate_health
@@ -110,15 +120,47 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(title="TVT edge management", version="1")
     service = ManagementService(sessions, keyring)
+    alerting = AlertingService(sessions)
     cluster_status = ClusterStatusReader(kubectl, allowed_namespace)
+    metrics = EdgeMetrics("edge-management")
+    metrics.set_build("0.1.0")
+    logger = get_logger("tvt_edge.http")
+    app.state.metrics = metrics
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
-        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        request_id = request_id_or_new(request.headers.get("X-Request-ID"))
         request.state.request_id = request_id
-        response: Response = await call_next(request)
-        response.headers["X-Request-ID"] = request_id
-        return response
+        token = bind_log_context(request_id=request_id)
+        started = time.monotonic()
+        status_code = 500
+        metrics.http_started()
+        try:
+            response: Response = await call_next(request)
+            status_code = response.status_code
+            response.headers["X-Request-ID"] = request_id
+            return response
+        except Exception:
+            metrics.application_error("INTERNAL_ERROR")
+            logger.exception(
+                "HTTP request failed",
+                extra={"event": "http_request_failed", "error_code": "INTERNAL_ERROR"},
+            )
+            raise
+        finally:
+            route_object = request.scope.get("route")
+            route = getattr(route_object, "path", None)
+            duration = time.monotonic() - started
+            metrics.http_finished(request.method, route, status_code, duration)
+            logger.info(
+                "HTTP request completed",
+                extra={
+                    "event": "http_request_completed",
+                    "duration_seconds": duration,
+                    "result": metrics.policy.status_class(status_code),
+                },
+            )
+            reset_log_context(token)
 
     @app.exception_handler(ValueError)
     async def value_error_handler(_request: Request, error: ValueError):
@@ -151,6 +193,11 @@ def create_app(
             database_status=database,
         )
 
+    @app.get("/metrics", include_in_schema=False)
+    def prometheus_metrics() -> Response:
+        body, content_type = render_metrics(metrics.registry)
+        return Response(content=body, media_type=content_type)
+
     @app.get("/api/v1/cluster")
     def cluster() -> dict[str, Any]:
         result = cluster_status.snapshot()
@@ -161,6 +208,27 @@ def create_app(
             if result["status"] == "healthy":
                 result["status"] = "degraded"
         return result
+
+    @app.get("/api/v1/alerts")
+    def list_alerts(
+        limit: int = 100, include_resolved: bool = True
+    ) -> list[dict[str, Any]]:
+        return alerting.list_alerts(limit=limit, include_resolved=include_resolved)
+
+    @app.post("/api/v1/alerts/{alert_id}/acknowledge")
+    def acknowledge_alert(
+        alert_id: uuid.UUID,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        return alerting.acknowledge(alert_id, actor, request_id)
+
+    @app.get("/api/v1/alerts/{alert_id}/notifications")
+    def alert_notifications(
+        alert_id: uuid.UUID, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        return alerting.notifications(alert_id, limit=limit)
 
     @app.post("/internal/v1/sites", status_code=201)
     def create_site(

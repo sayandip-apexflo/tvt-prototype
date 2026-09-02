@@ -1,0 +1,23 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: apexfabric-node-reporter
+  namespace: monitoring
+  labels: {app.kubernetes.io/part-of: tvt-observability}
+spec:
+  namespaceSelector:
+    matchNames: [apexfabric]
+  selector:
+    matchLabels: {app.kubernetes.io/name: node-reporter}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      relabelings:
+        - action: replace
+          sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - action: replace
+          replacement: node-reporter
+          targetLabel: service

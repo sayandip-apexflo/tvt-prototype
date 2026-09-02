@@ -1,0 +1,73 @@
+# Single-node Loki values. The chart version and image digest are pinned by the
+# reviewed installation inputs described in README.md.
+deploymentMode: SingleBinary
+loki:
+  auth_enabled: false
+  image:
+    registry: __TVT_REGISTRY__
+    repository: grafana/loki
+    tag: 3.5.5
+    digest: __LOKI_DIGEST__
+  commonConfig:
+    replication_factor: 1
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index: {prefix: tvt_index_, period: 24h}
+  storage:
+    type: filesystem
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+  limits_config:
+    retention_period: 168h
+    ingestion_rate_mb: 4
+    ingestion_burst_size_mb: 8
+    max_line_size: 65536
+    max_label_names_per_series: 10
+    reject_old_samples: true
+    reject_old_samples_max_age: 168h
+  server:
+    grpc_server_max_recv_msg_size: 4194304
+    grpc_server_max_send_msg_size: 4194304
+
+singleBinary:
+  replicas: 1
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
+  persistence:
+    enabled: true
+    accessModes: [ReadWriteOnce]
+    size: 12Gi
+  extraArgs:
+    - -validation.reject-old-samples=true
+
+read: {replicas: 0}
+write: {replicas: 0}
+backend: {replicas: 0}
+gateway:
+  enabled: true
+  service: {type: ClusterIP}
+  image:
+    registry: __TVT_REGISTRY__
+    repository: nginxinc/nginx-unprivileged
+    tag: 1.29-alpine
+    digest: __LOKI_GATEWAY_DIGEST__
+  nginxConfig:
+    clientMaxBodySize: 1M
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {cpu: 100m, memory: 96Mi}
+
+chunksCache: {enabled: false}
+resultsCache: {enabled: false}
+test: {enabled: false}
+lokiCanary: {enabled: false}
+monitoring:
+  serviceMonitor:
+    enabled: true
+    labels: {app.kubernetes.io/part-of: tvt-observability}

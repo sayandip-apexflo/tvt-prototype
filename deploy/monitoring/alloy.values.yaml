@@ -1,0 +1,194 @@
+controller:
+  type: daemonset
+  hostPID: false
+  hostNetwork: false
+  volumes:
+    extra:
+      - name: pod-logs
+        hostPath: {path: /var/log/pods, type: Directory}
+      - name: journal
+        hostPath: {path: /var/log/journal, type: DirectoryOrCreate}
+      - name: alloy-storage
+        hostPath: {path: /var/lib/tvt/alloy, type: DirectoryOrCreate}
+
+image:
+  registry: __TVT_REGISTRY__
+  repository: grafana/alloy
+  tag: v1.10.1
+  digest: __ALLOY_DIGEST__
+
+configReloader:
+  enabled: true
+  image:
+    registry: __TVT_REGISTRY__
+    repository: prometheus-operator/prometheus-config-reloader
+    tag: v0.81.0
+    digest: __ALLOY_CONFIG_RELOADER_DIGEST__
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {cpu: 100m, memory: 96Mi}
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities: {drop: [ALL]}
+    seccompProfile: {type: RuntimeDefault}
+
+alloy:
+  storagePath: /var/lib/alloy
+  enableReporting: false
+  stabilityLevel: generally-available
+  extraEnv:
+    - name: K8S_NODE_NAME
+      valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+  mounts:
+    varlog: false
+    dockercontainers: false
+    extra:
+      - {name: pod-logs, mountPath: /var/log/pods, readOnly: true}
+      - {name: journal, mountPath: /var/log/journal, readOnly: true}
+      - {name: alloy-storage, mountPath: /var/lib/alloy}
+  resources:
+    requests: {cpu: 50m, memory: 96Mi}
+    limits: {cpu: 500m, memory: 384Mi}
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities: {drop: [ALL]}
+  configMap:
+    create: true
+    content: |-
+      logging {
+        level  = "info"
+        format = "json"
+      }
+
+      discovery.kubernetes "pods" {
+        role = "pod"
+      }
+
+      discovery.relabel "pod_logs" {
+        targets = discovery.kubernetes.pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_node_name"]
+          regex         = sys.env("K8S_NODE_NAME")
+          action        = "keep"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+          target_label  = "service"
+        }
+        rule {
+          replacement  = "tvt-edge"
+          target_label = "cluster"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
+          separator     = "/"
+          target_label  = "__path__"
+          replacement   = "/var/log/pods/*$1/*.log"
+        }
+      }
+
+      local.file_match "pod_logs" {
+        path_targets = discovery.relabel.pod_logs.output
+      }
+
+      loki.source.file "pod_logs" {
+        targets    = local.file_match.pod_logs.targets
+        forward_to = [loki.process.cri.receiver]
+      }
+
+      loki.source.journal "tvt_edge" {
+        path          = "/var/log/journal"
+        matches       = "_SYSTEMD_UNIT=tvt-edge.service"
+        labels        = {cluster = "tvt-edge", namespace = "host", service = "edge-management", container = "systemd"}
+        forward_to    = [loki.process.safe_logs.receiver]
+      }
+
+      loki.source.journal "alert_dispatcher" {
+        path          = "/var/log/journal"
+        matches       = "_SYSTEMD_UNIT=tvt-alert-dispatcher.service"
+        labels        = {cluster = "tvt-edge", namespace = "host", service = "alert-dispatcher", container = "systemd"}
+        forward_to    = [loki.process.safe_logs.receiver]
+      }
+
+      loki.source.journal "k3s" {
+        path          = "/var/log/journal"
+        matches       = "_SYSTEMD_UNIT=k3s.service"
+        labels        = {cluster = "tvt-edge", namespace = "host", service = "k3s", container = "systemd"}
+        forward_to    = [loki.process.safe_logs.receiver]
+      }
+
+      loki.source.kubernetes_events "events" {
+        job_name   = "integrations/kubernetes/eventhandler"
+        log_format = "json"
+        forward_to = [loki.process.safe_logs.receiver]
+      }
+
+      loki.process "cri" {
+        stage.cri {}
+        forward_to = [loki.process.safe_logs.receiver]
+      }
+
+      loki.process "safe_logs" {
+        stage.json {
+          expressions = {
+            level = "level",
+          }
+        }
+        stage.labels {
+          values = {level = ""}
+        }
+
+        # Secondary safeguards. Applications must redact before stdout.
+        stage.replace {
+          expression = "(?i)rtsps?://[^\\s\\\"'<>]+"
+          replace    = "[REDACTED_RTSP_URL]"
+        }
+        stage.replace {
+          expression = "(?i)(bearer|basic)\\s+[A-Za-z0-9._~+/=-]+"
+          replace    = "$1 [REDACTED]"
+        }
+        stage.replace {
+          expression = "(?i)(password|passwd|token|secret|api[_-]?key|authorization)=([^\\s&;,]+)"
+          replace    = "$1=[REDACTED]"
+        }
+        stage.replace {
+          expression = "(?:[0-9]{1,3}\\.){3}[0-9]{1,3}"
+          replace    = "[REDACTED_IP]"
+        }
+        stage.label_keep {
+          values = ["cluster", "namespace", "service", "container", "level"]
+        }
+        forward_to = [loki.write.local.receiver]
+      }
+
+      loki.write "local" {
+        endpoint {
+          url        = "http://tvt-loki-gateway.monitoring.svc.cluster.local/loki/api/v1/push"
+          batch_wait = "1s"
+          batch_size = "1MiB"
+          backoff_config {
+            min_period = "500ms"
+            max_period = "30s"
+            max_retries = 10
+          }
+        }
+      }
+
+serviceMonitor:
+  enabled: true
+  labels: {app.kubernetes.io/part-of: tvt-observability}
+
+rbac:
+  create: true

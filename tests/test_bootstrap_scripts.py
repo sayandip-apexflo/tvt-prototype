@@ -42,6 +42,9 @@ class BootstrapScriptTests(unittest.TestCase):
         self.assertIn("postgresql+psycopg:///tvt", bootstrap)
         self.assertIn("listen_addresses = ''", configuration)
         self.assertIn("0640", bootstrap)
+        self.assertIn("tvt-alert-dispatcher.service", bootstrap)
+        self.assertIn('CREATE ROLE "tvt-alert" LOGIN', bootstrap)
+        self.assertIn("alertmanager-webhook.token", bootstrap)
 
     def test_host_worker_uses_scoped_kubeconfig(self):
         foundation = (ROOT / "deploy/k8s/apexfabric-foundation.yaml").read_text()

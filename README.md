@@ -43,10 +43,16 @@ It includes:
 - a loopback-only `tvt-edge` API and CLI; and
 - a leased reconciliation worker which materializes camera Secrets only in
   memory, applies them server-side, invokes the unchanged renderer, waits for
-  rollouts, and advances applied state only after success.
+  rollouts, and advances applied state only after success; and
+- an authenticated Alertmanager receiver with durable alert state,
+  acknowledgement-aware notification policy, a persistent SMTP retry outbox,
+  redacted delivery history, and a separate host dispatcher service; and
+- bounded `prometheus_client` metrics, redacting single-line JSON logs, and a
+  single-node monitoring deployment profile under `deploy/monitoring/`.
 
-The web UI, active ONVIF/RTSP probing, alert dispatcher, and full observability
-stack are intentionally deferred.
+The web UI, active ONVIF/RTSP probing, host emergency alert spool, fleet
+heartbeat/event senders, and production dashboard tuning are intentionally
+deferred.
 
 ### Local runtime
 
@@ -155,6 +161,22 @@ affected deployment as a new revision. The sync worker updates the bundle-named
 Secrets and performs a controlled Deployment rollout so Kubernetes `subPath`
 mounts receive changed values. See [Slices 3 and 4](docs/SLICE-3-4.md) for the
 API and operational contract.
+
+The bootstrap also installs `tvt-alert-dispatcher.service`, creates its
+separate `tvt-alert` OS/database role, and generates
+`/etc/tvt/alertmanager-webhook.token`. Before enabling the dispatcher, install
+a restricted SendGrid API key at `/etc/tvt/sendgrid-api-key` owned by
+`root:tvt-alert` with mode `0640`, replace the example sender/address settings,
+configure at least one `notification_policies` row, and point Alertmanager at
+`POST /internal/v1/alerts/alertmanager` with that bearer token. Then enable it:
+
+```bash
+sudo systemctl enable --now tvt-alert-dispatcher.service
+```
+
+The management API exposes `GET /api/v1/alerts`, acknowledgement at
+`POST /api/v1/alerts/{alert_id}/acknowledge`, and redacted outbox history at
+`GET /api/v1/alerts/{alert_id}/notifications`.
 
 Existing installations should enable K3s datastore Secret encryption during a
 reviewed maintenance window:

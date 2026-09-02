@@ -532,6 +532,156 @@ class DeploymentSyncAttempt(Base, IdMixin):
     safe_detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
+class AlertInstance(Base, IdMixin):
+    __tablename__ = "alert_instances"
+    __table_args__ = (
+        CheckConstraint(
+            "severity IN ('critical','warning','info')",
+            name="alert_instance_severity",
+        ),
+        CheckConstraint(
+            "state IN ('active','acknowledged','resolved')",
+            name="alert_instance_state",
+        ),
+        Index("ix_alert_instances_state_last_seen", "state", "last_seen_at"),
+    )
+    fingerprint: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    site_key: Mapped[str] = mapped_column(String(63), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    alert_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    service: Mapped[str] = mapped_column(String(128), nullable=False)
+    camera_key: Mapped[str | None] = mapped_column(String(63))
+    use_case: Mapped[str | None] = mapped_column(String(63))
+    state: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    occurrence_starts_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    occurrence_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acknowledged_by: Mapped[str | None] = mapped_column(String(200))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_group_key: Mapped[str | None] = mapped_column(String(512))
+    safe_labels: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    safe_annotations: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+
+
+class AlertTransition(Base, IdMixin):
+    __tablename__ = "alert_transitions"
+    __table_args__ = (
+        CheckConstraint(
+            "transition_type IN ('firing','resolved')",
+            name="alert_transition_type",
+        ),
+        Index("ix_alert_transitions_alert_received", "alert_id", "received_at"),
+    )
+    alert_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("alert_instances.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    transition_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    occurrence_starts_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    source_timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    redacted_payload: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+
+
+class NotificationPolicy(Base, IdMixin, TimeMixin):
+    __tablename__ = "notification_policies"
+    __table_args__ = (
+        UniqueConstraint("site_key", "name"),
+        CheckConstraint(
+            "severity IS NULL OR severity IN ('critical','warning','info')",
+            name="notification_policy_severity",
+        ),
+    )
+    site_key: Mapped[str | None] = mapped_column(String(63), index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    severity: Mapped[str | None] = mapped_column(String(16))
+    alert_name: Mapped[str | None] = mapped_column(String(128))
+    recipients: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    repeat_interval_seconds: Mapped[int | None] = mapped_column(Integer)
+    send_resolved: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class NotificationOutbox(Base, IdMixin):
+    __tablename__ = "notification_outbox"
+    __table_args__ = (
+        CheckConstraint(
+            "notification_type IN ('firing','reminder','resolved')",
+            name="notification_outbox_type",
+        ),
+        CheckConstraint(
+            "state IN ('pending','delivering','sent','failed','expired')",
+            name="notification_outbox_state",
+        ),
+        Index("ix_notification_outbox_due", "state", "next_attempt_at"),
+    )
+    alert_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("alert_instances.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    transition_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("alert_transitions.id", ondelete="RESTRICT"), nullable=False
+    )
+    policy_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("notification_policies.id", ondelete="RESTRICT"), nullable=False
+    )
+    notification_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    message_id: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    recipients: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    claim_token: Mapped[uuid.UUID | None] = mapped_column()
+    claim_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class NotificationAttempt(Base, IdMixin):
+    __tablename__ = "notification_attempts"
+    __table_args__ = (
+        UniqueConstraint("outbox_id", "attempt_number"),
+        CheckConstraint(
+            "result IN ('sent','transient_failure','permanent_failure','expired')",
+            name="notification_attempt_result",
+        ),
+    )
+    outbox_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("notification_outbox.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    result: Mapped[str] = mapped_column(String(24), nullable=False)
+    smtp_code: Mapped[int | None] = mapped_column(Integer)
+    error_category: Mapped[str | None] = mapped_column(String(64))
+
+
 class AuditEvent(Base, IdMixin):
     __tablename__ = "audit_events"
     actor: Mapped[str] = mapped_column(String(200), nullable=False)

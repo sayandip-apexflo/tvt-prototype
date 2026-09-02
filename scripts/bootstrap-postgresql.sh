@@ -19,6 +19,10 @@ done
 command -v psql >/dev/null 2>&1 || { echo "PostgreSQL 16 client is required" >&2; exit 1; }
 command -v openssl >/dev/null 2>&1 || { echo "openssl is required" >&2; exit 1; }
 [[ -x "${VENV}/bin/tvt-edge" ]] || { echo "missing installed TVT environment: ${VENV}" >&2; exit 1; }
+[[ -x "${VENV}/bin/tvt-alert-dispatcher" ]] || {
+  echo "missing installed TVT alert dispatcher: ${VENV}" >&2
+  exit 1
+}
 
 if ! getent group tvt-edge >/dev/null; then
   groupadd --system tvt-edge
@@ -26,7 +30,15 @@ fi
 if ! id tvt-edge >/dev/null 2>&1; then
   useradd --system --gid tvt-edge --home-dir /var/lib/tvt --shell /usr/sbin/nologin tvt-edge
 fi
+if ! getent group tvt-alert >/dev/null; then
+  groupadd --system tvt-alert
+fi
+if ! id tvt-alert >/dev/null 2>&1; then
+  useradd --system --gid tvt-alert --home-dir /var/lib/tvt-alert \
+    --shell /usr/sbin/nologin tvt-alert
+fi
 install -d -o tvt-edge -g tvt-edge -m 0750 /var/lib/tvt
+install -d -o tvt-alert -g tvt-alert -m 0750 /var/lib/tvt-alert
 install -d -o root -g tvt-edge -m 0750 /etc/tvt/credential-keys
 if [[ ! -f /etc/tvt/credential-keys/v1.key ]]; then
   temporary_key="$(mktemp /etc/tvt/credential-keys/.v1.key.XXXXXX)"
@@ -41,6 +53,20 @@ if [[ ! -f /etc/tvt/edge.env ]]; then
   install -o root -g tvt-edge -m 0640 \
     "${REPO_ROOT}/deploy/host/tvt-edge.env.example" /etc/tvt/edge.env
 fi
+if [[ ! -f /etc/tvt/alert-dispatcher.env ]]; then
+  install -o root -g tvt-alert -m 0640 \
+    "${REPO_ROOT}/deploy/host/tvt-alert-dispatcher.env.example" \
+    /etc/tvt/alert-dispatcher.env
+fi
+if [[ ! -f /etc/tvt/alertmanager-webhook.token ]]; then
+  temporary_token="$(mktemp /etc/tvt/.alertmanager-webhook.token.XXXXXX)"
+  trap 'rm -f "${temporary_token:-}"' EXIT
+  openssl rand -hex 32 > "${temporary_token}"
+  chown root:tvt-alert "${temporary_token}"
+  chmod 0640 "${temporary_token}"
+  mv "${temporary_token}" /etc/tvt/alertmanager-webhook.token
+  trap - EXIT
+fi
 
 postgresql_conf_dir=/etc/postgresql/16/main/conf.d
 [[ -d "${postgresql_conf_dir}" ]] || {
@@ -54,6 +80,9 @@ systemctl restart postgresql
 
 if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='tvt-edge'" | grep -qx 1; then
   runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c 'CREATE ROLE "tvt-edge" LOGIN'
+fi
+if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='tvt-alert'" | grep -qx 1; then
+  runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c 'CREATE ROLE "tvt-alert" LOGIN'
 fi
 if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname='tvt'" | grep -qx 1; then
   runuser -u postgres -- createdb tvt
@@ -71,6 +100,17 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
   GRANT USAGE, SELECT ON SEQUENCES TO "tvt-edge";
 SQL
+runuser -u postgres -- psql -v ON_ERROR_STOP=1 -d tvt <<'SQL'
+GRANT CONNECT ON DATABASE tvt TO "tvt-alert";
+GRANT USAGE ON SCHEMA public TO "tvt-alert";
+GRANT SELECT, INSERT, UPDATE ON
+  alert_instances,
+  alert_transitions,
+  notification_outbox,
+  notification_attempts
+TO "tvt-alert";
+GRANT SELECT ON notification_policies TO "tvt-alert";
+SQL
 
 install -o root -g root -m 0644 \
   "${REPO_ROOT}/deploy/systemd/tvt-edge.service" /etc/systemd/system/tvt-edge.service
@@ -83,6 +123,10 @@ install -o root -g root -m 0644 \
 install -o root -g root -m 0644 \
   "${REPO_ROOT}/deploy/systemd/tvt-retention.timer" \
   /etc/systemd/system/tvt-retention.timer
+install -o root -g root -m 0644 \
+  "${REPO_ROOT}/deploy/systemd/tvt-alert-dispatcher.service" \
+  /etc/systemd/system/tvt-alert-dispatcher.service
 systemctl daemon-reload
 echo "PostgreSQL and TVT host service configuration are installed."
-echo "Review /etc/tvt/edge.env, initialize the site, then explicitly enable services."
+echo "Review /etc/tvt/edge.env and /etc/tvt/alert-dispatcher.env, install the"
+echo "SendGrid key, initialize the site and notification policies, then enable services."

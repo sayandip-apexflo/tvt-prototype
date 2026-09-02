@@ -1,0 +1,74 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: tvt-product-alerts
+  namespace: monitoring
+  labels: {app.kubernetes.io/part-of: tvt-observability}
+spec:
+  groups:
+    - name: tvt.camera
+      rules:
+        - alert: CameraRTSPInvalid
+          expr: edge_camera_enabled == 1 and on(camera_id) edge_camera_rtsp_valid == 0
+          for: 2m
+          labels: {severity: critical, service: edge-management}
+          annotations: {summary: Enabled camera failed RTSP validation}
+        - alert: CameraMediaMissing
+          expr: cv_source_up == 1 and (time() - cv_source_last_media_timestamp_seconds) > 120
+          for: 2m
+          labels: {severity: critical}
+          annotations: {summary: Camera media has been stale for more than two minutes}
+        - alert: CameraReconnectStorm
+          expr: sum by (camera_id, use_case) (increase(cv_source_reconnects_total[5m])) > 5
+          for: 5m
+          labels: {severity: warning}
+          annotations: {summary: Camera source is reconnecting repeatedly}
+        - alert: CVSourceUnavailable
+          expr: cv_source_up == 0
+          for: 2m
+          labels: {severity: critical}
+          annotations: {summary: Assigned CV workload cannot read its camera source}
+        - alert: CameraConfigSyncPending
+          expr: edge_camera_sync_pending == 1
+          for: 2m
+          labels: {severity: warning, service: edge-management}
+          annotations: {summary: Camera configuration has not synchronized to K3s}
+    - name: tvt.inference
+      rules:
+        - alert: CVNoSuccessfulInference
+          expr: cv_source_up == 1 and (time() - cv_last_success_timestamp_seconds) > 300
+          for: 5m
+          labels: {severity: critical}
+          annotations: {summary: Media is flowing but inference has no recent success}
+        - alert: CVHighErrorRate
+          expr: sum by (camera_id, use_case) (rate(cv_inference_errors_total[5m])) / clamp_min(sum by (camera_id, use_case) (rate(cv_inference_attempts_total[5m])), 0.001) > 0.05
+          for: 5m
+          labels: {severity: warning}
+          annotations: {summary: CV inference error ratio exceeds five percent}
+        - alert: CVDroppingFrames
+          expr: sum by (camera_id, use_case) (rate(cv_frames_dropped_total[5m])) / clamp_min(sum by (camera_id, use_case) (rate(cv_frames_received_total[5m])), 0.001) > 0.10
+          for: 5m
+          labels: {severity: warning}
+          annotations: {summary: CV frame drop ratio exceeds ten percent}
+        - alert: CVQueueBacklog
+          expr: cv_queue_depth > 100
+          for: 5m
+          labels: {severity: warning}
+          annotations: {summary: CV queue depth is persistently high}
+        - alert: CVWorkloadUnavailable
+          expr: kube_deployment_spec_replicas{namespace="apexfabric"} > kube_deployment_status_replicas_available{namespace="apexfabric"}
+          for: 2m
+          labels: {severity: critical, service: k3s}
+          annotations: {summary: Desired CV Deployment has unavailable replicas}
+    - name: tvt.telemetry
+      rules:
+        - alert: PrometheusRemoteWriteBacklog
+          expr: tvt_remote_write_oldest_pending_age_seconds > 300
+          for: 5m
+          labels: {severity: warning, service: prometheus}
+          annotations: {summary: Remote Write backlog is older than five minutes}
+        - alert: AlloyLogDeliveryStalled
+          expr: tvt_alloy_oldest_pending_age_seconds > 300
+          for: 5m
+          labels: {severity: warning, service: alloy}
+          annotations: {summary: Log delivery backlog is older than five minutes}

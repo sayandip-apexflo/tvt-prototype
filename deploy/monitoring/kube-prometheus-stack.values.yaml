@@ -1,0 +1,215 @@
+# Values for the version pinned in versions.env. Image digests are mandatory
+# install-time substitutions from a reviewed mirror lock; see README.md.
+fullnameOverride: tvt-monitoring
+
+defaultRules:
+  create: true
+  rules:
+    etcd: false
+    kubeControllerManager: false
+    kubeProxy: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+prometheusOperator:
+  image:
+    registry: __TVT_REGISTRY__
+    repository: prometheus-operator/prometheus-operator
+    tag: v0.85.0
+    sha: __PROMETHEUS_OPERATOR_DIGEST__
+  prometheusConfigReloader:
+    image:
+      registry: __TVT_REGISTRY__
+      repository: prometheus-operator/prometheus-config-reloader
+      tag: v0.85.0
+      sha: __PROMETHEUS_CONFIG_RELOADER_DIGEST__
+  admissionWebhooks:
+    patch:
+      image:
+        registry: __TVT_REGISTRY__
+        repository: ingress-nginx/kube-webhook-certgen
+        tag: v1.6.2
+        sha: __KUBE_WEBHOOK_CERTGEN_DIGEST__
+      resources:
+        requests: {cpu: 5m, memory: 16Mi}
+        limits: {cpu: 100m, memory: 64Mi}
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: 500m, memory: 384Mi}
+
+prometheus:
+  service:
+    type: ClusterIP
+  prometheusSpec:
+    replicas: 1
+    retention: 7d
+    retentionSize: 18GiB
+    walCompression: true
+    externalLabels:
+      site_id: __TVT_SITE_ID__
+      edge_id: __TVT_EDGE_ID__
+    image:
+      registry: __TVT_REGISTRY__
+      repository: prometheus/prometheus
+      tag: v3.5.0
+      sha: __PROMETHEUS_DIGEST__
+    resources:
+      requests: {cpu: 250m, memory: 768Mi}
+      limits: {cpu: "2", memory: 3Gi}
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests: {storage: 24Gi}
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    serviceMonitorSelector: {}
+    serviceMonitorNamespaceSelector: {}
+    podMonitorSelector: {}
+    podMonitorNamespaceSelector: {}
+    ruleSelector:
+      matchLabels: {app.kubernetes.io/part-of: tvt-observability}
+    ruleNamespaceSelector:
+      matchNames: [monitoring]
+    scrapeConfigSelector:
+      matchLabels: {app.kubernetes.io/part-of: tvt-observability}
+    scrapeConfigNamespaceSelector:
+      matchNames: [monitoring]
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65534
+      runAsGroup: 65534
+      fsGroup: 65534
+      seccompProfile: {type: RuntimeDefault}
+
+alertmanager:
+  service:
+    type: ClusterIP
+  alertmanagerSpec:
+    replicas: 1
+    image:
+      registry: __TVT_REGISTRY__
+      repository: prometheus/alertmanager
+      tag: v0.28.1
+      sha: __ALERTMANAGER_DIGEST__
+    secrets: [tvt-alertmanager-webhook]
+    resources:
+      requests: {cpu: 25m, memory: 64Mi}
+      limits: {cpu: 250m, memory: 256Mi}
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests: {storage: 2Gi}
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: tvt-host
+      group_by: [alertname, severity, service, camera_id, use_case]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 24h
+      routes:
+        - receiver: tvt-host
+          matchers: ['severity="critical"']
+          group_wait: 30s
+          group_interval: 5m
+        - receiver: tvt-host
+          matchers: ['severity="warning"']
+          group_wait: 5m
+          group_interval: 10m
+    inhibit_rules:
+      - source_matchers: ['alertname=~"NodeNotReady|K3sAPIUnavailable"']
+        target_matchers: ['severity=~"warning|info"']
+        equal: [site_id]
+      - source_matchers: ['alertname="CameraRTSPInvalid"']
+        target_matchers: ['alertname=~"CVSourceUnavailable|CVNoSuccessfulInference"']
+        equal: [camera_id]
+    receivers:
+      - name: tvt-host
+        webhook_configs:
+          - url: http://__TVT_HOST_ADDRESS__:8090/internal/v1/alerts/alertmanager
+            send_resolved: true
+            max_alerts: 100
+            http_config:
+              authorization:
+                type: Bearer
+                credentials_file: /etc/alertmanager/secrets/tvt-alertmanager-webhook/token
+
+grafana:
+  replicas: 1
+  service: {type: ClusterIP}
+  admin:
+    existingSecret: tvt-grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  image:
+    registry: __TVT_REGISTRY__
+    repository: grafana/grafana
+    tag: 12.1.1
+    sha: __GRAFANA_DIGEST__
+  resources:
+    requests: {cpu: 100m, memory: 192Mi}
+    limits: {cpu: "1", memory: 768Mi}
+  persistence:
+    enabled: true
+    accessModes: [ReadWriteOnce]
+    size: 4Gi
+  testFramework:
+    enabled: false
+  initChownData:
+    enabled: false
+  sidecar:
+    image:
+      registry: __TVT_REGISTRY__
+      repository: kiwigrid/k8s-sidecar
+      tag: 1.30.10
+      sha: __K8S_SIDECAR_DIGEST__
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: monitoring
+    datasources:
+      enabled: true
+      searchNamespace: monitoring
+
+kube-state-metrics:
+  image:
+    registry: __TVT_REGISTRY__
+    repository: kube-state-metrics/kube-state-metrics
+    tag: v2.17.0
+    sha: __KUBE_STATE_METRICS_DIGEST__
+  resources:
+    requests: {cpu: 25m, memory: 64Mi}
+    limits: {cpu: 250m, memory: 256Mi}
+
+prometheus-node-exporter:
+  image:
+    registry: __TVT_REGISTRY__
+    repository: prometheus/node-exporter
+    tag: v1.9.1
+    digest: __NODE_EXPORTER_DIGEST__
+  resources:
+    requests: {cpu: 25m, memory: 32Mi}
+    limits: {cpu: 250m, memory: 128Mi}
+
+kubeApiServer:
+  enabled: true
+kubelet:
+  enabled: true
+coreDns:
+  enabled: true

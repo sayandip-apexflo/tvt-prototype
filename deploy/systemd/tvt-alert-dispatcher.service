@@ -1,0 +1,29 @@
+[Unit]
+Description=TVT durable operational alert dispatcher
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tvt-alert
+Group=tvt-alert
+EnvironmentFile=-/etc/tvt/alert-dispatcher.env
+ExecStart=/opt/tvt/venv/bin/tvt-alert-dispatcher
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

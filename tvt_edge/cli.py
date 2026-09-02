@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import subprocess
 import time
 import uuid
@@ -17,6 +18,7 @@ from tvt_edge.camera import DiscoveryWorker, ValidationWorker
 from tvt_edge.cluster import ClusterStatusReader, SyncWorker
 from tvt_edge.db.session import build_engine, build_session_factory
 from tvt_edge.legacy import import_sqlite_lifecycle
+from tvt_edge.observability import configure_json_logging
 from tvt_edge.security import CredentialKeyring
 from tvt_edge.service import ManagementService
 from tvt_edge.settings import Settings
@@ -77,6 +79,7 @@ def alembic_config(database_url: str) -> Config:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    configure_json_logging("edge-management")
     settings = Settings.from_environment()
     if args.command == "migrate":
         command.upgrade(alembic_config(settings.database_url), "head")
@@ -185,18 +188,25 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "api":
         import uvicorn
+        from prometheus_client import start_http_server
 
         host = args.host or settings.listen_host
         port = args.port or settings.listen_port
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("the Slice 3 API must bind to loopback")
+        app = create_app(
+            sessions,
+            keyring,
+            settings.sync_namespace,
+            kubectl_client(settings.kubeconfig),
+        )
+        start_http_server(
+            settings.metrics_port,
+            addr=settings.metrics_host,
+            registry=app.state.metrics.registry,
+        )
         uvicorn.run(
-            create_app(
-                sessions,
-                keyring,
-                settings.sync_namespace,
-                kubectl_client(settings.kubeconfig),
-            ),
+            app,
             host=host,
             port=port,
         )
@@ -238,16 +248,13 @@ def main(argv: list[str] | None = None) -> int:
                 had_error = True
                 # The worker has already persisted a redacted failure. Do not print
                 # subprocess input or any secret-bearing object.
-                print(
-                    json.dumps(
-                        {
-                            "worker": name,
-                            "outcome": "failed",
-                            "error": type(error).__name__,
-                        },
-                        sort_keys=True,
-                    ),
-                    flush=True,
+                logging.getLogger("tvt_edge.worker").error(
+                    "Background worker cycle failed",
+                    extra={
+                        "event": "worker_cycle_failed",
+                        "error_code": "INTERNAL_ERROR",
+                        "reason": type(error).__name__,
+                    },
                 )
         if had_error:
             if args.once:
