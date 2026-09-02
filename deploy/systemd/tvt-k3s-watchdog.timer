@@ -1,0 +1,14 @@
+[Unit]
+Description=Check K3s API readiness every 30 seconds
+After=k3s.service
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=true
+Unit=tvt-k3s-watchdog.service
+
+[Install]
+WantedBy=timers.target

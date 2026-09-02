@@ -79,7 +79,14 @@ def create_alert_app(
                 except asyncio.CancelledError:
                     pass
 
-    app = FastAPI(title="TVT alert dispatcher", version="1", lifespan=lifespan)
+    app = FastAPI(
+        title="TVT alert dispatcher",
+        version="1",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
 
     @app.middleware("http")
     async def request_observability(request: Request, call_next):

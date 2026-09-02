@@ -13,6 +13,7 @@ from tvt_edge.observability.metrics import (
     HttpMetrics,
     LabelPolicy,
     MetricsContractError,
+    WatchdogMetricsCollector,
     render_metrics,
 )
 
@@ -22,6 +23,7 @@ __all__ = [
     "HttpMetrics",
     "LabelPolicy",
     "MetricsContractError",
+    "WatchdogMetricsCollector",
     "bind_log_context",
     "configure_json_logging",
     "get_logger",

@@ -6,6 +6,17 @@ metadata:
   labels: {app.kubernetes.io/part-of: tvt-observability}
 spec:
   groups:
+    - name: tvt.host
+      rules:
+        - alert: K3sAPIUnavailable
+          expr: tvt_k3s_api_ready == 0
+          for: 2m
+          labels: {severity: critical, service: k3s}
+          annotations: {summary: Host watchdog reports the K3s API is unavailable}
+        - alert: K3sWatchdogRestart
+          expr: sum(increase(tvt_host_watchdog_actions_total{action="restart"}[15m])) > 0
+          labels: {severity: critical, service: k3s}
+          annotations: {summary: Host watchdog performed a bounded K3s restart action}
     - name: tvt.camera
       rules:
         - alert: CameraRTSPInvalid

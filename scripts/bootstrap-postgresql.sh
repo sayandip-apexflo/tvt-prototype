@@ -23,6 +23,10 @@ command -v openssl >/dev/null 2>&1 || { echo "openssl is required" >&2; exit 1; 
   echo "missing installed TVT alert dispatcher: ${VENV}" >&2
   exit 1
 }
+[[ -x "${VENV}/bin/tvt-k3s-watchdog" ]] || {
+  echo "missing installed TVT K3s watchdog: ${VENV}" >&2
+  exit 1
+}
 
 if ! getent group tvt-edge >/dev/null; then
   groupadd --system tvt-edge
@@ -126,6 +130,12 @@ install -o root -g root -m 0644 \
 install -o root -g root -m 0644 \
   "${REPO_ROOT}/deploy/systemd/tvt-alert-dispatcher.service" \
   /etc/systemd/system/tvt-alert-dispatcher.service
+install -o root -g root -m 0644 \
+  "${REPO_ROOT}/deploy/systemd/tvt-k3s-watchdog.service" \
+  /etc/systemd/system/tvt-k3s-watchdog.service
+install -o root -g root -m 0644 \
+  "${REPO_ROOT}/deploy/systemd/tvt-k3s-watchdog.timer" \
+  /etc/systemd/system/tvt-k3s-watchdog.timer
 systemctl daemon-reload
 echo "PostgreSQL and TVT host service configuration are installed."
 echo "Review /etc/tvt/edge.env and /etc/tvt/alert-dispatcher.env, install the"

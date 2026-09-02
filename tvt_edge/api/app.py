@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Header, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,6 +19,7 @@ from tvt_edge.alerting import AlertingService
 from tvt_edge.cluster import ClusterStatusReader
 from tvt_edge.observability import (
     EdgeMetrics,
+    WatchdogMetricsCollector,
     bind_log_context,
     get_logger,
     render_metrics,
@@ -26,6 +29,7 @@ from tvt_edge.observability import (
 from tvt_edge.security import CredentialKeyring, redact_text
 from tvt_edge.service import ManagementService
 from tvt_edge.status import aggregate_health
+from tvt_edge.watchdog import STATE_PATH, WatchdogStatusReader
 
 
 class StrictModel(BaseModel):
@@ -112,23 +116,96 @@ class RollbackInput(StrictModel):
     bundle_sha256: str
 
 
+MAX_API_REQUEST_BYTES = 1024 * 1024
+
+
+def _trusted_loopback_host(value: str) -> bool:
+    if (
+        not value
+        or value != value.strip()
+        or any(character.isspace() for character in value)
+        or any(character in value for character in "/?#@")
+    ):
+        return False
+    try:
+        parsed = urlsplit(f"//{value}")
+        hostname = parsed.hostname
+        parsed.port
+    except ValueError:
+        return False
+    return hostname in {"127.0.0.1", "::1", "localhost"}
+
+
+def _security_headers(response: Response) -> Response:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Frame-Options"] = "DENY"
+    return response
+
+
 def create_app(
     sessions: sessionmaker[Session],
     keyring: CredentialKeyring,
     allowed_namespace: str = "apexfabric",
     kubectl: Kubectl | None = None,
+    watchdog_state_path: Path = STATE_PATH,
 ) -> FastAPI:
-    app = FastAPI(title="TVT edge management", version="1")
+    app = FastAPI(
+        title="TVT edge management",
+        version="1",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     service = ManagementService(sessions, keyring)
     alerting = AlertingService(sessions)
     cluster_status = ClusterStatusReader(kubectl, allowed_namespace)
     metrics = EdgeMetrics("edge-management")
     metrics.set_build("0.1.0")
+    watchdog = WatchdogStatusReader(watchdog_state_path)
+    metrics.registry.register(WatchdogMetricsCollector(watchdog))
     logger = get_logger("tvt_edge.http")
     app.state.metrics = metrics
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
+        if not _trusted_loopback_host(request.headers.get("Host", "")):
+            return _security_headers(
+                Response(
+                    content='{"detail":"invalid host header"}',
+                    status_code=400,
+                    media_type="application/json",
+                )
+            )
+        if request.headers.get("Transfer-Encoding"):
+            return _security_headers(
+                Response(
+                    content='{"detail":"content length is required"}',
+                    status_code=411,
+                    media_type="application/json",
+                )
+            )
+        content_length = request.headers.get("Content-Length")
+        if content_length is not None:
+            try:
+                declared_size = int(content_length)
+            except ValueError:
+                return _security_headers(
+                    Response(
+                        content='{"detail":"invalid content length"}',
+                        status_code=400,
+                        media_type="application/json",
+                    )
+                )
+            if declared_size < 0 or declared_size > MAX_API_REQUEST_BYTES:
+                return _security_headers(
+                    Response(
+                        content='{"detail":"request body is too large"}',
+                        status_code=413,
+                        media_type="application/json",
+                    )
+                )
         request_id = request_id_or_new(request.headers.get("X-Request-ID"))
         request.state.request_id = request_id
         token = bind_log_context(request_id=request_id)
@@ -139,7 +216,7 @@ def create_app(
             response: Response = await call_next(request)
             status_code = response.status_code
             response.headers["X-Request-ID"] = request_id
-            return response
+            return _security_headers(response)
         except Exception:
             metrics.application_error("INTERNAL_ERROR")
             logger.exception(
@@ -191,6 +268,7 @@ def create_app(
             management,
             cluster_status.snapshot(),
             database_status=database,
+            watchdog=watchdog.snapshot(),
         )
 
     @app.get("/metrics", include_in_schema=False)

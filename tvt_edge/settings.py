@@ -8,6 +8,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def require_loopback_ip(value: str, setting: str = "TVT_LISTEN_HOST") -> str:
+    """Require an explicit loopback address; hostnames are not a bind policy."""
+
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError as error:
+        raise ValueError(f"{setting} must be an explicit loopback IP address") from error
+    if not address.is_loopback:
+        raise ValueError(f"{setting} must bind to loopback")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str = "postgresql+psycopg:///tvt"
@@ -41,8 +53,7 @@ class Settings:
         if tcp_timeout <= 0 or tcp_timeout > 10:
             raise ValueError("TVT_DISCOVERY_TCP_TIMEOUT must be in (0, 10]")
         host = os.getenv("TVT_LISTEN_HOST", "127.0.0.1")
-        if host not in {"127.0.0.1", "::1", "localhost"}:
-            raise ValueError("the Slice 3 API must bind to loopback")
+        require_loopback_ip(host)
         metrics_host = os.getenv("TVT_METRICS_LISTEN_HOST", "127.0.0.1")
         try:
             metrics_address = ipaddress.ip_address(metrics_host)

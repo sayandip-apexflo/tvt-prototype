@@ -45,6 +45,11 @@ def main() -> int:
         ),
         host=settings.listen_host,
         port=settings.listen_port,
+        proxy_headers=False,
+        server_header=False,
+        date_header=False,
+        timeout_keep_alive=5,
+        limit_concurrency=64,
     )
     return 0
 

@@ -21,6 +21,9 @@ from prometheus_client import (
     generate_latest,
     multiprocess,
 )
+from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
+
+from tvt_edge.watchdog import WatchdogStatusReader
 
 
 MAX_CAMERAS = 8
@@ -75,11 +78,7 @@ DEFAULT_REASONS = frozenset(
 DEFAULT_ROUTES = frozenset(
     {
         "/metrics",
-        "/docs",
-        "/docs/oauth2-redirect",
         "/healthz",
-        "/openapi.json",
-        "/redoc",
         "/readyz",
         "/api/v1/health",
         "/api/v1/cluster",
@@ -418,6 +417,56 @@ class AlertDispatcherMetrics:
 
     def set_emergency_spool_items(self, count: int) -> None:
         self._spool.set(max(0, count))
+
+
+class WatchdogMetricsCollector:
+    """Expose the watchdog's root-owned persistent counters without mutation."""
+
+    def __init__(self, reader: WatchdogStatusReader) -> None:
+        self.reader = reader
+
+    def collect(self):
+        snapshot = self.reader.snapshot()
+        ready = GaugeMetricFamily(
+            "tvt_k3s_api_ready", "Last fixed host-side K3s API readiness result"
+        )
+        ready.add_metric([], 1 if snapshot.get("last_check_result") == "healthy" else 0)
+        yield ready
+
+        checks = CounterMetricFamily(
+            "tvt_host_watchdog_checks",
+            "Fixed host watchdog checks",
+            labels=["result"],
+        )
+        for result in sorted(("healthy", "service_inactive", "unhealthy")):
+            checks.add_metric(
+                [result], float(snapshot.get("checks_total", {}).get(result, 0))
+            )
+        yield checks
+
+        actions = CounterMetricFamily(
+            "tvt_host_watchdog_actions",
+            "Bounded host watchdog actions",
+            labels=["action", "result"],
+        )
+        for result in sorted(("failed", "succeeded")):
+            actions.add_metric(
+                ["restart", result],
+                float(
+                    snapshot.get("actions_total", {})
+                    .get("restart", {})
+                    .get(result, 0)
+                ),
+            )
+        yield actions
+
+        last_success = GaugeMetricFamily(
+            "tvt_host_last_success_timestamp_seconds",
+            "Last successful fixed host check",
+            labels=["check"],
+        )
+        last_success.add_metric(["k3s_api"], snapshot.get("last_success_at") or 0)
+        yield last_success
 
 
 def render_metrics(registry: CollectorRegistry) -> tuple[bytes, str]:

@@ -13,6 +13,7 @@ def aggregate_health(
     cluster: dict[str, Any],
     *,
     database_status: str = "healthy",
+    watchdog: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build independent component health without hiding degraded dependencies."""
 
@@ -27,6 +28,7 @@ def aggregate_health(
         "host": {"status": "healthy"},
         "database": {"status": database_status},
         "k3s_api": dict(cluster["api"]),
+        "k3s_watchdog": watchdog or {"status": "unconfigured"},
         "node": {
             key: value
             for key, value in cluster["nodes"].items()

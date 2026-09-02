@@ -138,13 +138,21 @@ install the service units after reviewing the example environment file:
 sudo bash scripts/bootstrap-postgresql.sh
 sudo bash scripts/install-tvt-kubeconfig.sh
 sudo systemctl enable --now tvt-edge.service tvt-camera-sync.service \
-  tvt-retention.timer
+  tvt-retention.timer tvt-k3s-watchdog.timer
 ```
 
 The bootstrap creates the local role/database, generates the credential key,
-runs Alembic, and installs—but deliberately does not enable—the units. Edit the
+runs Alembic, and installs—but deliberately does not enable—the units, including
+the fixed K3s API recovery watchdog. Edit the
 environment file before enabling them. Initialize the site and register the
 unchanged Traffic bundle with the loopback service:
+
+The root-owned watchdog accepts no arguments. It checks the fixed local K3s
+readiness endpoint every 30 seconds, restarts `k3s.service` only after 120
+seconds of continuous API failure, and then enforces a 10-minute cooldown.
+Its bounded state and cumulative action counters are exposed through management
+health and metrics; `journalctl -u tvt-k3s-watchdog.service` provides the local
+action audit.
 
 ```bash
 sudo -u tvt-edge /opt/tvt/venv/bin/tvt-edge init-site \

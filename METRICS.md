@@ -111,6 +111,9 @@ tvt_host_last_success_timestamp_seconds{check}
 `service`, `check`, `action`, and `result` must come from documented bounded
 sets. Initial `service` values are `k3s`, `postgresql`, `edge-management`,
 `alert-dispatcher`, `prometheus`, and `alloy`.
+The watchdog uses `check="k3s_api"`, `action="restart"`, check results
+`healthy`, `unhealthy`, or `service_inactive`, and action results `succeeded`
+or `failed`.
 
 ### 3.3 Kubernetes node and workloads
 

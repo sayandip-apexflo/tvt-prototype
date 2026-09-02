@@ -21,8 +21,9 @@ from tvt_edge.legacy import import_sqlite_lifecycle
 from tvt_edge.observability import configure_json_logging
 from tvt_edge.security import CredentialKeyring
 from tvt_edge.service import ManagementService
-from tvt_edge.settings import Settings
+from tvt_edge.settings import Settings, require_loopback_ip
 from tvt_edge.status import aggregate_health
+from tvt_edge.watchdog import WatchdogStatusReader
 from tvt_runtime.cli import kubectl_client
 
 
@@ -114,7 +115,10 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             management = None
         result = aggregate_health(
-            management, cluster_status.snapshot(), database_status=database
+            management,
+            cluster_status.snapshot(),
+            database_status=database,
+            watchdog=WatchdogStatusReader().snapshot(),
         )
         print(json.dumps(result, sort_keys=True))
         return 0 if result["status"] == "healthy" else 1
@@ -190,10 +194,11 @@ def main(argv: list[str] | None = None) -> int:
         import uvicorn
         from prometheus_client import start_http_server
 
-        host = args.host or settings.listen_host
-        port = args.port or settings.listen_port
-        if host not in {"127.0.0.1", "::1", "localhost"}:
-            raise ValueError("the Slice 3 API must bind to loopback")
+        host = settings.listen_host if args.host is None else args.host
+        port = settings.listen_port if args.port is None else args.port
+        require_loopback_ip(host, "--host")
+        if not 1 <= port <= 65535 or port == settings.metrics_port:
+            raise ValueError("--port must be valid and distinct from the metrics port")
         app = create_app(
             sessions,
             keyring,
@@ -209,6 +214,11 @@ def main(argv: list[str] | None = None) -> int:
             app,
             host=host,
             port=port,
+            proxy_headers=False,
+            server_header=False,
+            date_header=False,
+            timeout_keep_alive=5,
+            limit_concurrency=64,
         )
         return 0
     sync_worker = SyncWorker(

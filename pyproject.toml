@@ -28,6 +28,7 @@ dev = ["httpx>=0.28,<1", "pytest>=8.3,<9"]
 tvt-k3s = "tvt_runtime.cli:main"
 tvt-edge = "tvt_edge.cli:main"
 tvt-alert-dispatcher = "tvt_edge.alerting.cli:main"
+tvt-k3s-watchdog = "tvt_edge.watchdog:main"
 
 [tool.setuptools.packages.find]
 include = ["apexfabric*", "tvt_edge*", "tvt_runtime*"]

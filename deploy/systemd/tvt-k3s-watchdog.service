@@ -1,36 +1,34 @@
 [Unit]
-Description=TVT host management API
-After=network-online.target postgresql.service
-Wants=network-online.target
+Description=TVT bounded K3s API recovery watchdog
+After=k3s.service
 
 [Service]
-Type=simple
-User=tvt-edge
+Type=oneshot
+User=root
 Group=tvt-edge
-EnvironmentFile=-/etc/tvt/edge.env
-ExecStart=/opt/tvt/venv/bin/tvt-edge api
-Restart=on-failure
-RestartSec=5s
+ExecStart=/opt/tvt/venv/bin/tvt-k3s-watchdog
+StateDirectory=tvt-k3s-watchdog
+StateDirectoryMode=0750
+RuntimeDirectory=tvt-k3s-watchdog
+RuntimeDirectoryMode=0750
 NoNewPrivileges=true
 PrivateDevices=true
 PrivateTmp=true
 ProtectClock=true
+ProtectControlGroups=true
 ProtectHome=true
 ProtectHostname=true
-ProtectSystem=strict
 ProtectKernelLogs=true
-ProtectKernelTunables=true
 ProtectKernelModules=true
-ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectSystem=strict
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
-RemoveIPC=true
 SystemCallArchitectures=native
-UMask=0077
-
-[Install]
-WantedBy=multi-user.target
+IPAddressDeny=any
+IPAddressAllow=localhost
+UMask=0027

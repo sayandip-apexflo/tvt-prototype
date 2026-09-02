@@ -59,6 +59,19 @@ class BootstrapScriptTests(unittest.TestCase):
         self.assertIn("auth can-i patch nodes", installer)
         self.assertIn("TVT_KUBECONFIG=/etc/tvt/kubeconfig", environment)
 
+    def test_bounded_k3s_watchdog_is_installed_as_a_hardened_timer(self):
+        bootstrap = self.text("bootstrap-postgresql.sh")
+        service = (ROOT / "deploy/systemd/tvt-k3s-watchdog.service").read_text()
+        timer = (ROOT / "deploy/systemd/tvt-k3s-watchdog.timer").read_text()
+        self.assertIn("tvt-k3s-watchdog.service", bootstrap)
+        self.assertIn("tvt-k3s-watchdog.timer", bootstrap)
+        self.assertIn("ExecStart=/opt/tvt/venv/bin/tvt-k3s-watchdog", service)
+        self.assertNotIn("EnvironmentFile", service)
+        self.assertIn("IPAddressDeny=any", service)
+        self.assertIn("IPAddressAllow=localhost", service)
+        self.assertIn("OnUnitActiveSec=30s", timer)
+        self.assertIn("Persistent=true", timer)
+
 
 if __name__ == "__main__":
     unittest.main()

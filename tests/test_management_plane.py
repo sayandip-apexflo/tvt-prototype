@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 import unittest
@@ -6,6 +7,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import yaml
+import httpx
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -343,6 +345,41 @@ class ManagementPlaneTests(unittest.TestCase):
         self.assertNotIn(
             ("/api/v1/cameras/{camera_id}/credentials", ("GET",)), routes
         )
+
+    def test_api_rejects_untrusted_hosts_and_disables_schema_exposure(self):
+        app = create_app(self.sessions, self.keyring)
+        async def exercise():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://127.0.0.1"
+            ) as client:
+                response = await client.get("/docs")
+                rejected = await client.get(
+                    "/api/v1/health", headers={"Host": "management.example.com"}
+                )
+            return response, rejected
+
+        response, rejected = asyncio.run(exercise())
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(rejected.status_code, 400)
+
+    def test_api_rejects_oversized_declared_request_bodies(self):
+        app = create_app(self.sessions, self.keyring)
+        async def exercise():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://127.0.0.1"
+            ) as client:
+                return await client.post(
+                    "/api/v1/discovery-runs",
+                    content=b"x",
+                    headers={"Content-Length": str(1024 * 1024 + 1)},
+                )
+
+        response = asyncio.run(exercise())
+        self.assertEqual(response.status_code, 413)
 
     def test_cluster_and_health_aggregate_independent_components(self):
         self.commit()

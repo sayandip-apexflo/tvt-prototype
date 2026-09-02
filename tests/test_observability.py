@@ -131,6 +131,8 @@ class MonitoringManifestTests(unittest.TestCase):
         self.assertIn("__PROMETHEUS_DIGEST__", combined)
         self.assertIn("__LOKI_DIGEST__", combined)
         self.assertIn("__ALLOY_DIGEST__", combined)
+        self.assertIn("K3sAPIUnavailable", combined)
+        self.assertIn("K3sWatchdogRestart", combined)
 
 
 class ObservabilitySettingsTests(unittest.TestCase):
@@ -142,6 +144,16 @@ class ObservabilitySettingsTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "every host interface"):
                 Settings.from_environment()
+
+    def test_management_listener_requires_an_explicit_loopback_ip(self):
+        for host in ("localhost", "0.0.0.0", "192.0.2.10"):
+            with self.subTest(host=host), patch.dict(
+                "os.environ", {"TVT_LISTEN_HOST": host}, clear=False
+            ):
+                with self.assertRaisesRegex(ValueError, "loopback"):
+                    Settings.from_environment()
+        with patch.dict("os.environ", {"TVT_LISTEN_HOST": "::1"}, clear=False):
+            self.assertEqual(Settings.from_environment().listen_host, "::1")
 
 
 if __name__ == "__main__":
