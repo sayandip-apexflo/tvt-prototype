@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import re
 import uuid
+from collections import Counter
 from datetime import timedelta
 from typing import Any
 
@@ -231,7 +232,17 @@ class ManagementService:
     def get_camera(self, camera_key: str) -> dict[str, Any]:
         with self.sessions() as session:
             camera = self._camera(session, camera_key)
-            return self._camera_view(session, camera)
+            result = self._camera_view(session, camera)
+            observations = session.scalars(
+                select(CameraObservation)
+                .where(CameraObservation.camera_id == camera.id)
+                .order_by(CameraObservation.observed_at.desc())
+                .limit(20)
+            ).all()
+            result["observations"] = [
+                self._camera_observation_view(session, item) for item in observations
+            ]
+            return result
 
     @staticmethod
     def _camera(session: Session, camera_key: str) -> Camera:
@@ -244,6 +255,7 @@ class ManagementService:
 
     @staticmethod
     def _camera_view(session: Session, camera: Camera) -> dict[str, Any]:
+        status = session.get(CameraStatus, camera.id)
         profile = session.scalar(
             select(CameraStreamProfile).where(
                 CameraStreamProfile.camera_id == camera.id,
@@ -271,6 +283,20 @@ class ManagementService:
             "enabled": camera.enabled,
             "credentials_configured": credential is not None,
             "selected_profile_id": str(profile.id) if profile else None,
+            "validation_code": status.validation_code if status else None,
+            "validation_failures": status.consecutive_failures if status else 0,
+            "next_retry_at": status.next_retry_at.isoformat()
+            if status and status.next_retry_at
+            else None,
+            "last_observed_at": status.last_observed_at.isoformat()
+            if status and status.last_observed_at
+            else None,
+            "last_validated_at": status.last_validated_at.isoformat()
+            if status and status.last_validated_at
+            else None,
+            "last_media_at": status.last_media_at.isoformat()
+            if status and status.last_media_at
+            else None,
             "identifiers": [
                 {"kind": item.kind, "value": item.display_value or item.normalized_value}
                 for item in identifiers
@@ -553,6 +579,45 @@ class ManagementService:
             )
             return attempt
 
+    def list_validation_attempts(
+        self, camera_key: str, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        if limit <= 0 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        with self.sessions() as session:
+            camera = self._camera(session, camera_key)
+            attempts = session.scalars(
+                select(CameraValidationAttempt)
+                .where(CameraValidationAttempt.camera_id == camera.id)
+                .order_by(CameraValidationAttempt.created_at.desc())
+                .limit(limit)
+            ).all()
+            return [
+                self._validation_attempt_view(attempt, camera.camera_key)
+                for attempt in attempts
+            ]
+
+    @staticmethod
+    def _validation_attempt_view(
+        attempt: CameraValidationAttempt, camera_key: str,
+    ) -> dict[str, Any]:
+        return {
+            "attempt_id": str(attempt.id),
+            "camera_id": camera_key,
+            "profile_id": str(attempt.profile_id) if attempt.profile_id else None,
+            "credential_version_id": str(attempt.credential_version_id)
+            if attempt.credential_version_id
+            else None,
+            "trigger": attempt.trigger,
+            "status": attempt.status,
+            "stage": attempt.stage,
+            "result_code": attempt.result_code,
+            "safe_result": attempt.safe_result,
+            "started_at": attempt.started_at.isoformat() if attempt.started_at else None,
+            "finished_at": attempt.finished_at.isoformat() if attempt.finished_at else None,
+            "created_at": attempt.created_at.isoformat(),
+        }
+
     def record_validation_result(
         self,
         attempt_id: uuid.UUID,
@@ -595,6 +660,158 @@ class ManagementService:
                 details={"result_code": result_code},
             )
             return attempt
+
+    def list_discovery_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        if limit <= 0 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        with self.sessions() as session:
+            runs = session.scalars(
+                select(DiscoveryRun)
+                .order_by(DiscoveryRun.created_at.desc())
+                .limit(limit)
+            ).all()
+            return [self._discovery_run_view(run) for run in runs]
+
+    def get_discovery_run(
+        self, run_id: uuid.UUID, observation_limit: int = 100
+    ) -> dict[str, Any]:
+        if observation_limit <= 0 or observation_limit > 100:
+            raise ValueError("observation_limit must be between 1 and 100")
+        with self.sessions() as session:
+            run = session.get(DiscoveryRun, run_id)
+            if run is None:
+                raise ValueError("unknown discovery operation")
+            observations = session.scalars(
+                select(CameraObservation)
+                .where(CameraObservation.run_id == run.id)
+                .order_by(CameraObservation.observed_at.desc())
+                .limit(observation_limit + 1)
+            ).all()
+            result = self._discovery_run_view(run)
+            result["observations"] = [
+                self._camera_observation_view(session, item)
+                for item in observations[:observation_limit]
+            ]
+            result["observations_truncated"] = len(observations) > observation_limit
+            return result
+
+    @staticmethod
+    def _discovery_run_view(run: DiscoveryRun) -> dict[str, Any]:
+        return {
+            "operation_id": str(run.id),
+            "run_id": str(run.id),
+            "trigger": run.trigger,
+            "status": run.status,
+            "counters": run.counters,
+            "error_code": run.error_code,
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+            "created_at": run.created_at.isoformat(),
+        }
+
+    @staticmethod
+    def _camera_observation_view(
+        session: Session, observation: CameraObservation
+    ) -> dict[str, Any]:
+        camera = (
+            session.get(Camera, observation.camera_id)
+            if observation.camera_id is not None
+            else None
+        )
+        return {
+            "observation_id": str(observation.id),
+            "camera_id": camera.camera_key if camera is not None else None,
+            "method": observation.method,
+            "address": observation.address,
+            "result_code": observation.result_code,
+            "metadata": redact(observation.metadata_json),
+            "observed_at": observation.observed_at.isoformat(),
+        }
+
+    def management_status(self) -> dict[str, Any]:
+        """Aggregate durable camera-validation and synchronization state."""
+
+        with self.sessions() as session:
+            cameras = session.scalars(
+                select(Camera).where(Camera.deleted_at.is_(None))
+            ).all()
+            camera_states = Counter(camera.onboarding_state for camera in cameras)
+            enabled = [camera for camera in cameras if camera.enabled]
+            enabled_ids = [camera.id for camera in enabled]
+            statuses = (
+                session.scalars(
+                    select(CameraStatus).where(CameraStatus.camera_id.in_(enabled_ids))
+                ).all()
+                if enabled_ids
+                else []
+            )
+            status_by_camera = {status.camera_id: status for status in statuses}
+            validation_ok = sum(
+                1
+                for camera in enabled
+                if camera.onboarding_state == "online"
+                and status_by_camera.get(camera.id) is not None
+                and status_by_camera[camera.id].validation_code == "OK"
+            )
+            validation_failing = len(enabled) - validation_ok
+            if not cameras:
+                camera_health = "unconfigured"
+            elif validation_failing:
+                camera_health = "degraded"
+            else:
+                camera_health = "healthy"
+
+            deployments = session.scalars(
+                select(SolutionDeployment).where(SolutionDeployment.deleted_at.is_(None))
+            ).all()
+            deployment_ids = [deployment.id for deployment in deployments]
+            sync_states = Counter(
+                session.scalars(
+                    select(DeploymentSyncState.state).where(
+                        DeploymentSyncState.deployment_id.in_(deployment_ids)
+                    )
+                ).all()
+                if deployment_ids
+                else []
+            )
+            unconfigured = len(deployments) - sum(sync_states.values())
+            if unconfigured:
+                sync_states["unconfigured"] = unconfigured
+            if not deployments or sync_states.get("unconfigured") == len(deployments):
+                sync_health = "unconfigured"
+            elif sync_states.get("failed"):
+                sync_health = "degraded"
+            elif sync_states.get("pending") or sync_states.get("applying"):
+                sync_health = "progressing"
+            else:
+                sync_health = "healthy"
+
+            return {
+                "cameras": {
+                    "status": camera_health,
+                    "total": len(cameras),
+                    "enabled": len(enabled),
+                    "validated_online": validation_ok,
+                    "validation_failing": validation_failing,
+                    "by_state": dict(sorted(camera_states.items())),
+                },
+                "synchronization": {
+                    "status": sync_health,
+                    "total": len(deployments),
+                    "by_state": dict(sorted(sync_states.items())),
+                },
+            }
+
+    def synchronization_status(self) -> dict[str, Any]:
+        """Return aggregate and bounded per-deployment synchronization state."""
+
+        summary = self.management_status()["synchronization"]
+        deployments = self.list_deployments()
+        return {
+            **summary,
+            "items": deployments,
+            "items_truncated": summary["total"] > len(deployments),
+        }
 
     def queue_discovery(
         self, trigger: str, actor: str, request_id: str
@@ -1037,6 +1254,7 @@ class ManagementService:
                 select(SolutionDeployment)
                 .where(SolutionDeployment.deleted_at.is_(None))
                 .order_by(SolutionDeployment.deployment_key)
+                .limit(100)
             ).all()
             result = []
             for deployment in deployments:

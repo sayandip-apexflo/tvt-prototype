@@ -17,15 +17,23 @@ class Settings:
     sync_namespace: str = "apexfabric"
     sync_worker_id: str = "tvt-edge"
     rollout_timeout: int = 180
+    discovery_onvif_timeout: float = 1.0
+    discovery_tcp_timeout: float = 1.0
 
     @classmethod
     def from_environment(cls) -> "Settings":
         port = int(os.getenv("TVT_LISTEN_PORT", "8088"))
         timeout = int(os.getenv("TVT_ROLLOUT_TIMEOUT", "180"))
+        onvif_timeout = float(os.getenv("TVT_DISCOVERY_ONVIF_TIMEOUT", "1.0"))
+        tcp_timeout = float(os.getenv("TVT_DISCOVERY_TCP_TIMEOUT", "1.0"))
         if not 1 <= port <= 65535:
             raise ValueError("TVT_LISTEN_PORT must be between 1 and 65535")
         if not 1 <= timeout <= 3600:
             raise ValueError("TVT_ROLLOUT_TIMEOUT must be between 1 and 3600")
+        if onvif_timeout <= 0 or onvif_timeout > 10:
+            raise ValueError("TVT_DISCOVERY_ONVIF_TIMEOUT must be in (0, 10]")
+        if tcp_timeout <= 0 or tcp_timeout > 10:
+            raise ValueError("TVT_DISCOVERY_TCP_TIMEOUT must be in (0, 10]")
         host = os.getenv("TVT_LISTEN_HOST", "127.0.0.1")
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("the Slice 3 API must bind to loopback")
@@ -40,4 +48,6 @@ class Settings:
             sync_namespace=os.getenv("TVT_SYNC_NAMESPACE", "apexfabric"),
             sync_worker_id=os.getenv("TVT_SYNC_WORKER_ID", "tvt-edge"),
             rollout_timeout=timeout,
+            discovery_onvif_timeout=onvif_timeout,
+            discovery_tcp_timeout=tcp_timeout,
         )

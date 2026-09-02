@@ -11,6 +11,8 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from tvt_edge.api import create_app
+from tvt_edge.cli import parser as edge_parser
+from tvt_edge.cluster import ClusterStatusReader
 from tvt_edge.cluster.sync import SyncWorker
 from tvt_edge.db.models import (
     Base,
@@ -47,7 +49,70 @@ class FakeKubectl:
             stdout = ""
 
         result = Result()
-        if arguments[:2] == ("get", "deployments,configmaps,secrets,services,networkpolicies,persistentvolumeclaims"):
+        if arguments[:2] == ("get", "nodes"):
+            result.stdout = json.dumps(
+                {
+                    "items": [
+                        {
+                            "kind": "Node",
+                            "metadata": {
+                                "name": "edge-01",
+                                "labels": {
+                                    "kubernetes.io/arch": "amd64",
+                                    "apexfabric.com/qualified": "true",
+                                    "apexfabric.com/hardware-profile": "intel-285h",
+                                },
+                            },
+                            "status": {
+                                "conditions": [{"type": "Ready", "status": "True"}],
+                                "capacity": {"apexfabric.com/camera-streams": "30"},
+                                "allocatable": {"apexfabric.com/camera-streams": "29"},
+                            },
+                        }
+                    ]
+                }
+            )
+        elif arguments[:2] == ("get", "deployments,pods"):
+            result.stdout = json.dumps(
+                {
+                    "items": [
+                        {
+                            "kind": "Deployment",
+                            "metadata": {
+                                "name": "traffic-runtime",
+                                "generation": 2,
+                                "labels": {
+                                    "apexfabric.com/deployment-id": "traffic",
+                                    "apexfabric.com/application": "runtime",
+                                },
+                            },
+                            "spec": {"replicas": 1},
+                            "status": {
+                                "readyReplicas": 1,
+                                "availableReplicas": 1,
+                                "observedGeneration": 2,
+                            },
+                        },
+                        {
+                            "kind": "Pod",
+                            "metadata": {
+                                "name": "traffic-runtime-1",
+                                "labels": {
+                                    "apexfabric.com/deployment-id": "traffic",
+                                    "apexfabric.com/application": "runtime",
+                                },
+                            },
+                            "spec": {"nodeName": "edge-01"},
+                            "status": {
+                                "phase": "Running",
+                                "conditions": [{"type": "Ready", "status": "True"}],
+                                "containerStatuses": [{"restartCount": 0}],
+                            },
+                        },
+                    ]
+                }
+            )
+        elif arguments[:2] == ("get", "deployments,configmaps,secrets,services,networkpolicies,persistentvolumeclaims"):
             result.stdout = json.dumps({"items": []})
         elif arguments[:2] == ("get", "deployments"):
             result.stdout = json.dumps(
@@ -82,6 +147,14 @@ class ManagementPlaneTests(unittest.TestCase):
                 ROOT
                 / "solution-packs/traffic/traffic-edge-runtime-intel-285h.yaml"
             ).read_text(encoding="utf-8")
+        )
+
+    @staticmethod
+    def route_handler(app, path, method="GET"):
+        return next(
+            route.endpoint
+            for route in app.routes
+            if route.path == path and method in (route.methods or set())
         )
 
     def onboard(self, camera_id="camera-01", password="camera-secret"):
@@ -270,6 +343,61 @@ class ManagementPlaneTests(unittest.TestCase):
         self.assertNotIn(
             ("/api/v1/cameras/{camera_id}/credentials", ("GET",)), routes
         )
+
+    def test_cluster_and_health_aggregate_independent_components(self):
+        self.commit()
+        SyncWorker(
+            self.sessions,
+            self.keyring,
+            FakeKubectl(),
+            worker_id="test-worker",
+        ).run_once()
+        app = create_app(self.sessions, self.keyring, kubectl=FakeKubectl())
+        cluster = self.route_handler(app, "/api/v1/cluster")()
+        self.assertEqual(cluster["status"], "healthy")
+        self.assertTrue(cluster["nodes"]["items"][0]["qualified"])
+        self.assertTrue(cluster["workloads"]["deployments"]["items"][0]["ready"])
+        self.assertEqual(cluster["synchronization"]["by_state"], {"applied": 1})
+        self.assertEqual(
+            cluster["synchronization"]["items"][0]["deployment_id"],
+            "traffic-edge-intel-285h",
+        )
+
+        health = self.route_handler(app, "/api/v1/health")()
+        self.assertEqual(health["status"], "healthy")
+        self.assertEqual(
+            health["components"]["camera_validation"]["validated_online"], 1
+        )
+        self.assertEqual(health["components"]["k3s_api"]["status"], "healthy")
+
+    def test_discovery_progress_and_camera_detail_are_bounded_and_non_secret(self):
+        self.service.create_site(
+            "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"
+        )
+        run = self.service.queue_discovery("test", "test", "discovery")
+        app = create_app(self.sessions, self.keyring)
+        response = self.route_handler(
+            app, "/api/v1/discovery-runs/{operation_id}"
+        )(run.id)
+        self.assertEqual(response["operation_id"], str(run.id))
+        self.assertEqual(response["observations"], [])
+
+    def test_cluster_reader_degrades_without_exposing_command_error(self):
+        class FailedKubectl:
+            def run(self, *arguments, **kwargs):
+                raise ValueError("rtsp://operator:secret@camera/live")
+
+        result = ClusterStatusReader(FailedKubectl()).snapshot()
+        self.assertEqual(result["status"], "unavailable")
+        self.assertNotIn("secret", json.dumps(result))
+
+    def test_management_cli_exposes_status_and_camera_orchestration_commands(self):
+        self.assertEqual(edge_parser().parse_args(["status"]).command, "status")
+        self.assertEqual(edge_parser().parse_args(["cluster"]).command, "cluster")
+        self.assertEqual(edge_parser().parse_args(["cameras"]).command, "cameras")
+        self.assertEqual(edge_parser().parse_args(["discover"]).command, "discover")
+        validation = edge_parser().parse_args(["validate", "camera-01"])
+        self.assertEqual(validation.camera_id, "camera-01")
 
     def test_retention_keeps_applied_credential_until_replacement_is_applied(self):
         self.commit()

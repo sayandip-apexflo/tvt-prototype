@@ -83,3 +83,27 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: apexfabric-node-agent-namespace
+---
+# Read-only Node status is required by the host health API. Workload reads stay
+# namespace-scoped in node-agent-reconciler; this grants no Node mutation.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: apexfabric-node-agent-status
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: apexfabric-node-agent-status
+subjects:
+  - kind: ServiceAccount
+    name: node-agent
+    namespace: apexfabric
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: apexfabric-node-agent-status

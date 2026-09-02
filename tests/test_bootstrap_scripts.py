@@ -49,8 +49,11 @@ class BootstrapScriptTests(unittest.TestCase):
         environment = (ROOT / "deploy/host/tvt-edge.env.example").read_text()
         self.assertIn("node-agent-host-token", foundation)
         self.assertIn('resourceNames: ["apexfabric"]', foundation)
+        self.assertIn("apexfabric-node-agent-status", foundation)
+        self.assertIn('verbs: ["get", "list"]', foundation)
         self.assertIn("auth can-i patch deployments", installer)
         self.assertIn("auth can-i list nodes", installer)
+        self.assertIn("auth can-i patch nodes", installer)
         self.assertIn("TVT_KUBECONFIG=/etc/tvt/kubeconfig", environment)
 
 

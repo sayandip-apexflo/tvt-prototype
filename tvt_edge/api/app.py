@@ -11,8 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
+from apexfabric.solution_management.renderer import Kubectl
+from tvt_edge.cluster import ClusterStatusReader
 from tvt_edge.security import CredentialKeyring, redact_text
 from tvt_edge.service import ManagementService
+from tvt_edge.status import aggregate_health
 
 
 class StrictModel(BaseModel):
@@ -103,9 +106,11 @@ def create_app(
     sessions: sessionmaker[Session],
     keyring: CredentialKeyring,
     allowed_namespace: str = "apexfabric",
+    kubectl: Kubectl | None = None,
 ) -> FastAPI:
     app = FastAPI(title="TVT edge management", version="1")
     service = ManagementService(sessions, keyring)
+    cluster_status = ClusterStatusReader(kubectl, allowed_namespace)
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
@@ -134,7 +139,28 @@ def create_app(
             database = "healthy"
         except Exception:
             database = "unavailable"
-        return {"service": "healthy", "database": database}
+        try:
+            management = (
+                service.management_status() if database == "healthy" else None
+            )
+        except Exception:
+            management = None
+        return aggregate_health(
+            management,
+            cluster_status.snapshot(),
+            database_status=database,
+        )
+
+    @app.get("/api/v1/cluster")
+    def cluster() -> dict[str, Any]:
+        result = cluster_status.snapshot()
+        try:
+            result["synchronization"] = service.synchronization_status()
+        except Exception:
+            result["synchronization"] = {"status": "unavailable"}
+            if result["status"] == "healthy":
+                result["status"] = "degraded"
+        return result
 
     @app.post("/internal/v1/sites", status_code=201)
     def create_site(
@@ -186,9 +212,29 @@ def create_app(
     def list_cameras() -> list[dict[str, Any]]:
         return service.list_cameras()
 
+    @app.get("/api/v1/discovery-runs")
+    def list_discovery_runs(limit: int = 20) -> list[dict[str, Any]]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        return service.list_discovery_runs(limit)
+
+    @app.get("/api/v1/discovery-runs/{operation_id}")
+    def get_discovery_run(
+        operation_id: uuid.UUID, observation_limit: int = 100
+    ) -> dict[str, Any]:
+        return service.get_discovery_run(operation_id, observation_limit)
+
     @app.get("/api/v1/cameras/{camera_id}")
     def get_camera(camera_id: str) -> dict[str, Any]:
         return service.get_camera(camera_id)
+
+    @app.get("/api/v1/cameras/{camera_id}/validation-attempts")
+    def list_validation_attempts(
+        camera_id: str, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        return service.list_validation_attempts(camera_id, limit)
 
     @app.put("/api/v1/cameras/{camera_id}/stream")
     def configure_stream(

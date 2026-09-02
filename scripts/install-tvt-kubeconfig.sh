@@ -58,8 +58,9 @@ chown root:tvt-edge "${temporary}"
 chmod 0640 "${temporary}"
 k3s kubectl --kubeconfig "${temporary}" auth can-i patch deployments -n apexfabric | grep -qx yes
 k3s kubectl --kubeconfig "${temporary}" auth can-i patch namespace/apexfabric | grep -qx yes
-if k3s kubectl --kubeconfig "${temporary}" auth can-i list nodes | grep -qx yes; then
-  echo "refusing unexpectedly broad TVT worker credentials" >&2
+k3s kubectl --kubeconfig "${temporary}" auth can-i list nodes | grep -qx yes
+if k3s kubectl --kubeconfig "${temporary}" auth can-i patch nodes | grep -qx yes; then
+  echo "refusing TVT worker credentials with Node mutation access" >&2
   exit 1
 fi
 mv "${temporary}" "${TARGET}"
