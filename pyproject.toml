@@ -33,6 +33,9 @@ tvt-k3s-watchdog = "tvt_edge.watchdog:main"
 [tool.setuptools.packages.find]
 include = ["apexfabric*", "tvt_edge*", "tvt_runtime*"]
 
+[tool.setuptools.package-data]
+tvt_edge = ["static/index.html", "static/assets/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

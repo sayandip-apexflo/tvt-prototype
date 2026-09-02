@@ -237,6 +237,9 @@ class ManagementPlaneTests(unittest.TestCase):
         self.assertTrue(camera["credentials_configured"])
         self.assertNotIn("username", camera)
         self.assertNotIn("password", camera)
+        self.assertEqual(camera["selected_profile"]["host"], "192.0.2.10")
+        self.assertEqual(camera["assignments"][0]["deployment_id"], "traffic-edge-intel-285h")
+        self.assertEqual(camera["assignments"][0]["apps"], ["anpr", "vehicle_counting"])
         with self.sessions() as session:
             stored = session.get(DeploymentAssignmentSet, committed.id)
             self.assertEqual(stored.desired_revision, 1)
@@ -345,6 +348,48 @@ class ManagementPlaneTests(unittest.TestCase):
         self.assertNotIn(
             ("/api/v1/cameras/{camera_id}/credentials", ("GET",)), routes
         )
+
+    def test_discovery_scopes_and_audit_history_are_managed(self):
+        self.service.create_site(
+            "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"
+        )
+        scope = self.service.create_discovery_scope(
+            interface_name="enp1s0",
+            cidr="192.168.20.4/24",
+            rtsp_ports=[8554, 554, 554],
+            enabled=True,
+            actor="operator",
+            request_id="scope-create",
+        )
+        self.assertEqual(scope["cidr"], "192.168.20.0/24")
+        self.assertEqual(scope["rtsp_ports"], [554, 8554])
+        self.assertEqual(self.service.list_discovery_scopes(), [scope])
+        self.assertEqual(
+            self.service.list_audit_events()[0]["action"], "discovery_scope.create"
+        )
+        self.service.delete_discovery_scope(
+            uuid.UUID(scope["scope_id"]), "operator", "scope-delete"
+        )
+        self.assertEqual(self.service.list_discovery_scopes(), [])
+
+    def test_edge_api_serves_packaged_react_application(self):
+        app = create_app(self.sessions, self.keyring)
+
+        async def exercise():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://127.0.0.1"
+            ) as client:
+                index = await client.get("/")
+                fallback = await client.get("/cluster")
+                missing_api = await client.get("/api/v1/not-a-route")
+            return index, fallback, missing_api
+
+        index, fallback, missing_api = asyncio.run(exercise())
+        self.assertEqual(index.status_code, 200)
+        self.assertIn('<div id="root"></div>', index.text)
+        self.assertEqual(fallback.text, index.text)
+        self.assertEqual(missing_api.status_code, 404)
 
     def test_api_rejects_untrusted_hosts_and_disables_schema_exposure(self):
         app = create_app(self.sessions, self.keyring)

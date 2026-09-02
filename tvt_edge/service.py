@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import ipaddress
 import re
 import uuid
 from collections import Counter
@@ -37,6 +38,7 @@ from tvt_edge.db.models import (
     DeploymentAssignmentSet,
     DeploymentSyncState,
     DeploymentSyncAttempt,
+    DiscoveryScope,
     DiscoveryRun,
     CameraObservation,
     KubernetesResourceRef,
@@ -51,6 +53,7 @@ from tvt_edge.security import CredentialKeyring, redact
 
 DNS_ID = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,61}[a-z0-9])?$")
 SAFE_HOST = re.compile(r"^[A-Za-z0-9_.:-]+$")
+SAFE_INTERFACE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 
 
 class ManagementService:
@@ -274,6 +277,56 @@ class ManagementService:
                 CameraIdentifier.active.is_(True),
             )
         ).all()
+        endpoint = session.get(CameraEndpoint, profile.endpoint_id) if profile else None
+        role_rows = session.execute(
+            select(CameraRoleAssignment, CameraRole)
+            .join(CameraRole, CameraRole.id == CameraRoleAssignment.role_id)
+            .where(
+                CameraRoleAssignment.camera_id == camera.id,
+                CameraRoleAssignment.ended_at.is_(None),
+            )
+            .order_by(CameraRole.role_key, CameraRoleAssignment.ordinal)
+        ).all()
+        assignment_rows = session.execute(
+            select(
+                CameraDeploymentAssignment,
+                DeploymentAssignmentSet,
+                SolutionDeployment,
+            )
+            .join(
+                DeploymentAssignmentSet,
+                DeploymentAssignmentSet.id
+                == CameraDeploymentAssignment.assignment_set_id,
+            )
+            .join(
+                DeploymentSyncState,
+                DeploymentSyncState.desired_assignment_set_id
+                == DeploymentAssignmentSet.id,
+            )
+            .join(
+                SolutionDeployment,
+                SolutionDeployment.id == DeploymentAssignmentSet.deployment_id,
+            )
+            .where(CameraDeploymentAssignment.camera_id == camera.id)
+            .order_by(SolutionDeployment.deployment_key)
+        ).all()
+        assignments = []
+        for camera_assignment, _assignment_set, deployment in assignment_rows:
+            apps = session.scalars(
+                select(CameraApplicationAssignment.use_case_key)
+                .where(
+                    CameraApplicationAssignment.camera_assignment_id
+                    == camera_assignment.id
+                )
+                .order_by(CameraApplicationAssignment.use_case_key)
+            ).all()
+            assignments.append(
+                {
+                    "deployment_id": deployment.deployment_key,
+                    "apps": list(apps),
+                    "fps": camera_assignment.requested_fps,
+                }
+            )
         return {
             "camera_id": camera.camera_key,
             "friendly_name": camera.friendly_name,
@@ -283,6 +336,31 @@ class ManagementService:
             "enabled": camera.enabled,
             "credentials_configured": credential is not None,
             "selected_profile_id": str(profile.id) if profile else None,
+            "selected_profile": {
+                "profile_id": str(profile.id),
+                "profile_token": profile.profile_token,
+                "scheme": endpoint.scheme if endpoint else None,
+                "host": endpoint.host if endpoint else None,
+                "port": endpoint.port if endpoint else None,
+                "path": profile.path,
+                "transport": profile.transport,
+                "codec": profile.codec,
+                "width": profile.width,
+                "height": profile.height,
+                "fps": float(profile.fps) if profile.fps is not None else None,
+            }
+            if profile
+            else None,
+            "roles": [
+                {
+                    "role_key": role.role_key,
+                    "display_name": role.display_name,
+                    "direction": assignment.direction,
+                    "ordinal": assignment.ordinal,
+                }
+                for assignment, role in role_rows
+            ],
+            "assignments": assignments,
             "validation_code": status.validation_code if status else None,
             "validation_failures": status.consecutive_failures if status else 0,
             "next_retry_at": status.next_retry_at.isoformat()
@@ -304,6 +382,130 @@ class ManagementService:
             "created_at": camera.created_at.isoformat(),
             "updated_at": camera.updated_at.isoformat(),
         }
+
+    def list_discovery_scopes(self) -> list[dict[str, Any]]:
+        with self.sessions() as session:
+            scopes = session.scalars(
+                select(DiscoveryScope)
+                .order_by(DiscoveryScope.interface_name, DiscoveryScope.cidr)
+                .limit(100)
+            ).all()
+            return [self._discovery_scope_view(scope) for scope in scopes]
+
+    def create_discovery_scope(
+        self,
+        *,
+        interface_name: str,
+        cidr: str,
+        rtsp_ports: list[int],
+        enabled: bool,
+        actor: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        interface_name = interface_name.strip()
+        if not SAFE_INTERFACE.fullmatch(interface_name):
+            raise ValueError("interface_name contains unsupported characters")
+        try:
+            network = ipaddress.ip_network(cidr.strip(), strict=False)
+        except ValueError as error:
+            raise ValueError("cidr must be a valid network") from error
+        if network.version != 4:
+            raise ValueError("only IPv4 discovery scopes are supported")
+        ports = sorted(set(rtsp_ports))
+        if not ports or len(ports) > 16 or any(
+            isinstance(port, bool) or port < 1 or port > 65535 for port in ports
+        ):
+            raise ValueError("rtsp_ports must contain 1 to 16 valid ports")
+        canonical_cidr = str(network)
+        with self.sessions.begin() as session:
+            site = self.current_site(session)
+            existing = session.scalar(
+                select(DiscoveryScope).where(
+                    DiscoveryScope.site_id == site.id,
+                    DiscoveryScope.interface_name == interface_name,
+                    DiscoveryScope.cidr == canonical_cidr,
+                )
+            )
+            if existing is not None:
+                raise ValueError("discovery scope already exists")
+            scope = DiscoveryScope(
+                site_id=site.id,
+                interface_name=interface_name,
+                cidr=canonical_cidr,
+                rtsp_ports=ports,
+                enabled=enabled,
+            )
+            session.add(scope)
+            session.flush()
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="discovery_scope.create",
+                target_type="discovery_scope",
+                target_id=str(scope.id),
+                details={
+                    "interface_name": interface_name,
+                    "cidr": canonical_cidr,
+                    "rtsp_ports": ports,
+                },
+            )
+            return self._discovery_scope_view(scope)
+
+    def delete_discovery_scope(
+        self, scope_id: uuid.UUID, actor: str, request_id: str
+    ) -> None:
+        with self.sessions.begin() as session:
+            scope = session.get(DiscoveryScope, scope_id)
+            if scope is None:
+                raise ValueError("unknown discovery scope")
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="discovery_scope.delete",
+                target_type="discovery_scope",
+                target_id=str(scope.id),
+                details={
+                    "interface_name": scope.interface_name,
+                    "cidr": scope.cidr,
+                },
+            )
+            session.delete(scope)
+
+    @staticmethod
+    def _discovery_scope_view(scope: DiscoveryScope) -> dict[str, Any]:
+        return {
+            "scope_id": str(scope.id),
+            "interface_name": scope.interface_name,
+            "cidr": scope.cidr,
+            "rtsp_ports": scope.rtsp_ports,
+            "enabled": scope.enabled,
+        }
+
+    def list_audit_events(self, limit: int = 200) -> list[dict[str, Any]]:
+        if limit <= 0 or limit > 500:
+            raise ValueError("limit must be between 1 and 500")
+        with self.sessions() as session:
+            events = session.scalars(
+                select(AuditEvent)
+                .order_by(AuditEvent.created_at.desc())
+                .limit(limit)
+            ).all()
+            return [
+                {
+                    "audit_id": str(event.id),
+                    "actor": event.actor,
+                    "request_id": event.request_id,
+                    "action": event.action,
+                    "target_type": event.target_type,
+                    "target_id": event.target_id,
+                    "result": event.result,
+                    "details": redact(event.details),
+                    "created_at": event.created_at.isoformat(),
+                }
+                for event in events
+            ]
 
     def configure_stream(
         self,

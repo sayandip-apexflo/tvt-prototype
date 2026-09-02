@@ -38,9 +38,15 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps", "persistentvolumeclaims", "pods", "secrets", "services"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["events", "pods/proxy"]
+    verbs: ["get", "list"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
@@ -93,6 +99,9 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apexfabric.com"]
+    resources: ["apexnodestatuses"]
     verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

@@ -162,6 +162,28 @@ sudo -u tvt-edge /opt/tvt/venv/bin/tvt-edge init-site \
 Register the bundle with `POST http://127.0.0.1:8088/api/v1/deployments` as a
 JSON object containing `bundle`, `namespace`, and `registry`.
 
+The same edge service hosts the React management console at
+`http://127.0.0.1:8088/`. It includes site health, camera onboarding and
+validation, bounded network discovery, Solution Pack assignments and lifecycle,
+alerts and notification history, audit activity, and the K3s node/workload view
+that previously lived in the prototype port-8088 console. Workload telemetry is
+read-only and restricted to ApexFabric-managed Deployments.
+
+The console is a TypeScript/Vite project in `ui/`. For local development, run
+the API on port 8088 and start Vite's loopback development server:
+
+```bash
+npm --prefix ui install
+npm --prefix ui run dev
+```
+
+Create the self-contained assets packaged with `tvt_edge` before building a
+wheel or installing the service:
+
+```bash
+npm --prefix ui run build
+```
+
 Camera onboarding, credential rotation, assignment commit, start, stop, and
 rollback are API operations. Assignment and lifecycle changes create immutable
 desired revisions; rotating an assigned camera's credentials requeues each
@@ -202,4 +224,6 @@ and the database never stores rendered Kubernetes Secret bodies.
 
 ```bash
 .venv/bin/python -m pytest -q
+npm --prefix ui test
+npm --prefix ui run build
 ```

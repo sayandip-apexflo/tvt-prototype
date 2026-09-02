@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import time
 import uuid
 from pathlib import Path
@@ -56,6 +57,13 @@ class CameraCreate(StrictModel):
     manufacturer: str | None = None
     model: str | None = None
     identifiers: list[IdentifierInput] = Field(default_factory=list)
+
+
+class DiscoveryScopeInput(StrictModel):
+    interface_name: str
+    cidr: str
+    rtsp_ports: list[int] = Field(default_factory=lambda: [554])
+    enabled: bool = True
 
 
 class StreamInput(StrictModel):
@@ -150,6 +158,7 @@ def create_app(
     allowed_namespace: str = "apexfabric",
     kubectl: Kubectl | None = None,
     watchdog_state_path: Path = STATE_PATH,
+    static_dir: Path | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="TVT edge management",
@@ -287,6 +296,10 @@ def create_app(
                 result["status"] = "degraded"
         return result
 
+    @app.get("/api/v1/cluster/workloads/{deployment_name}/telemetry")
+    def workload_telemetry(deployment_name: str) -> dict[str, Any]:
+        return cluster_status.telemetry(deployment_name)
+
     @app.get("/api/v1/alerts")
     def list_alerts(
         limit: int = 100, include_resolved: bool = True
@@ -363,6 +376,31 @@ def create_app(
         if limit <= 0:
             raise ValueError("limit must be positive")
         return service.list_discovery_runs(limit)
+
+    @app.get("/api/v1/discovery-scopes")
+    def list_discovery_scopes() -> list[dict[str, Any]]:
+        return service.list_discovery_scopes()
+
+    @app.post("/api/v1/discovery-scopes", status_code=201)
+    def create_discovery_scope(
+        body: DiscoveryScopeInput,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        return service.create_discovery_scope(
+            **body.model_dump(), actor=actor, request_id=request_id
+        )
+
+    @app.delete("/api/v1/discovery-scopes/{scope_id}", status_code=204)
+    def delete_discovery_scope(
+        scope_id: uuid.UUID,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> Response:
+        actor, request_id = identity(request, x_tvt_actor)
+        service.delete_discovery_scope(scope_id, actor, request_id)
+        return Response(status_code=204)
 
     @app.get("/api/v1/discovery-runs/{operation_id}")
     def get_discovery_run(
@@ -525,6 +563,10 @@ def create_app(
     def list_deployments() -> list[dict[str, Any]]:
         return service.list_deployments()
 
+    @app.get("/api/v1/audit-events")
+    def list_audit_events(limit: int = 200) -> list[dict[str, Any]]:
+        return service.list_audit_events(limit)
+
     @app.post("/api/v1/deployments/{deployment_id}/assignments")
     def commit_assignments(
         deployment_id: str,
@@ -578,5 +620,42 @@ def create_app(
             deployment_id, body.bundle_sha256, actor, request_id
         )
         return {"desired_revision": value.desired_revision, "state": "pending"}
+
+    ui_root = static_dir or Path(__file__).resolve().parents[1] / "static"
+    ui_index = ui_root / "index.html"
+    assets = ui_root / "assets"
+    if ui_index.is_file():
+        ui_document = ui_index.read_bytes()
+        ui_assets = {
+            path.relative_to(assets).as_posix(): path.read_bytes()
+            for path in assets.rglob("*")
+            if path.is_file()
+        } if assets.is_dir() else {}
+
+        @app.get("/assets/{asset_path:path}", include_in_schema=False)
+        async def ui_asset(asset_path: str) -> Response:
+            content = ui_assets.get(asset_path)
+            if content is None:
+                return Response(
+                    content='{"detail":"not found"}',
+                    status_code=404,
+                    media_type="application/json",
+                )
+            media_type = mimetypes.guess_type(asset_path)[0] or "application/octet-stream"
+            return Response(content=content, media_type=media_type)
+
+        @app.get("/", include_in_schema=False)
+        async def ui_index_page() -> Response:
+            return Response(content=ui_document, media_type="text/html")
+
+        @app.get("/{ui_path:path}", include_in_schema=False)
+        async def ui_fallback(ui_path: str) -> Response:
+            if ui_path in {"docs", "redoc", "openapi.json", "metrics"} or ui_path.startswith(("api/", "internal/")):
+                return Response(
+                    content='{"detail":"not found"}',
+                    status_code=404,
+                    media_type="application/json",
+                )
+            return Response(content=ui_document, media_type="text/html")
 
     return app
