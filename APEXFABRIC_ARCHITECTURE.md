@@ -320,6 +320,107 @@ The current Prometheus manifest directly scrapes the fake CV workload and uses
 ephemeral storage. Reporter metric discovery, durable monitoring, alert rules
 and long-term retention remain production work.
 
+## Pull-based OCI image promotion
+
+The central controller has internet access, but its OCI registry remains a
+private service. New application images therefore move into the registry using
+a **pull-based promotion** flow: the controller fetches an approved image from
+an upstream registry instead of allowing an internet-hosted CI runner to push
+directly into the private registry.
+
+An OCI registry is a store for versioned container images. A tag such as
+`2026.09.03-v5` is a readable name, while a digest such as `sha256:...` is the
+immutable fingerprint of the image contents. Promotion and deployment use the
+digest so that a tag cannot silently change which software runs at the edge.
+
+```mermaid
+flowchart LR
+    Developer[Developer] -->|code change| CI[CI pipeline]
+    CI -->|build, test, scan and sign| Staging[Upstream OCI registry]
+    Staging -->|approved repository@sha256 digest| Promotion[Controller promotion worker]
+    Promotion -->|Skopeo copy| Registry[Controller private OCI registry]
+    Promotion -->|verify digest and write atomically| Lock[Image lock and catalog]
+    Lock -->|separate deployment approval| Reconciler[Solution Pack reconciler]
+    Reconciler -->|digest-pinned Pod specification| API[Kubernetes API]
+    Registry -->|private-network image pull| Agent[K3s agent]
+    API -->|schedule Pod| Agent
+```
+
+The flow has two deliberately separate decisions:
+
+1. **Promote:** make a verified image available in the controller registry.
+2. **Deploy:** change a workload to use that image's immutable digest.
+
+Separating these decisions prevents a successful image upload from
+automatically changing a running workload.
+
+### Promotion sequence
+
+```mermaid
+sequenceDiagram
+    actor Approver
+    participant CI as CI pipeline
+    participant Upstream as Upstream OCI registry
+    participant Worker as Controller promotion worker
+    participant Registry as Private OCI registry
+    participant Catalog as Image lock and solution catalog
+
+    CI->>CI: Build, test, inspect and scan image
+    CI->>Upstream: Push immutable release candidate
+    Upstream-->>CI: Return source digest
+    CI->>CI: Create signed promotion manifest
+    Approver->>CI: Approve exact source digest
+    Worker->>CI: Fetch approved promotion manifest
+    Worker->>Upstream: Authenticate with read-only credentials
+    Worker->>Registry: Skopeo copy source@digest to versioned tag
+    Worker->>Registry: Read back destination manifest and digest
+    alt Verification succeeds
+        Worker->>Catalog: Atomically record digest-pinned image lock
+        Catalog-->>Approver: Image is available for deployment
+    else Copy or verification fails
+        Worker->>Worker: Retain previous lock and report failure
+    end
+```
+
+The promotion manifest is a small signed document containing the exact source
+registry, repository and digest; destination repository and versioned tag;
+target architecture; release identity; and relevant contract checksums. The
+controller accepts a promotion only after CI qualification and an explicit
+production approval.
+
+The controller-side worker uses Skopeo because it can copy directly between
+OCI registries without starting the image or requiring access to the Docker
+daemon. It pulls the source by digest, retries bounded network failures,
+records the destination digest and reads the destination manifest back. It
+rejects attempts to move an existing production tag to different content.
+
+During the current single-node phase, Skopeo can write to the loopback registry
+at `127.0.0.1:5000`. A multi-node installation must additionally publish a
+stable private-network registry hostname for K3s nodes, protected by TLS,
+pull-only node credentials and firewall rules. Every server and agent then
+uses that hostname and trusted CA in `/etc/rancher/k3s/registries.yaml` and
+pulls workload images by digest.
+
+The production security boundary is:
+
+- the public CI runner never receives direct network access to the private
+  registry;
+- the controller initiates outbound HTTPS connections to CI and the upstream
+  registry;
+- upstream credentials are read-only, short-lived where possible and never
+  included in command arguments or logs;
+- only a dedicated promotion identity may add images or update the image lock;
+- existing images are retained so a deployment can roll back to its previous
+  digest; and
+- copying an image never generates a DeploymentBundle, calls K3s or changes a
+  running workload.
+
+Direct remote pushes are an optional, less-preferred topology. They require a
+private VPN or equivalent network path, TLS, authenticated and scoped push
+credentials, firewall allowlisting, audit logging and a separate threat
+review. Publishing the current unauthenticated loopback registry directly to
+the internet is not supported.
+
 ## Offline compute nodes
 
 Compute nodes do not require Wi-Fi or internet. They require a private network
@@ -327,8 +428,10 @@ path to the K3s server and a way to obtain signed binaries and container images.
 
 ```mermaid
 flowchart LR
-    Internet[Internet-connected build/release system] -->|signed offline kit| Media[Controlled media or staging laptop]
-    Media --> Server[K3s server and private registry]
+    CI[Internet-connected build/release system] -->|candidate image and signed manifest| Upstream[Upstream OCI registry]
+    Upstream -->|controller-initiated Skopeo pull| Server[K3s server and private registry]
+    CI -.->|signed offline kit fallback| Media[Controlled media or staging laptop]
+    Media -.-> Server
     Server -->|K3s API 6443| Agent1[Offline compute node]
     Server -->|images over private Ethernet| Agent1
     Server -->|K3s API 6443| Agent2[Offline compute node]
@@ -336,11 +439,12 @@ flowchart LR
     Agent1 <-->|cluster networking| Agent2
 ```
 
-The current `build-node-management.sh` publishes development management images
-to the laptop registry for compute nodes. Protected product-image ingestion is
-not automated yet. A production offline
-installer must distribute signed, verified OCI archives and securely deliver an expiring K3s join
-credential and the architecture-matching K3s air-gap bundle.
+The current repository imports and publishes images locally. The pull-based
+Skopeo promotion worker described above is the target production ingestion
+path and is not automated yet. When the controller also lacks internet access,
+the offline installer remains the fallback: it must distribute signed,
+verified OCI archives and securely deliver an expiring K3s join credential and
+the architecture-matching K3s air-gap bundle.
 
 The demo manifest also supplies one shared camera ConfigMap to reporters. A
 production multi-node system needs authenticated per-node camera reachability
@@ -354,13 +458,15 @@ reach the same cameras.
 | Node reporter | Create/update capability reports | Label Nodes, deploy apps, read application Secrets |
 | Node-status controller | Read reports/Nodes, update report status and approved Node labels | Deploy Solution Packs |
 | Solution Pack reconciler | Manage owned namespace application resources | Select `nodeName`, modify arbitrary Nodes |
+| Image promotion worker | Pull an approved source digest, verify it and atomically update the image lock/catalog | Execute an image, deploy a workload, delete old images or accept an unapproved tag |
 | Workload Pod | Read its own mounted configuration/Secret and serve its ports | Access Kubernetes API or host filesystem |
 | Dev UI/controller | Development orchestration and visibility | Be exposed as a production unauthenticated service |
 
 The manifests implement these as separate service accounts and RBAC roles. The
 remaining production gaps include per-node report authorization, admission
-policy, signed images, image digests, controller leader election, audit
-hardening, TLS/user authentication and secret-store integration.
+policy, automated signature enforcement, the Skopeo promotion worker,
+controller leader election, audit hardening, TLS/user authentication and
+secret-store integration.
 
 ## Where to read next
 
