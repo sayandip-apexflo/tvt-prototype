@@ -90,9 +90,12 @@ for key, value in expected.items():
 version = manifest.get("release_version")
 if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?", version):
     raise SystemExit("manifest release_version is invalid")
+source_commit = manifest.get("source_commit")
+if not isinstance(source_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+    raise SystemExit("manifest source_commit must be a full Git SHA")
 artifacts = manifest.get("artifacts")
 required = {
-    "application_wheel", "registry_image", "node_reporter_image",
+    "application_wheel", "input_lock", "registry_image", "node_reporter_image",
     "node_status_controller_image", "traffic_image", "k3s_installer", "k3s_binary",
 }
 if not isinstance(artifacts, dict) or required - artifacts.keys():

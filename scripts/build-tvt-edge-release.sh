@@ -12,6 +12,10 @@ K3S_INSTALLER=""
 K3S_BINARY=""
 HARDWARE_DIRECTORY=""
 APT_DIRECTORY=""
+RELEASE_VERSION=""
+SOURCE_COMMIT=""
+INPUT_LOCK=""
+ALLOW_DIRTY_SOURCE=false
 
 usage() {
   cat >&2 <<'EOF'
@@ -19,7 +23,8 @@ usage: scripts/build-tvt-edge-release.sh --output DIR \
   --registry-image FILE --node-reporter-image FILE \
   --node-status-controller-image FILE --traffic-image FILE \
   --k3s-installer FILE --k3s-binary FILE \
-  --hardware-directory DIR --apt-directory DIR
+  --hardware-directory DIR --apt-directory DIR \
+  --input-lock FILE [--version VERSION] [--source-commit SHA]
 
 The output directory must not exist (or must be empty). Image archives must
 contain the tags pinned by config/platform.env and config/pipeline.env.
@@ -37,16 +42,20 @@ while (($#)); do
     --k3s-binary) K3S_BINARY="${2:-}"; shift 2 ;;
     --hardware-directory) HARDWARE_DIRECTORY="${2:-}"; shift 2 ;;
     --apt-directory) APT_DIRECTORY="${2:-}"; shift 2 ;;
+    --input-lock) INPUT_LOCK="${2:-}"; shift 2 ;;
+    --version) RELEASE_VERSION="${2:-}"; shift 2 ;;
+    --source-commit) SOURCE_COMMIT="${2:-}"; shift 2 ;;
+    --allow-dirty-source) ALLOW_DIRTY_SOURCE=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; exit 2 ;;
   esac
 done
 for value in OUTPUT REGISTRY_IMAGE NODE_REPORTER_IMAGE NODE_STATUS_CONTROLLER_IMAGE \
-  TRAFFIC_IMAGE K3S_INSTALLER K3S_BINARY HARDWARE_DIRECTORY APT_DIRECTORY; do
+  TRAFFIC_IMAGE K3S_INSTALLER K3S_BINARY HARDWARE_DIRECTORY APT_DIRECTORY INPUT_LOCK; do
   [[ -n ${!value} ]] || { usage; echo "${value} is required" >&2; exit 2; }
 done
 for file in "${REGISTRY_IMAGE}" "${NODE_REPORTER_IMAGE}" \
-  "${NODE_STATUS_CONTROLLER_IMAGE}" "${TRAFFIC_IMAGE}" "${K3S_INSTALLER}" "${K3S_BINARY}"; do
+  "${NODE_STATUS_CONTROLLER_IMAGE}" "${TRAFFIC_IMAGE}" "${K3S_INSTALLER}" "${K3S_BINARY}" "${INPUT_LOCK}"; do
   [[ -f ${file} && ! -L ${file} ]] || { echo "artifact is missing or symlinked: ${file}" >&2; exit 1; }
 done
 for directory in "${HARDWARE_DIRECTORY}" "${APT_DIRECTORY}"; do
@@ -63,8 +72,45 @@ if [[ -e ${OUTPUT} ]]; then
 fi
 
 cd "${REPO_ROOT}"
+canonical_version="$(python3 scripts/tvt-version.py --check)"
+[[ -n ${RELEASE_VERSION} ]] || RELEASE_VERSION="${canonical_version}"
+[[ ${RELEASE_VERSION} == "${canonical_version}" ]] || {
+  echo "requested release ${RELEASE_VERSION} does not equal canonical ${canonical_version}" >&2
+  exit 1
+}
+[[ -n ${SOURCE_COMMIT} ]] || SOURCE_COMMIT="$(git rev-parse HEAD)"
+[[ ${SOURCE_COMMIT} =~ ^[0-9a-f]{40}$ ]] || { echo "--source-commit must be a full Git SHA" >&2; exit 2; }
+[[ "$(git rev-parse HEAD)" == "${SOURCE_COMMIT}" ]] || {
+  echo "checked-out commit does not match --source-commit" >&2
+  exit 1
+}
+if ! ${ALLOW_DIRTY_SOURCE} && [[ -n $(git status --porcelain) ]]; then
+  echo "release builds require a clean worktree" >&2
+  exit 1
+fi
+python3 - "${INPUT_LOCK}" "${RELEASE_VERSION}" "${SOURCE_COMMIT}" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+try:
+    lock = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"invalid release input lock: {error}")
+if lock.get("release_version") != sys.argv[2]:
+    raise SystemExit("release input lock version does not match the requested release")
+if lock.get("source_commit") != sys.argv[3]:
+    raise SystemExit("release input lock commit does not match the checked-out source")
+PY
+[[ "$(basename "${OUTPUT}")" == "tvt-edge-release-${RELEASE_VERSION}" ]] || {
+  echo "output directory must be named tvt-edge-release-${RELEASE_VERSION}" >&2
+  exit 1
+}
+
 npm --prefix ui ci
 npm --prefix ui run build
+if ! ${ALLOW_DIRTY_SOURCE} && [[ -n $(git status --porcelain) ]]; then
+  echo "UI build changed the source tree; review and commit generated UI assets" >&2
+  exit 1
+fi
 mkdir -p "${OUTPUT}"/{wheels,images,k3s,hardware,packages/apt}
 mkdir -p "${OUTPUT}/tvt_edge/db"
 python3 -m pip wheel --wheel-dir "${OUTPUT}/wheels" .
@@ -74,6 +120,7 @@ cp -a alembic.ini "${OUTPUT}/alembic.ini"
 cp -a tvt_edge/db/migrations "${OUTPUT}/tvt_edge/db/"
 cp -a prepare-tvt-edge-host.sh install-tvt-edge-host.sh "${OUTPUT}/"
 cp -a release/manifest.template.json "${OUTPUT}/manifest.json"
+cp -a "${INPUT_LOCK}" "${OUTPUT}/release-inputs.lock.json"
 cp -a "${REGISTRY_IMAGE}" "${OUTPUT}/images/registry.tar"
 cp -a "${NODE_REPORTER_IMAGE}" "${OUTPUT}/images/node-reporter.tar"
 cp -a "${NODE_STATUS_CONTROLLER_IMAGE}" "${OUTPUT}/images/node-status-controller.tar"
@@ -90,11 +137,14 @@ application_wheel="$(find "${OUTPUT}/wheels" -maxdepth 1 -type f -name 'tvt_runt
   echo "could not identify exactly one TVT application wheel" >&2
   exit 1
 }
-python3 - "${OUTPUT}/manifest.json" "wheels/${application_wheel}" <<'PY'
+python3 - "${OUTPUT}/manifest.json" "wheels/${application_wheel}" \
+  "${RELEASE_VERSION}" "${SOURCE_COMMIT}" <<'PY'
 import json, pathlib, sys
 path = pathlib.Path(sys.argv[1])
 manifest = json.loads(path.read_text(encoding="utf-8"))
 manifest["artifacts"]["application_wheel"] = sys.argv[2]
+manifest["release_version"] = sys.argv[3]
+manifest["source_commit"] = sys.argv[4]
 path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 (cd "${OUTPUT}" && find . -type f ! -name checksums.sha256 -printf '%P\0' \

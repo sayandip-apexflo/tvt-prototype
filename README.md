@@ -42,13 +42,15 @@ installer writes non-secret evidence to
 `/var/lib/tvt/install/installation-report.json` and never creates a Traffic
 deployment; camera onboarding and deployment remain explicit UI actions.
 
-Create a release with `scripts/build-tvt-edge-release.sh`. Its required inputs
-are reviewed K3s files, the full offline APT/driver closure, and prebuilt amd64
-archives for Distribution, both node-management images, and Traffic v4. The
-builder compiles the React UI before producing the wheel, vendors the Python
-wheel closure, constructs the immutable runtime-resource tree, and writes a
-checksum covering every regular bundle file. See `--help` for its artifact
-arguments.
+Create a release with `scripts/make-tvt-edge-release.sh`. Its required input
+library contains reviewed K3s files, the full offline APT/driver closure, and
+prebuilt amd64 archives for Distribution, both node-management images, and
+Traffic v4. The script locks those inputs, runs the source gates, compiles the
+React UI, builds the application and dependency wheels, constructs and
+independently verifies the immutable release directory, and writes a
+reproducible transport archive, checksum, and release report. The complete
+input, build, verification, publication, and new-commit rebuild procedure is in
+[TVT edge release build runbook](docs/EDGE-RELEASE-BUILD.md).
 
 The project includes five cameras. We have instructed the customer to install them at the appropriate locations:
 

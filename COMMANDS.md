@@ -43,6 +43,10 @@ files are preserved. Installation evidence is under `/var/lib/tvt/install/`.
 The remaining commands in this document are internal worker/developer
 procedures and are not the supported clean-host workflow.
 
+For scripted package generation and rebuilding after a GitHub commit, run
+`scripts/make-tvt-edge-release.sh --help` and follow
+[TVT edge release build runbook](docs/EDGE-RELEASE-BUILD.md).
+
 ## Phase 1: edge-local OCI registry and K3s
 
 Run these commands from the `tvt-prototype` repository root on the Ubuntu 24.04

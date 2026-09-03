@@ -3,6 +3,7 @@
   "bundle_contract": 1,
   "product": "tvt-edge",
   "release_version": "0.1.0",
+  "source_commit": "0000000000000000000000000000000000000000",
   "architecture": "amd64",
   "os_id": "ubuntu",
   "os_version": "24.04",
@@ -13,6 +14,7 @@
   "k3s_version": "v1.36.3+k3s1",
   "artifacts": {
     "application_wheel": "wheels/tvt_runtime-0.1.0-py3-none-any.whl",
+    "input_lock": "release-inputs.lock.json",
     "registry_image": "images/registry.tar",
     "node_reporter_image": "images/node-reporter.tar",
     "node_status_controller_image": "images/node-status-controller.tar",

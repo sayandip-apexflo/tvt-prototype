@@ -16,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
 from apexfabric.solution_management.renderer import Kubectl
+from tvt_edge import __version__
 from tvt_edge.alerting import AlertingService
 from tvt_edge.cluster import ClusterStatusReader
 from tvt_edge.observability import (
@@ -194,7 +195,7 @@ def create_app(
     alerting = AlertingService(sessions)
     cluster_status = ClusterStatusReader(kubectl, allowed_namespace)
     metrics = EdgeMetrics("edge-management")
-    metrics.set_build("0.1.0")
+    metrics.set_build(__version__)
     watchdog = WatchdogStatusReader(watchdog_state_path)
     metrics.registry.register(WatchdogMetricsCollector(watchdog))
     logger = get_logger("tvt_edge.http")

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tvt-runtime"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Single-box TVT K3s and Solution Pack runtime"
 requires-python = ">=3.12"
 dependencies = [
@@ -36,6 +36,9 @@ include = ["apexfabric*", "tvt_edge*", "tvt_runtime*"]
 
 [tool.setuptools.package-data]
 tvt_edge = ["static/index.html", "static/assets/*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "tvt_edge.__version__"}
 
 [tool.setuptools.data-files]
 "share/tvt" = ["alembic.ini"]

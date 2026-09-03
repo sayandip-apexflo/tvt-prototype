@@ -16,6 +16,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
+from tvt_edge import __version__
 from tvt_edge.alerting.contracts import parse_alertmanager_payload
 from tvt_edge.alerting.outbox import OutboxWorker
 from tvt_edge.alerting.service import AlertingService
@@ -48,7 +49,7 @@ def create_alert_app(
     service = AlertingService(sessions)
     metrics = metrics or AlertDispatcherMetrics()
     http_metrics = HttpMetrics("alert-dispatcher", registry=metrics.registry)
-    http_metrics.set_build("0.1.0")
+    http_metrics.set_build(__version__)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
