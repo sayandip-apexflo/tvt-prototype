@@ -23,7 +23,7 @@ The secure tunnel should be for last-resort shell access. The bulk of debugging 
 
 ## Current implementation
 
-The first four slices are implemented from the approved
+The first five slices are implemented from the approved
 `k3s-prototype` commit `bcb58030f89b22b14ff1dbd0a68c5806d2f6a002`.
 It includes:
 
@@ -48,7 +48,11 @@ It includes:
   acknowledgement-aware notification policy, a persistent SMTP retry outbox,
   redacted delivery history, and a separate host dispatcher service; and
 - bounded `prometheus_client` metrics, redacting single-line JSON logs, and a
-  single-node monitoring deployment profile under `deploy/monitoring/`.
+  single-node monitoring deployment profile under `deploy/monitoring/`; and
+- a manual, fail-closed Traffic v4 qualification runner that validates pinned
+  provenance, the image lock, Intel acceleration, services, K3s rollout and
+  persistent state, runtime metrics/events, reboot invariants, and rollback
+  invariants into private verifiable evidence reports.
 
 The web UI, active ONVIF/RTSP probing, host emergency alert spool, fleet
 heartbeat/event senders, and production dashboard tuning are intentionally
@@ -142,6 +146,8 @@ automated synchronization.
 
 See [PIPELINE Traffic image provenance](docs/PIPELINE-TRAFFIC-IMAGE.md) for the
 complete v4 provenance, contract, model checksums, and lock format.
+See [Traffic edge qualification](docs/TRAFFIC-EDGE-QUALIFICATION.md) for the
+Phase 5 live-device acceptance, reboot, and rollback procedure.
 
 For an installed edge, install the root oneshot and persistent timer, run the
 first import, and verify the known-good lock and registry bytes:

@@ -98,6 +98,15 @@ class PipelineImportTests(unittest.TestCase):
                 "desired_state_schema_sha256": values[
                     "PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256"
                 ],
+                "metrics_schema_sha256": values[
+                    "PIPELINE_TRAFFIC_METRICS_SCHEMA_SHA256"
+                ],
+                "analytics_event_schema_sha256": values[
+                    "PIPELINE_TRAFFIC_ANALYTICS_EVENT_SCHEMA_SHA256"
+                ],
+                "analytics_event_example_sha256": values[
+                    "PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256"
+                ],
             },
             "verification_timestamp": "2026-09-03T00:00:00+00:00",
         }
@@ -301,6 +310,9 @@ class PipelineImportTests(unittest.TestCase):
             '"reference"',
             '"image_contract_sha256"',
             '"desired_state_schema_sha256"',
+            '"metrics_schema_sha256"',
+            '"analytics_event_schema_sha256"',
+            '"analytics_event_example_sha256"',
             '"verification_timestamp"',
         ):
             self.assertIn(field, script)

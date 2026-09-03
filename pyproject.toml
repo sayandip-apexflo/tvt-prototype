@@ -29,6 +29,7 @@ tvt-k3s = "tvt_runtime.cli:main"
 tvt-edge = "tvt_edge.cli:main"
 tvt-alert-dispatcher = "tvt_edge.alerting.cli:main"
 tvt-k3s-watchdog = "tvt_edge.watchdog:main"
+tvt-traffic-qualify = "tvt_edge.qualification:main"
 
 [tool.setuptools.packages.find]
 include = ["apexfabric*", "tvt_edge*", "tvt_runtime*"]

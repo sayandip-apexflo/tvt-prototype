@@ -57,8 +57,9 @@ inspection; it never starts the CV runtime.
 Metadata copied byte-for-byte from the same commit is under
 `solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4/`. Its
 `provenance.json` binds the repository, commit, delivery path, archive, local
-image identity, and SHA-256 of the contract, desired-state schema, and safe
-example. Catalog loading rejects any checksum or contract disagreement.
+image identity, and SHA-256 of the image contract, desired-state files,
+metrics schema, analytics-event schema, and safe event example. Catalog
+loading rejects any checksum, schema, example, or contract disagreement.
 
 The production catalog is the existing TVT PostgreSQL database, not a second
 SQLite database. `scripts/bootstrap-postgresql.sh` applies Alembic and
@@ -82,7 +83,8 @@ defaults to the gitignored `build/pipeline` directory for safe development.
 The successful mode-`0600` JSON lock records format version, catalog ID,
 repository and commit, delivery path, archive identity, local repository/tag,
 registry-produced digest, immutable `repository@sha256:` reference, metadata
-checksums, and verification timestamp. It is written to a private temporary
+checksums (including the runtime metrics and event contracts), and verification
+timestamp. It is written to a private temporary
 file and atomically renamed only after every verification and push succeeds.
 A failed run therefore retains the previous known-good lock. Existing registry
 images are not deleted.
@@ -97,3 +99,8 @@ controlled restart. Phase 4 generates the complete DeploymentBundle only from
 an available catalog entry and its resolved digest, requires a safe preview,
 preflights the immutable reference with `k3s crictl pull`, and restores the
 previous applied bundle and digest if rollout fails.
+
+Phase 5 consumes the same lock and vendored schemas during live qualification.
+It therefore verifies the runtime's observed metrics and analytics events
+against files from the exact commit that supplied the imported image rather
+than against an independently updated contract.

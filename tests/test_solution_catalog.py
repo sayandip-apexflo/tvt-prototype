@@ -92,13 +92,31 @@ class SolutionCatalogTests(unittest.TestCase):
         self.assertEqual(provenance["pipeline"]["repository"], configured["PIPELINE_REPOSITORY"])
         self.assertEqual(provenance["pipeline"]["commit"], configured["PIPELINE_REVISION"])
         self.assertEqual(provenance["delivery"]["branch"], configured["PIPELINE_DELIVERY_BRANCH"])
-        self.assertEqual(provenance["delivery"]["directory"], configured["PIPELINE_TRAFFIC_DELIVERY_DIR"])
+        self.assertEqual(
+            provenance["delivery"]["directory"],
+            configured["PIPELINE_TRAFFIC_DELIVERY_DIR"],
+        )
         self.assertEqual(provenance["delivery"]["version"], configured["PIPELINE_TRAFFIC_VERSION"])
         self.assertEqual(provenance["archive"]["filename"], configured["PIPELINE_TRAFFIC_ARCHIVE"])
-        self.assertEqual(provenance["archive"]["size"], int(configured["PIPELINE_TRAFFIC_ARCHIVE_SIZE"]))
-        self.assertEqual(provenance["archive"]["sha256"], configured["PIPELINE_TRAFFIC_ARCHIVE_SHA256"])
-        self.assertEqual(metadata["checksums"]["image-contract.yaml"], configured["PIPELINE_TRAFFIC_CONTRACT_SHA256"])
-        self.assertEqual(metadata["checksums"]["desired-state.schema.json"], configured["PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256"])
+        self.assertEqual(
+            provenance["archive"]["size"],
+            int(configured["PIPELINE_TRAFFIC_ARCHIVE_SIZE"]),
+        )
+        self.assertEqual(
+            provenance["archive"]["sha256"],
+            configured["PIPELINE_TRAFFIC_ARCHIVE_SHA256"],
+        )
+        checksum_configuration = {
+            "image-contract.yaml": "PIPELINE_TRAFFIC_CONTRACT_SHA256",
+            "desired-state.schema.json": "PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256",
+            "metrics.schema.json": "PIPELINE_TRAFFIC_METRICS_SCHEMA_SHA256",
+            "analytics-event.schema.json": "PIPELINE_TRAFFIC_ANALYTICS_EVENT_SCHEMA_SHA256",
+            "analytics-event.example.json": "PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256",
+        }
+        for filename, configuration_key in checksum_configuration.items():
+            self.assertEqual(
+                metadata["checksums"][filename], configured[configuration_key]
+            )
 
     def test_vendored_metadata_drift_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:

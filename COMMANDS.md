@@ -266,6 +266,74 @@ curl --fail --silent --show-error \
   http://127.0.0.1:8088/api/v1/deployments/traffic-v4/rollback
 ```
 
+## Phase 5: qualify the complete Traffic edge path
+
+Install the current package in `/opt/tvt/venv` using the normal application
+deployment procedure, then install the manual runner and exact v4 contracts:
+
+```bash
+sudo bash scripts/install-traffic-qualification.sh
+```
+
+This command installs files only. It does not deploy, roll back, restart, or
+reboot anything. Run steady-state qualification against an already applied
+deployment:
+
+```bash
+sudo /opt/tvt/scripts/qualify-traffic-edge.sh traffic-v4 \
+  --strict-events \
+  --output /var/lib/tvt/qualification/traffic-v4-steady.json
+sudo /opt/tvt/scripts/verify-traffic-qualification.py \
+  /var/lib/tvt/qualification/traffic-v4-steady.json
+```
+
+Use `--strict-events` only while known traffic crosses a configured camera. If
+no event is expected, omit it: endpoint reachability and schema validation
+still run, while an empty bounded observation window is recorded as skipped.
+
+To exercise preview and exact commit through the public API, use a non-secret
+request containing camera IDs—not RTSP URLs or credentials:
+
+```bash
+sudo /opt/tvt/scripts/qualify-traffic-edge.sh traffic-v4 \
+  --deployment-request /var/lib/tvt/qualification/deployment-request.json \
+  --commit-preview \
+  --idempotency-key phase5-traffic-v4-001 \
+  --output /var/lib/tvt/qualification/traffic-v4-deploy.json
+```
+
+Capture a passing baseline before reboot, reboot as a separate deliberate
+operator action, then compare the complete applied bundle/image/PVC identity:
+
+```bash
+sudo /opt/tvt/scripts/qualify-traffic-edge.sh traffic-v4 \
+  --checkpoint pre-reboot \
+  --output /var/lib/tvt/qualification/traffic-v4-pre-reboot.json
+sudo reboot
+# After the host returns:
+sudo /opt/tvt/scripts/qualify-traffic-edge.sh traffic-v4 \
+  --checkpoint post-reboot \
+  --baseline /var/lib/tvt/qualification/traffic-v4-pre-reboot.json \
+  --output /var/lib/tvt/qualification/traffic-v4-post-reboot.json
+```
+
+For rollback, use a passing report captured while the intended target bundle
+was applied. The following explicitly requests that bundle, waits for applied
+state, and compares bundle, image, and PVC invariants to the baseline:
+
+```bash
+sudo /opt/tvt/scripts/qualify-traffic-edge.sh traffic-v4 \
+  --checkpoint post-rollback \
+  --baseline /var/lib/tvt/qualification/traffic-v4-target-baseline.json \
+  --rollback-bundle-sha256 <target-complete-bundle-sha256> \
+  --output /var/lib/tvt/qualification/traffic-v4-post-rollback.json
+```
+
+Every report is atomically written with mode `0600`, excludes Secret bodies,
+camera URLs, credentials, and raw event payloads, and exits non-zero if any
+required check fails. See `docs/TRAFFIC-EDGE-QUALIFICATION.md` for the complete
+acceptance matrix and failure handling.
+
 ## TVT edge hardware-driver commands
 
 These commands install and verify the Intel 285H hardware-driver stack used by

@@ -134,7 +134,10 @@ if [[ -f "${LOCK_OUTPUT}" && "$(stat -c '%a' "${LOCK_OUTPUT}")" == 600 ]]; then
     "${PIPELINE_TRAFFIC_ARCHIVE_SHA256}" "${PIPELINE_TRAFFIC_ARCHIVE_SIZE}" \
     "${LOCAL_REGISTRY_ADDRESS}" "${PIPELINE_TRAFFIC_LOCAL_REPOSITORY}" \
     "${selected_local_tag}" "${PIPELINE_TRAFFIC_CONTRACT_SHA256}" \
-    "${PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256}" "${MODE}" <<'PY'
+    "${PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256}" \
+    "${PIPELINE_TRAFFIC_METRICS_SCHEMA_SHA256}" \
+    "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_SCHEMA_SHA256}" \
+    "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256}" "${MODE}" <<'PY'
 import json
 import re
 import sys
@@ -163,7 +166,10 @@ matches = (
     and image.get("tag") == sys.argv[11]
     and metadata.get("image_contract_sha256") == sys.argv[12]
     and metadata.get("desired_state_schema_sha256") == sys.argv[13]
-    and source.get("mode") == sys.argv[14]
+    and metadata.get("metrics_schema_sha256") == sys.argv[14]
+    and metadata.get("analytics_event_schema_sha256") == sys.argv[15]
+    and metadata.get("analytics_event_example_sha256") == sys.argv[16]
+    and source.get("mode") == sys.argv[17]
 )
 digest = image.get("digest", "")
 reference = f"{sys.argv[9]}/{sys.argv[10]}@{digest}"
@@ -388,7 +394,10 @@ python3 - "${temporary_lock}" "${PIPELINE_TRAFFIC_CATALOG_ID}" \
   "${MODE}" "${LOCAL_REGISTRY_ADDRESS}" "${PIPELINE_TRAFFIC_LOCAL_REPOSITORY}" \
   "${selected_local_tag}" "${local_digest}" "${immutable_image}" \
   "${PIPELINE_TRAFFIC_CONTRACT_SHA256}" \
-  "${PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256}" <<'PY'
+  "${PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256}" \
+  "${PIPELINE_TRAFFIC_METRICS_SCHEMA_SHA256}" \
+  "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_SCHEMA_SHA256}" \
+  "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256}" <<'PY'
 import datetime
 import json
 import sys
@@ -420,6 +429,9 @@ document = {
     "metadata": {
         "image_contract_sha256": sys.argv[15],
         "desired_state_schema_sha256": sys.argv[16],
+        "metrics_schema_sha256": sys.argv[17],
+        "analytics_event_schema_sha256": sys.argv[18],
+        "analytics_event_example_sha256": sys.argv[19],
     },
     "verification_timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
 }

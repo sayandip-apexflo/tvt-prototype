@@ -76,11 +76,20 @@ def load_delivery_metadata(directory: Path) -> dict[str, Any]:
         raise CatalogError(f"cannot read valid image contract: {error}") from error
     schema = _read_json(directory / "desired-state.schema.json")
     example = _read_json(directory / "desired-state.example.json")
+    metrics_schema = _read_json(directory / "metrics.schema.json")
+    event_schema = _read_json(directory / "analytics-event.schema.json")
+    event_example = _read_json(directory / "analytics-event.example.json")
     if not isinstance(contract, dict):
         raise CatalogError("image contract must be an object")
     try:
         jsonschema.Draft202012Validator.check_schema(schema)
         jsonschema.Draft202012Validator(schema).validate(example)
+        jsonschema.Draft202012Validator.check_schema(metrics_schema)
+        jsonschema.Draft202012Validator.check_schema(event_schema)
+        jsonschema.Draft202012Validator(
+            event_schema,
+            format_checker=jsonschema.FormatChecker(),
+        ).validate(event_example)
     except (jsonschema.SchemaError, jsonschema.ValidationError) as error:
         raise CatalogError(f"desired-state metadata is invalid: {error.message}") from error
 
@@ -118,6 +127,9 @@ def load_delivery_metadata(directory: Path) -> dict[str, Any]:
         "contract": contract,
         "desired_state_schema": schema,
         "desired_state_example": example,
+        "metrics_schema": metrics_schema,
+        "analytics_event_schema": event_schema,
+        "analytics_event_example": event_example,
         "provenance": provenance,
         "checksums": checksums,
     }

@@ -35,7 +35,10 @@ lock_values="$(python3 - "${LOCK_OUTPUT}" "${PIPELINE_TRAFFIC_CATALOG_ID}" \
   "${PIPELINE_TRAFFIC_ARCHIVE_SHA256}" "${PIPELINE_TRAFFIC_ARCHIVE_SIZE}" \
   "${LOCAL_REGISTRY_ADDRESS}" "${PIPELINE_TRAFFIC_LOCAL_REPOSITORY}" \
   "${PIPELINE_TRAFFIC_LOCAL_TAG}" "${PIPELINE_TRAFFIC_CONTRACT_SHA256}" \
-  "${PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256}" <<'PY'
+  "${PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256}" \
+  "${PIPELINE_TRAFFIC_METRICS_SCHEMA_SHA256}" \
+  "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_SCHEMA_SHA256}" \
+  "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256}" <<'PY'
 import json
 import re
 import sys
@@ -61,6 +64,9 @@ expected = {
     "tag": (image.get("tag"), sys.argv[11]),
     "contract checksum": (metadata.get("image_contract_sha256"), sys.argv[12]),
     "schema checksum": (metadata.get("desired_state_schema_sha256"), sys.argv[13]),
+    "metrics schema checksum": (metadata.get("metrics_schema_sha256"), sys.argv[14]),
+    "event schema checksum": (metadata.get("analytics_event_schema_sha256"), sys.argv[15]),
+    "event example checksum": (metadata.get("analytics_event_example_sha256"), sys.argv[16]),
     "source mode": (source.get("mode"), "archive"),
     "architecture": (image.get("architecture"), "amd64"),
 }

@@ -29,6 +29,15 @@
     },
     "desired-state.example.json": {
       "sha256": "0f4a8313e4a2593caad3091b14dd14f973d03294d11555b0a8a63744edf9fa00"
+    },
+    "metrics.schema.json": {
+      "sha256": "dae9f30aa893f96be7f030b1184245f8547bd2446928dad9ac61bd83a763a59c"
+    },
+    "analytics-event.schema.json": {
+      "sha256": "a93247a681f717fe5e3609658270c9687ed4a978b4d60e964d98f4a659b15d2f"
+    },
+    "analytics-event.example.json": {
+      "sha256": "9cb355265474e14d95ef8935df5c3c9e8709c5345d0f4676417dbfd746c77cda"
     }
   }
 }

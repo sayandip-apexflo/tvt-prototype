@@ -50,6 +50,9 @@ class PipelineImageSyncTests(unittest.TestCase):
         self.assertIn("Docker-Content-Digest", verifier.lower().replace("docker-content-digest", "Docker-Content-Digest"))
         self.assertIn("sha256sum", verifier)
         self.assertIn("known-good image lock", verifier)
+        self.assertIn("metrics_schema_sha256", verifier)
+        self.assertIn("analytics_event_schema_sha256", verifier)
+        self.assertIn("analytics_event_example_sha256", verifier)
         self.assertNotIn("kubectl", verifier)
 
     def test_all_phase3_shell_scripts_have_valid_syntax(self):
