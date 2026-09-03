@@ -13,9 +13,10 @@ from apexfabric.solution_management.renderer import revision
 from apexfabric.solution_management.validation import validate_bundle
 from tvt_runtime.camera_secrets import TRAFFIC_APPS
 from tvt_runtime.state import ensure_bundle_has_no_inline_secrets
+from tvt_edge.paths import RESOURCE_ROOT
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = RESOURCE_ROOT
 SCHEMA = json.loads(
     (ROOT / "solution-packs/schema/deployment-bundle.schema.json").read_text(
         encoding="utf-8"

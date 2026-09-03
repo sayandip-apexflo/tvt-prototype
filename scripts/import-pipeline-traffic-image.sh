@@ -13,9 +13,11 @@ STATE_DIR="${TVT_PIPELINE_STATE_DIR:-${REPO_ROOT}/build/pipeline}"
 WORK_DIR="${STATE_DIR}/work"
 LOCK_OUTPUT="${STATE_DIR}/traffic-image.lock.json"
 CONCURRENCY_LOCK=""
+ARCHIVE_FILE="${TVT_PIPELINE_ARCHIVE_FILE:-}"
+METADATA_DIRECTORY="${TVT_PIPELINE_METADATA_DIRECTORY:-}"
 
 usage() {
-  echo "usage: bash scripts/import-pipeline-traffic-image.sh [--mode archive|build] [--work-dir PATH] [--lock-output FILE] [--concurrency-lock FILE]" >&2
+  echo "usage: bash scripts/import-pipeline-traffic-image.sh [--mode archive|build] [--archive-file FILE --metadata-directory DIR] [--work-dir PATH] [--lock-output FILE] [--concurrency-lock FILE]" >&2
 }
 
 while (($#)); do
@@ -24,11 +26,23 @@ while (($#)); do
     --work-dir) WORK_DIR="${2:-}"; shift 2 ;;
     --lock-output) LOCK_OUTPUT="${2:-}"; shift 2 ;;
     --concurrency-lock) CONCURRENCY_LOCK="${2:-}"; shift 2 ;;
+    --archive-file) ARCHIVE_FILE="${2:-}"; shift 2 ;;
+    --metadata-directory) METADATA_DIRECTORY="${2:-}"; shift 2 ;;
     *) usage; exit 2 ;;
   esac
 done
 [[ "${MODE}" == archive || "${MODE}" == build ]] || { usage; exit 2; }
+if [[ -n ${ARCHIVE_FILE} || -n ${METADATA_DIRECTORY} ]]; then
+  [[ ${MODE} == archive && -f ${ARCHIVE_FILE} && ! -L ${ARCHIVE_FILE} && -d ${METADATA_DIRECTORY} && ! -L ${METADATA_DIRECTORY} ]] || {
+    echo "--archive-file and --metadata-directory must be supplied together in archive mode" >&2
+    exit 2
+  }
+  ARCHIVE_FILE="$(cd "$(dirname "${ARCHIVE_FILE}")" && pwd -P)/$(basename "${ARCHIVE_FILE}")"
+  METADATA_DIRECTORY="$(cd "${METADATA_DIRECTORY}" && pwd -P)"
+fi
 [[ -n "${CONCURRENCY_LOCK}" ]] || CONCURRENCY_LOCK="${LOCK_OUTPUT}.flock"
+SOURCE_MODE="${MODE}"
+if [[ -n ${ARCHIVE_FILE} ]]; then SOURCE_MODE=bundled; fi
 
 [[ "${PIPELINE_REVISION}" =~ ^[0-9a-f]{40}$ ]] || {
   echo "PIPELINE_REVISION must be a full 40-character commit" >&2
@@ -37,7 +51,10 @@ done
 for digest_variable in \
   PIPELINE_TRAFFIC_ARCHIVE_SHA256 \
   PIPELINE_TRAFFIC_CONTRACT_SHA256 \
-  PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256; do
+  PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256 \
+  PIPELINE_TRAFFIC_METRICS_SCHEMA_SHA256 \
+  PIPELINE_TRAFFIC_ANALYTICS_EVENT_SCHEMA_SHA256 \
+  PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256; do
   [[ "${!digest_variable}" =~ ^[0-9a-f]{64}$ ]] || {
     echo "${digest_variable} must be a sha256 digest" >&2
     exit 1
@@ -55,13 +72,15 @@ done
   echo "the Phase 3 Traffic catalog is restricted to 127.0.0.1:5000" >&2
   exit 1
 }
-for command_name in curl docker flock git python3 sha256sum tar timeout; do
+required_commands=(curl docker flock python3 sha256sum tar timeout)
+if [[ -z ${ARCHIVE_FILE} ]]; then required_commands+=(git); fi
+for command_name in "${required_commands[@]}"; do
   command -v "${command_name}" >/dev/null 2>&1 || {
     echo "required command not found: ${command_name}" >&2
     exit 1
   }
 done
-if [[ "${MODE}" == archive ]] && ! timeout 10s git lfs version >/dev/null 2>&1; then
+if [[ "${MODE}" == archive && -z ${ARCHIVE_FILE} ]] && ! timeout 10s git lfs version >/dev/null 2>&1; then
   echo "archive mode requires Git LFS; install the git-lfs package" >&2
   exit 1
 fi
@@ -137,7 +156,7 @@ if [[ -f "${LOCK_OUTPUT}" && "$(stat -c '%a' "${LOCK_OUTPUT}")" == 600 ]]; then
     "${PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256}" \
     "${PIPELINE_TRAFFIC_METRICS_SCHEMA_SHA256}" \
     "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_SCHEMA_SHA256}" \
-    "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256}" "${MODE}" <<'PY'
+    "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256}" "${SOURCE_MODE}" <<'PY'
 import json
 import re
 import sys
@@ -197,7 +216,11 @@ fi
 
 mkdir -p "${WORK_DIR}"
 echo "Synchronizing PIPELINE Traffic catalog pin ${PIPELINE_TRAFFIC_CATALOG_ID}."
-echo "Fetching exact PIPELINE commit ${PIPELINE_REVISION}."
+if [[ -z ${ARCHIVE_FILE} ]]; then
+  echo "Fetching exact PIPELINE commit ${PIPELINE_REVISION}."
+else
+  echo "Using checksum-verified bundled archive ${ARCHIVE_FILE}."
+fi
 source_dir="${WORK_DIR}/source-${PIPELINE_REVISION}"
 credential_helper=""
 verification_dir=""
@@ -215,6 +238,36 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [[ -n ${ARCHIVE_FILE} ]]; then
+  delivery_path="${METADATA_DIRECTORY}"
+  for metadata_check in \
+    "${PIPELINE_TRAFFIC_CONTRACT_SHA256} image-contract.yaml" \
+    "${PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256} desired-state.schema.json" \
+    "${PIPELINE_TRAFFIC_METRICS_SCHEMA_SHA256} metrics.schema.json" \
+    "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_SCHEMA_SHA256} analytics-event.schema.json" \
+    "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256} analytics-event.example.json"; do
+    read -r expected_digest metadata_name <<<"${metadata_check}"
+    [[ -f ${delivery_path}/${metadata_name} && ! -L ${delivery_path}/${metadata_name} ]] || {
+      echo "bundled Traffic metadata is missing ${metadata_name}" >&2
+      exit 1
+    }
+    echo "${expected_digest}  ${delivery_path}/${metadata_name}" | sha256sum --check --status || {
+      echo "bundled Traffic metadata checksum failed for ${metadata_name}" >&2
+      exit 1
+    }
+  done
+  actual_size="$(stat -c '%s' "${ARCHIVE_FILE}")"
+  [[ ${actual_size} == "${PIPELINE_TRAFFIC_ARCHIVE_SIZE}" ]] || {
+    echo "Traffic archive size is ${actual_size}, expected ${PIPELINE_TRAFFIC_ARCHIVE_SIZE}" >&2
+    exit 1
+  }
+  echo "${PIPELINE_TRAFFIC_ARCHIVE_SHA256}  ${ARCHIVE_FILE}" | sha256sum --check --status || {
+    echo "Traffic archive checksum verification failed" >&2
+    exit 1
+  }
+  timeout --signal=TERM 20m docker load --input "${ARCHIVE_FILE}"
+  source_image="${PIPELINE_TRAFFIC_ARCHIVE_IMAGE}"
+else
 git_environment=(env GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0)
 if [[ -n "${PIPELINE_GITHUB_TOKEN:-}" ]]; then
   credential_helper="$(mktemp "${WORK_DIR}/git-askpass.XXXXXX")"
@@ -320,6 +373,7 @@ else
     -f "${temporary_context}/docker/Dockerfile.traffic.tvt" \
     -t "${source_image}" "${temporary_context}"
 fi
+fi
 
 verification_dir="$(mktemp -d "${WORK_DIR}/verify.XXXXXX")"
 echo "Inspecting the stopped v4 solution image and baked models."
@@ -391,7 +445,7 @@ python3 - "${temporary_lock}" "${PIPELINE_TRAFFIC_CATALOG_ID}" \
   "${PIPELINE_REPOSITORY}" "${PIPELINE_REVISION}" \
   "${PIPELINE_TRAFFIC_DELIVERY_DIR}" "${PIPELINE_TRAFFIC_ARCHIVE}" \
   "${PIPELINE_TRAFFIC_ARCHIVE_SHA256}" "${PIPELINE_TRAFFIC_ARCHIVE_SIZE}" \
-  "${MODE}" "${LOCAL_REGISTRY_ADDRESS}" "${PIPELINE_TRAFFIC_LOCAL_REPOSITORY}" \
+  "${SOURCE_MODE}" "${LOCAL_REGISTRY_ADDRESS}" "${PIPELINE_TRAFFIC_LOCAL_REPOSITORY}" \
   "${selected_local_tag}" "${local_digest}" "${immutable_image}" \
   "${PIPELINE_TRAFFIC_CONTRACT_SHA256}" \
   "${PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256}" \

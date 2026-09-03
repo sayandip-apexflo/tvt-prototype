@@ -6,11 +6,37 @@ readonly EXPECTED_OS_ID="ubuntu"
 readonly EXPECTED_OS_VERSION="24.04"
 readonly EXPECTED_ARCH="amd64"
 readonly DRIVER_PPA="ppa:kobuk-team/intel-graphics"
-readonly STATE_DIRECTORY="/var/lib/tvt"
-readonly CACHE_DIRECTORY="/var/cache/tvt/hardware-drivers"
+readonly STATE_DIRECTORY="${TVT_HARDWARE_STATE_DIRECTORY:-/var/lib/tvt}"
+readonly CACHE_DIRECTORY="${TVT_HARDWARE_CACHE_DIRECTORY:-/var/cache/tvt/hardware-drivers}"
 readonly LOCK_FILE="${STATE_DIRECTORY}/hardware-driver-recipe.json"
-readonly VENV_DIRECTORY="/opt/apexfabric/openvino-env"
-readonly REBOOT_MARKER="${STATE_DIRECTORY}/hardware-driver-reboot-required"
+readonly VENV_DIRECTORY="${TVT_OPENVINO_VENV_DIRECTORY:-/opt/apexfabric/openvino-env}"
+readonly REBOOT_MARKER="${TVT_HARDWARE_REBOOT_MARKER:-${STATE_DIRECTORY}/hardware-driver-reboot-required}"
+
+MODE=online
+BUNDLE=""
+ALLOW_UNVERIFIED_HARDWARE=false
+
+log() { printf 'tvt-driver-install: %s\n' "$*"; }
+fail() { printf 'tvt-driver-install: ERROR: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  echo "usage: sudo bash scripts/install-tvt-hardware-drivers.sh [--mode online|offline] [--bundle PATH] [--allow-unverified-hardware]" >&2
+}
+
+while (($#)); do
+  case "$1" in
+    --mode) MODE="${2:-}"; shift 2 ;;
+    --bundle) BUNDLE="${2:-}"; shift 2 ;;
+    --allow-unverified-hardware) ALLOW_UNVERIFIED_HARDWARE=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage; exit 2 ;;
+  esac
+done
+[[ ${MODE} == online || ${MODE} == offline ]] || { usage; exit 2; }
+if [[ ${MODE} == offline ]]; then
+  [[ -d ${BUNDLE} && ! -L ${BUNDLE} ]] || fail "offline mode requires --bundle PATH"
+  BUNDLE="$(cd "${BUNDLE}" && pwd -P)"
+fi
 
 readonly -a APT_PACKAGES=(
   libze-intel-gpu1
@@ -29,9 +55,6 @@ readonly -a APT_PACKAGES=(
 )
 readonly -a PYTHON_PACKAGES=(openvino openvino-genai)
 
-log() { printf 'tvt-driver-install: %s\n' "$*"; }
-fail() { printf 'tvt-driver-install: ERROR: %s\n' "$*" >&2; exit 1; }
-
 [[ ${EUID} -eq 0 ]] || fail "run this script as root (for example, with sudo)"
 [[ ! -L ${STATE_DIRECTORY} ]] || fail "refusing symlinked state directory: ${STATE_DIRECTORY}"
 [[ ! -L ${CACHE_DIRECTORY} ]] || fail "refusing symlinked cache directory: ${CACHE_DIRECTORY}"
@@ -46,7 +69,7 @@ source /etc/os-release
   fail "supported architecture is amd64; found $(dpkg --print-architecture)"
 
 if ! grep -Eiq '^model name[[:space:]]*:.*Intel.*Core.*Ultra.*285H' /proc/cpuinfo; then
-  [[ ${TVT_ALLOW_UNVERIFIED_HARDWARE:-false} == true ]] || \
+  [[ ${TVT_ALLOW_UNVERIFIED_HARDWARE:-false} == true || ${ALLOW_UNVERIFIED_HARDWARE} == true ]] || \
     fail "Intel 285H hardware was not detected (set TVT_ALLOW_UNVERIFIED_HARDWARE=true only for an audited equivalent host)"
 fi
 
@@ -59,16 +82,18 @@ if ! modinfo i915 >/dev/null 2>&1 && ! modinfo xe >/dev/null 2>&1; then
 fi
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y --no-install-recommends \
-  ca-certificates curl gnupg python3 python3-venv software-properties-common
+if [[ ${MODE} == online ]]; then
+  apt-get update
+  apt-get install -y --no-install-recommends \
+    ca-certificates curl gnupg python3 python3-venv software-properties-common
 
-if ! grep -RqsE '(^|/)kobuk-team/ubuntu.*intel-graphics|ppa\.launchpadcontent\.net/kobuk-team/intel-graphics' \
-  /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
-  log "adding the Intel graphics package source used by k3s-prototype"
-  add-apt-repository -y "${DRIVER_PPA}"
+  if ! grep -RqsE '(^|/)kobuk-team/ubuntu.*intel-graphics|ppa\.launchpadcontent\.net/kobuk-team/intel-graphics' \
+    /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+    log "adding the Intel graphics package source used by k3s-prototype"
+    add-apt-repository -y "${DRIVER_PPA}"
+  fi
+  apt-get update
 fi
-apt-get update
 
 install -d -o root -g root -m 0755 "${STATE_DIRECTORY}" "${CACHE_DIRECTORY}"
 work_directory="$(mktemp -d "${CACHE_DIRECTORY}/resolve.XXXXXX")"
@@ -245,9 +270,27 @@ PY
 }
 
 if [[ ! -f ${LOCK_FILE} ]]; then
-  resolve_recipe
+  if [[ ${MODE} == offline ]]; then
+    offline_hardware="${BUNDLE}/hardware"
+    [[ -f ${offline_hardware}/driver-recipe.json ]] || \
+      fail "offline driver recipe is missing"
+    [[ -f ${offline_hardware}/linux-npu-driver.tar.gz ]] || \
+      fail "offline Intel NPU archive is missing"
+    [[ -d ${offline_hardware}/wheels ]] || fail "offline OpenVINO wheels are missing"
+    install -m 0644 "${offline_hardware}/driver-recipe.json" "${LOCK_FILE}"
+    install -m 0644 "${offline_hardware}/linux-npu-driver.tar.gz" \
+      "${CACHE_DIRECTORY}/linux-npu-driver.tar.gz"
+    install -d -m 0755 "${CACHE_DIRECTORY}/wheels"
+    cp -a "${offline_hardware}/wheels/." "${CACHE_DIRECTORY}/wheels/"
+  else
+    resolve_recipe
+  fi
 else
   log "reusing locked recipe ${LOCK_FILE}"
+  if [[ ${MODE} == offline ]]; then
+    cmp -s "${BUNDLE}/hardware/driver-recipe.json" "${LOCK_FILE}" || \
+      fail "installed driver recipe does not match the offline release bundle"
+  fi
 fi
 validate_lock_and_cache
 
@@ -267,7 +310,17 @@ PY
 )
 
 log "installing the locked Intel GPU/media package set"
-apt-get install -y --no-install-recommends --allow-downgrades "${apt_pins[@]}"
+if [[ ${MODE} == offline ]]; then
+  for pin in "${apt_pins[@]}"; do
+    package="${pin%%=*}"
+    expected="${pin#*=}"
+    actual="$(dpkg-query -W -f='${Version}' "${package}" 2>/dev/null || true)"
+    [[ ${actual} == "${expected}" ]] || \
+      fail "offline package ${package} is ${actual:-missing}; expected ${expected}"
+  done
+else
+  apt-get install -y --no-install-recommends --allow-downgrades "${apt_pins[@]}"
+fi
 
 log "installing the locked Intel NPU release"
 npu_extract="${work_directory}/npu"

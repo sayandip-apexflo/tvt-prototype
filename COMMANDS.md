@@ -1,5 +1,48 @@
 # TVT edge operational commands
 
+## Supported production host workflow
+
+Use only the release-bundle entry points for a production host:
+
+```bash
+sudo ./prepare-tvt-edge-host.sh --bundle /media/tvt/release --mode offline
+sudo reboot
+sudo ./prepare-tvt-edge-host.sh --bundle /media/tvt/release --mode offline
+sudo ./install-tvt-edge-host.sh \
+  --bundle /media/tvt/release \
+  --site-config /media/tvt/site.yaml
+```
+
+Online host package/driver preparation is available with `--mode online`.
+K3s still defaults to the reviewed bundled installer and binary; authorize its
+network installer explicitly with `--k3s-mode download`.
+
+Useful non-mutating checks:
+
+```bash
+sudo ./prepare-tvt-edge-host.sh \
+  --bundle /media/tvt/release --mode offline --verify-only
+sudo ./install-tvt-edge-host.sh \
+  --bundle /media/tvt/release --verify-only
+```
+
+Resume after correcting a failed installation stage:
+
+```bash
+sudo ./install-tvt-edge-host.sh \
+  --bundle /media/tvt/release \
+  --site-config /media/tvt/site.yaml \
+  --resume
+```
+
+Pipeline credentials, when an online fallback is intentionally used, must be
+passed only by root-owned file path with `--pipeline-credentials-file`; secret
+values are never accepted as command arguments. Existing `/etc/tvt/*.env`
+files are preserved. Installation evidence is under `/var/lib/tvt/install/`.
+
+The remaining commands in this document are internal worker/developer
+procedures and are not the supported clean-host workflow.
+
 ## Phase 1: edge-local OCI registry and K3s
 
 Run these commands from the `tvt-prototype` repository root on the Ubuntu 24.04

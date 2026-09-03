@@ -19,6 +19,7 @@ from tvt_edge.cluster import ClusterStatusReader, CrictlImagePuller, SyncWorker
 from tvt_edge.db.session import build_engine, build_session_factory
 from tvt_edge.legacy import import_sqlite_lifecycle
 from tvt_edge.observability import configure_json_logging
+from tvt_edge.paths import RESOURCE_ROOT
 from tvt_edge.security import CredentialKeyring
 from tvt_edge.service import ManagementService
 from tvt_edge.settings import Settings, require_loopback_ip
@@ -27,7 +28,7 @@ from tvt_edge.watchdog import WatchdogStatusReader
 from tvt_runtime.cli import kubectl_client
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = RESOURCE_ROOT
 
 
 def parser() -> argparse.ArgumentParser:
@@ -81,6 +82,9 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     seed_solutions.add_argument("--registry", default="127.0.0.1:5000")
+    commands.add_parser(
+        "refresh-solutions", help="resolve catalog entries against the local registry"
+    )
     return root
 
 
@@ -211,6 +215,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(result, sort_keys=True))
         return 0
+    if args.command == "refresh-solutions":
+        result = service.refresh_solutions(
+            actor="installer", request_id="installer:solution-catalog:refresh"
+        )
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result and all(item["status"] == "available" for item in result) else 1
     if args.command == "api":
         import uvicorn
         from prometheus_client import start_http_server

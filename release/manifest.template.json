@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "bundle_contract": 1,
+  "product": "tvt-edge",
+  "release_version": "0.1.0",
+  "architecture": "amd64",
+  "os_id": "ubuntu",
+  "os_version": "24.04",
+  "hardware_profile": "intel-285h",
+  "minimum_kernel": "6.8",
+  "minimum_ram_mib": 16384,
+  "minimum_disk_mib": 20480,
+  "k3s_version": "v1.36.3+k3s1",
+  "artifacts": {
+    "application_wheel": "wheels/tvt_runtime-0.1.0-py3-none-any.whl",
+    "registry_image": "images/registry.tar",
+    "node_reporter_image": "images/node-reporter.tar",
+    "node_status_controller_image": "images/node-status-controller.tar",
+    "traffic_image": "images/traffic-edge-runtime-v4.tar",
+    "k3s_installer": "k3s/install.sh",
+    "k3s_binary": "k3s/k3s"
+  }
+}

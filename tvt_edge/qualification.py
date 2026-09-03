@@ -22,9 +22,10 @@ import jsonschema
 
 from apexfabric.solution_management.catalog import load_delivery_metadata
 from tvt_edge.security import redact, redact_text
+from tvt_edge.paths import RESOURCE_ROOT
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = RESOURCE_ROOT
 DEFAULT_CATALOG_DIRECTORY = (
     ROOT / "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
 )

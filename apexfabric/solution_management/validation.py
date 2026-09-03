@@ -155,7 +155,8 @@ def load_yaml(path: Path) -> Any:
 
 
 def main() -> int:
-    root = Path(__file__).resolve().parents[2]
+    from tvt_edge.paths import RESOURCE_ROOT
+    root = RESOURCE_ROOT
     parser = argparse.ArgumentParser(description="Validate an ApexFabric Deployment Bundle")
     parser.add_argument("bundle", type=Path)
     parser.add_argument("--schema", type=Path, default=root / "solution-packs/schema/deployment-bundle.schema.json")

@@ -14,7 +14,9 @@ from typing import Any
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[2]
+from tvt_edge.paths import RESOURCE_ROOT
+
+ROOT = RESOURCE_ROOT
 from apexfabric.solution_management.camera_locality import camera_affinity
 from apexfabric.solution_management.validation import load_yaml, validate_bundle
 

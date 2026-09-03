@@ -22,9 +22,10 @@ from apexfabric.solution_management.validation import load_yaml, validate_bundle
 from tvt_runtime.camera_secrets import build_camera_secret_list, secret_names
 from tvt_runtime.lifecycle import camera_contract_signature, with_desired_state
 from tvt_runtime.state import DEFAULT_STATE_DIR, DeploymentStore, ensure_bundle_has_no_inline_secrets
+from tvt_edge.paths import RESOURCE_ROOT
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = RESOURCE_ROOT
 DEFAULT_SCHEMA = ROOT / "solution-packs/schema/deployment-bundle.schema.json"
 
 

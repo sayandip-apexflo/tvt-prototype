@@ -2,6 +2,54 @@
 
 Single box deployment, reusing apexfabric.
 
+## Production edge installation
+
+The supported production entry points are the two release-bundle scripts. Do
+not run the component installers individually on a new edge host.
+
+On a clean Ubuntu 24.04 Intel Core Ultra 285H host, mount the checksum-complete
+release bundle and run:
+
+```bash
+sudo ./prepare-tvt-edge-host.sh --bundle /media/tvt/release --mode offline
+sudo reboot
+sudo ./prepare-tvt-edge-host.sh --bundle /media/tvt/release --mode offline
+sudo ./install-tvt-edge-host.sh \
+  --bundle /media/tvt/release \
+  --site-config /media/tvt/site.yaml
+```
+
+The first preparation pass installs host packages and the pinned Intel driver
+closure, records `/var/lib/tvt/install/prepare-state.json`, and stops without
+rebooting. The second pass proves that the reboot occurred and verifies GPU,
+NPU, VA-API, OpenCL, OpenVINO, Docker, and PostgreSQL before clearing the driver
+reboot marker. The application installer will not run before that state is
+`prepared`.
+
+A site file contains identifiers only; never put credentials in it:
+
+```yaml
+site_key: plant-1
+edge_id: plant-1-edge-1
+display_name: Plant 1
+timezone: Asia/Kolkata
+```
+
+Installation is staged and idempotent. Safe reruns skip completed stages, and
+`--resume` makes operator intent explicit after a corrected failure. Use
+`--verify-only` on either entry point for a read-only health check. The final
+installer writes non-secret evidence to
+`/var/lib/tvt/install/installation-report.json` and never creates a Traffic
+deployment; camera onboarding and deployment remain explicit UI actions.
+
+Create a release with `scripts/build-tvt-edge-release.sh`. Its required inputs
+are reviewed K3s files, the full offline APT/driver closure, and prebuilt amd64
+archives for Distribution, both node-management images, and Traffic v4. The
+builder compiles the React UI before producing the wheel, vendors the Python
+wheel closure, constructs the immutable runtime-resource tree, and writes a
+checksum covering every regular bundle file. See `--help` for its artifact
+arguments.
+
 The project includes five cameras. We have instructed the customer to install them at the appropriate locations:
 
 - 2 cameras at the main entrance to cover people entering and exiting

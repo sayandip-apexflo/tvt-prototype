@@ -67,7 +67,6 @@ expected = {
     "metrics schema checksum": (metadata.get("metrics_schema_sha256"), sys.argv[14]),
     "event schema checksum": (metadata.get("analytics_event_schema_sha256"), sys.argv[15]),
     "event example checksum": (metadata.get("analytics_event_example_sha256"), sys.argv[16]),
-    "source mode": (source.get("mode"), "archive"),
     "architecture": (image.get("architecture"), "amd64"),
 }
 if lock.get("format_version") != 2:
@@ -75,6 +74,8 @@ if lock.get("format_version") != 2:
 for name, (actual, wanted) in expected.items():
     if actual != wanted:
         raise SystemExit(f"image lock {name} does not match the configured v4 pin")
+if source.get("mode") not in {"archive", "bundled"}:
+    raise SystemExit("image lock source mode is not an approved archive path")
 digest = image.get("digest", "")
 reference = image.get("reference", "")
 expected_reference = f"{sys.argv[9]}/{sys.argv[10]}@{digest}"

@@ -37,6 +37,19 @@ include = ["apexfabric*", "tvt_edge*", "tvt_runtime*"]
 [tool.setuptools.package-data]
 tvt_edge = ["static/index.html", "static/assets/*"]
 
+[tool.setuptools.data-files]
+"share/tvt" = ["alembic.ini"]
+"share/tvt/tvt_edge/db/migrations" = [
+  "tvt_edge/db/migrations/env.py",
+  "tvt_edge/db/migrations/script.py.mako",
+]
+"share/tvt/tvt_edge/db/migrations/versions" = ["tvt_edge/db/migrations/versions/*.py"]
+"share/tvt/solution-packs/schema" = ["solution-packs/schema/*.json"]
+"share/tvt/solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4" = [
+  "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4/*.json",
+  "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4/*.yaml",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

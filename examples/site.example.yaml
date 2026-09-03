@@ -1,0 +1,6 @@
+# Identifiers only. Camera and pipeline credentials must use their dedicated
+# root-owned secret inputs, never this file.
+site_key: plant-1
+edge_id: plant-1-edge-1
+display_name: Plant 1
+timezone: Asia/Kolkata
