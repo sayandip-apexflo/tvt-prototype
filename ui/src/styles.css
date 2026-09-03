@@ -238,6 +238,12 @@ td strong { color: #202b42; font-weight: 600; }
 .assignment-list > div { overflow: hidden; border: 1px solid #e3e7ef; border-radius: 9px; }
 .assignment-list > div.selected { border-color: #b7c1f2; background: #fafbff; }
 .camera-choice { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: 10px; padding: 13px; cursor: pointer; }
+.catalog-deploy-form { padding-bottom: 0; }
+.inline-inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.geometry-input { display: grid; gap: 6px; padding: 0 13px 13px; color: var(--muted); font-size: 9px; }
+.geometry-input textarea { min-height: 82px; resize: vertical; font-family: var(--mono, monospace); font-size: 9px; }
+.deployment-preview { display: grid; gap: 10px; padding: 14px 22px 0; }
+.deployment-preview .json-view { max-height: 280px; overflow: auto; }
 .camera-choice strong, .camera-choice small { display: block; }
 .camera-choice small { margin-top: 3px; color: var(--muted); font-size: 9px; }
 .app-choices { display: flex; flex-wrap: wrap; gap: 10px; padding: 10px 14px; border-top: 1px solid #e8ebf3; background: white; }

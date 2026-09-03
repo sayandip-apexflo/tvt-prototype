@@ -1,0 +1,14 @@
+[Unit]
+Description=Periodically verify the pinned PIPELINE Traffic image import
+After=tvt-local-registry.service
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=24h
+RandomizedDelaySec=15min
+Persistent=true
+Unit=tvt-pipeline-image-sync.service
+
+[Install]
+WantedBy=timers.target
+

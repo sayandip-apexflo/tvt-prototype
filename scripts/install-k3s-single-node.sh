@@ -5,20 +5,16 @@ readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=config/platform.env
 source "${REPO_ROOT}/config/platform.env"
 
-REGISTRY=""
-REGISTRY_SCHEME="http"
 INSTALLER=""
 K3S_BINARY=""
 DOWNLOAD_INSTALLER=false
 
 usage() {
-  echo "usage: bash scripts/install-k3s-single-node.sh --registry HOST[:PORT] [--registry-scheme http|https] (--installer FILE | --download-installer) [--k3s-binary FILE]" >&2
+  echo "usage: bash scripts/install-k3s-single-node.sh (--installer FILE | --download-installer) [--k3s-binary FILE]" >&2
 }
 
 while (($#)); do
   case "$1" in
-    --registry) REGISTRY="${2:-}"; shift 2 ;;
-    --registry-scheme) REGISTRY_SCHEME="${2:-}"; shift 2 ;;
     --installer) INSTALLER="${2:-}"; shift 2 ;;
     --download-installer) DOWNLOAD_INSTALLER=true; shift ;;
     --k3s-binary) K3S_BINARY="${2:-}"; shift 2 ;;
@@ -26,11 +22,20 @@ while (($#)); do
   esac
 done
 
-if [[ -z "${REGISTRY}" ]]; then usage; exit 2; fi
 if [[ -n "${INSTALLER}" && ${DOWNLOAD_INSTALLER} == true ]]; then
   echo "choose either --installer or --download-installer" >&2
   exit 2
 fi
+
+if ! systemctl is-active --quiet tvt-local-registry.service; then
+  echo "the local registry is not active; run scripts/install-local-registry.sh first" >&2
+  exit 1
+fi
+curl --fail --silent --show-error --max-time 5 \
+  "http://${LOCAL_REGISTRY_ADDRESS}/v2/" >/dev/null || {
+  echo "the local registry is not ready at http://${LOCAL_REGISTRY_ADDRESS}" >&2
+  exit 1
+}
 if [[ -z "${INSTALLER}" && ${DOWNLOAD_INSTALLER} == false && ! -x /usr/local/bin/k3s ]]; then
   echo "supply a reviewed --installer file or explicitly use --download-installer" >&2
   exit 2
@@ -58,7 +63,7 @@ fi
 registry_restart=()
 if command -v k3s >/dev/null 2>&1; then registry_restart=(--restart); fi
 bash "${REPO_ROOT}/scripts/configure-k3s-registry.sh" \
-  --registry "${REGISTRY}" --scheme "${REGISTRY_SCHEME}" \
+  --registry "${LOCAL_REGISTRY_ADDRESS}" --scheme http \
   "${registry_restart[@]}"
 
 if ! command -v k3s >/dev/null 2>&1; then

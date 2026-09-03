@@ -22,6 +22,7 @@ const responses: Record<string, unknown> = {
   "/api/v1/discovery-runs?limit=50": [],
   "/api/v1/discovery-scopes": [],
   "/api/v1/deployments": [],
+  "/api/v1/solutions": [],
   "/api/v1/cluster": {
     status: "healthy",
     api: { status: "healthy" },
@@ -43,6 +44,8 @@ const responses: Record<string, unknown> = {
 describe("edge management UI", () => {
   beforeEach(() => {
     window.location.hash = "";
+    responses["/api/v1/solutions"] = [];
+    responses["/api/v1/cameras"] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const path = typeof input === "string" ? input : input.toString();
       return new Response(JSON.stringify(responses[path] ?? []), {
@@ -67,5 +70,27 @@ describe("edge management UI", () => {
     expect(screen.getByRole("heading", { name: "K3s cluster" })).toBeInTheDocument();
     expect(screen.getByText("Connected")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Events" })).toBeInTheDocument();
+  });
+
+  it("offers preview-gated deployment from an available catalog entry", async () => {
+    responses["/api/v1/solutions"] = [{
+      catalog_id: "traffic-edge-runtime:2026.08.21-v4", solution_name: "traffic-edge-runtime",
+      version: "2026.08.21-v4", hardware_profile: "intel-285h", architectures: ["amd64"], status: "available",
+      image: { registry: "127.0.0.1:5000", repository: "apexfabric/traffic-edge-runtime", tag: "intel-285h-2026.08.21-v4", digest: `sha256:${"1".repeat(64)}`, reference: `127.0.0.1:5000/apexfabric/traffic-edge-runtime@sha256:${"1".repeat(64)}` }, contract: {},
+    }];
+    responses["/api/v1/cameras"] = [{
+      camera_id: "camera-01", friendly_name: "Main entrance", state: "online", enabled: true,
+      credentials_configured: true, validation_failures: 0, identifiers: [], created_at: "2026-09-03T00:00:00Z", updated_at: "2026-09-03T00:00:00Z",
+    }];
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Plant 01 · edge-01")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Solutions/i }));
+    expect(screen.getByText("traffic-edge-runtime")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Deploy solution/i }));
+    expect(screen.getByRole("button", { name: "Preview bundle" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(screen.getByText(/Geometry config/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preview bundle" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Commit preview" })).toBeDisabled();
   });
 });

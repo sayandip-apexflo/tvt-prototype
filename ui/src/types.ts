@@ -104,6 +104,31 @@ export interface Deployment {
   desired_revision?: number | null;
   applied_revision?: number | null;
   last_error_code?: string | null;
+  catalog_id?: string | null;
+  desired_bundle_sha256?: string | null;
+  applied_bundle_sha256?: string | null;
+  applied_image_digest?: string | null;
+  bundle_history?: Array<{ bundle_sha256: string; desired_revision: number; image_digest?: string | null; created_at: string }>;
+}
+
+export interface SolutionCatalog {
+  catalog_id: string;
+  solution_name: string;
+  version: string;
+  hardware_profile: string;
+  architectures: string[];
+  status: string;
+  image: { registry: string; repository: string; tag: string; digest?: string | null; reference?: string | null };
+  contract: Record<string, unknown>;
+  last_error?: string | null;
+}
+
+export interface DeploymentPreview {
+  catalog_id: string;
+  bundle_sha256: string;
+  image_reference: string;
+  bundle: Record<string, unknown>;
+  desired_state: Record<string, unknown>;
 }
 
 export interface NodeView {

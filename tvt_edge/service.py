@@ -3,20 +3,30 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import ipaddress
+import json
 import re
 import uuid
 from collections import Counter
 from datetime import timedelta
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
+from jsonschema import Draft202012Validator
 
+from apexfabric.solution_management.catalog import (
+    CatalogError,
+    load_delivery_metadata,
+    resolve_registry_digest,
+)
 from tvt_edge.bundles import (
     BundleCamera,
     apply_registry,
     bundle_sha256,
+    catalog_traffic_bundle,
     canonical_bundle,
     instantiate_traffic_bundle,
     validate_tvt_bundle,
@@ -44,11 +54,12 @@ from tvt_edge.db.models import (
     KubernetesResourceRef,
     ManagementOperation,
     Site,
+    SolutionCatalogEntry,
     SolutionBundleRevision,
     SolutionDeployment,
     utc_now,
 )
-from tvt_edge.security import CredentialKeyring, redact
+from tvt_edge.security import CredentialKeyring, redact, redact_text
 
 
 DNS_ID = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,61}[a-z0-9])?$")
@@ -58,10 +69,14 @@ SAFE_INTERFACE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 
 class ManagementService:
     def __init__(
-        self, sessions: sessionmaker[Session], keyring: CredentialKeyring
+        self,
+        sessions: sessionmaker[Session],
+        keyring: CredentialKeyring,
+        catalog_resolver: Callable[[str, str, str], str] = resolve_registry_digest,
     ) -> None:
         self.sessions = sessions
         self.keyring = keyring
+        self.catalog_resolver = catalog_resolver
 
     @staticmethod
     def _audit(
@@ -86,6 +101,172 @@ class ManagementService:
                 details=redact(details or {}),
             )
         )
+
+    @staticmethod
+    def _solution_view(entry: SolutionCatalogEntry) -> dict[str, Any]:
+        digest = entry.resolved_digest if entry.status == "available" else None
+        return {
+            "catalog_id": entry.catalog_id,
+            "solution_name": entry.solution_name,
+            "version": entry.version,
+            "hardware_profile": entry.hardware_profile,
+            "architectures": list(entry.architectures),
+            "status": entry.status,
+            "image": {
+                "registry": entry.local_registry,
+                "repository": entry.repository,
+                "tag": entry.tag,
+                "digest": digest,
+                "reference": (
+                    f"{entry.local_registry}/{entry.repository}@{digest}"
+                    if digest
+                    else None
+                ),
+            },
+            "contract": copy.deepcopy(entry.contract_json),
+            "desired_state_schema": copy.deepcopy(entry.desired_state_schema),
+            "desired_state_example": copy.deepcopy(entry.desired_state_example),
+            "provenance": copy.deepcopy(entry.provenance),
+            "checksums": copy.deepcopy(entry.checksums),
+            "last_error": entry.last_error,
+            "last_refreshed_at": (
+                entry.last_refreshed_at.isoformat()
+                if entry.last_refreshed_at is not None
+                else None
+            ),
+            "created_at": entry.created_at.isoformat(),
+            "updated_at": entry.updated_at.isoformat(),
+        }
+
+    def seed_solution_catalog(
+        self,
+        delivery_directory: Path,
+        local_registry: str,
+        *,
+        actor: str = "bootstrap",
+        request_id: str = "bootstrap:solution-catalog",
+    ) -> dict[str, Any]:
+        metadata = load_delivery_metadata(delivery_directory)
+        if not SAFE_HOST.fullmatch(local_registry) or ":" not in local_registry:
+            raise ValueError("local registry must be a host:port value")
+        repository = metadata.get("repository")
+        tag = metadata.get("tag")
+        if not isinstance(repository, str) or not repository or "latest" in repository:
+            raise ValueError("catalog repository is invalid")
+        if not isinstance(tag, str) or not tag or tag == "latest":
+            raise ValueError("catalog tag must be immutable and versioned")
+
+        with self.sessions.begin() as session:
+            entry = session.get(SolutionCatalogEntry, metadata["catalog_id"])
+            created = entry is None
+            if entry is None:
+                entry = SolutionCatalogEntry(
+                    catalog_id=metadata["catalog_id"],
+                    solution_name=metadata["solution_name"],
+                    version=metadata["version"],
+                    hardware_profile=metadata["hardware_profile"],
+                    architectures=metadata["architectures"],
+                    local_registry=local_registry,
+                    repository=repository,
+                    tag=tag,
+                    status="unresolved",
+                    contract_json=metadata["contract"],
+                    desired_state_schema=metadata["desired_state_schema"],
+                    desired_state_example=metadata["desired_state_example"],
+                    provenance=metadata["provenance"],
+                    checksums=metadata["checksums"],
+                )
+                session.add(entry)
+            else:
+                identity_changed = any(
+                    (
+                        entry.local_registry != local_registry,
+                        entry.repository != repository,
+                        entry.tag != tag,
+                        entry.provenance != metadata["provenance"],
+                    )
+                )
+                entry.solution_name = metadata["solution_name"]
+                entry.version = metadata["version"]
+                entry.hardware_profile = metadata["hardware_profile"]
+                entry.architectures = metadata["architectures"]
+                entry.local_registry = local_registry
+                entry.repository = repository
+                entry.tag = tag
+                entry.contract_json = metadata["contract"]
+                entry.desired_state_schema = metadata["desired_state_schema"]
+                entry.desired_state_example = metadata["desired_state_example"]
+                entry.provenance = metadata["provenance"]
+                entry.checksums = metadata["checksums"]
+                if identity_changed:
+                    entry.resolved_digest = None
+                    entry.status = "unresolved"
+                    entry.last_error = None
+                    entry.last_refreshed_at = None
+            session.flush()
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="solution_catalog.seed",
+                target_type="solution",
+                target_id=entry.catalog_id,
+                details={"created": created, "registry": local_registry},
+            )
+            return self._solution_view(entry)
+
+    def list_solutions(self) -> list[dict[str, Any]]:
+        with self.sessions() as session:
+            entries = session.scalars(
+                select(SolutionCatalogEntry).order_by(
+                    SolutionCatalogEntry.solution_name,
+                    SolutionCatalogEntry.version,
+                )
+            ).all()
+            return [self._solution_view(entry) for entry in entries]
+
+    def refresh_solutions(
+        self,
+        *,
+        actor: str = "local-operator",
+        request_id: str = "solution-catalog:refresh",
+    ) -> list[dict[str, Any]]:
+        now = utc_now()
+        with self.sessions.begin() as session:
+            entries = session.scalars(
+                select(SolutionCatalogEntry).order_by(
+                    SolutionCatalogEntry.solution_name,
+                    SolutionCatalogEntry.version,
+                )
+            ).all()
+            for entry in entries:
+                try:
+                    digest = self.catalog_resolver(
+                        entry.local_registry, entry.repository, entry.tag
+                    )
+                    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                        raise CatalogError("registry resolver returned an invalid digest")
+                except (CatalogError, OSError, TimeoutError) as error:
+                    entry.resolved_digest = None
+                    entry.status = "unavailable"
+                    entry.last_error = redact_text(str(error))
+                else:
+                    entry.resolved_digest = digest
+                    entry.status = "available"
+                    entry.last_error = None
+                entry.last_refreshed_at = now
+                self._audit(
+                    session,
+                    actor=actor,
+                    request_id=request_id,
+                    action="solution_catalog.refresh",
+                    target_type="solution",
+                    target_id=entry.catalog_id,
+                    result=("succeeded" if entry.status == "available" else "failed"),
+                    details={"status": entry.status, "digest": entry.resolved_digest},
+                )
+            session.flush()
+            return [self._solution_view(entry) for entry in entries]
 
     def create_site(
         self,
@@ -1090,6 +1271,259 @@ class ManagementService:
             )
             return deployment
 
+    def _catalog_deployment_candidate(
+        self,
+        session: Session,
+        *,
+        catalog_id: str,
+        deployment_key: str,
+        assignments: list[dict[str, Any]],
+        inference_mode: str,
+        resources: dict[str, str],
+        state_size: str,
+        lock_deployment: bool = False,
+    ) -> tuple[
+        SolutionCatalogEntry,
+        SolutionDeployment | None,
+        list[tuple[Camera, CameraStreamProfile, CameraCredentialVersion | None, dict[str, Any]]],
+        dict[str, Any],
+        dict[str, Any],
+    ]:
+        entry = session.get(SolutionCatalogEntry, catalog_id)
+        if entry is None:
+            raise ValueError("unknown solution catalog entry")
+        catalog = self._solution_view(entry)
+        if entry.status != "available" or entry.resolved_digest is None:
+            raise ValueError("only an available catalog entry can be deployed")
+        site = self.current_site(session)
+        deployment_query = select(SolutionDeployment).where(
+            SolutionDeployment.site_id == site.id,
+            SolutionDeployment.deployment_key == deployment_key,
+            SolutionDeployment.deleted_at.is_(None),
+        )
+        if lock_deployment:
+            deployment_query = deployment_query.with_for_update()
+        deployment = session.scalar(deployment_query)
+        if deployment is not None and deployment.solution_id != "traffic-edge":
+            raise ValueError("a deployment ID cannot be reused for another solution")
+        desired_revision = deployment.next_desired_revision if deployment else 1
+        resolved = []
+        bundle_cameras: list[BundleCamera] = []
+        desired_cameras: list[dict[str, Any]] = []
+        for position, item in enumerate(assignments):
+            camera = self._camera(session, item["camera_id"])
+            if camera.site_id != site.id or not camera.enabled or camera.onboarding_state != "online":
+                raise ValueError(f"camera {camera.camera_key!r} is not enabled and online")
+            profile = session.scalar(
+                select(CameraStreamProfile).where(
+                    CameraStreamProfile.camera_id == camera.id,
+                    CameraStreamProfile.selected.is_(True),
+                )
+            )
+            if profile is None:
+                raise ValueError(f"camera {camera.camera_key!r} has no selected profile")
+            credential = self._active_credential(session, camera.id)
+            apps = tuple(item["apps"])
+            fps = int(item.get("fps", 8))
+            config = copy.deepcopy(item.get("config", {}))
+            bundle_cameras.append(BundleCamera(camera.camera_key, fps, apps))
+            normalized = {**item, "config": config, "ordinal": position}
+            resolved.append((camera, profile, credential, normalized))
+            desired_camera = {
+                "camera_id": camera.camera_key,
+                "source": f"file:/run/secrets/apexfabric/{camera.camera_key}.rtsp",
+                "solution_pack": "traffic",
+                "fps": fps,
+                "apps": list(apps),
+            }
+            if config:
+                desired_camera["config"] = config
+            desired_cameras.append(desired_camera)
+        desired_state = {
+            "edge_id": site.edge_id,
+            "revision": desired_revision,
+            "cameras": desired_cameras,
+        }
+        errors = sorted(
+            Draft202012Validator(entry.desired_state_schema).iter_errors(desired_state),
+            key=lambda error: ".".join(str(value) for value in error.absolute_path),
+        )
+        if errors:
+            error = errors[0]
+            location = ".".join(str(value) for value in error.absolute_path) or "desired_state"
+            raise ValueError(f"invalid Traffic geometry at {location}: {error.message}")
+        for camera in desired_cameras:
+            config = camera.get("config", {})
+            apps = set(camera["apps"])
+            if "wrong_way" in apps and not config.get("lines", {}).get("wrong_way"):
+                raise ValueError("wrong_way requires config.lines.wrong_way geometry")
+            if "illegal_parking" in apps and not config.get("zones", {}).get("illegal_parking"):
+                raise ValueError("illegal_parking requires config.zones.illegal_parking geometry")
+        bundle = catalog_traffic_bundle(
+            catalog,
+            deployment_key,
+            site.edge_id,
+            bundle_cameras,
+            inference_mode=inference_mode,
+            cpu_request=resources.get("cpu_request", "8"),
+            cpu_limit=resources.get("cpu_limit", "16"),
+            memory_request=resources.get("memory_request", "16Gi"),
+            memory_limit=resources.get("memory_limit", "32Gi"),
+            state_size=state_size,
+        )
+        if deployment is not None:
+            bundle["applications"][0].setdefault("lifecycle", {})[
+                "desired_state"
+            ] = deployment.lifecycle_intent
+        desired_sha = hashlib.sha256(
+            json.dumps(desired_state, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        bundle["configuration"]["desired_state_sha256"] = desired_sha
+        validate_tvt_bundle(bundle)
+        return entry, deployment, resolved, canonical_bundle(bundle), desired_state
+
+    def preview_catalog_deployment(
+        self,
+        *,
+        catalog_id: str,
+        deployment_key: str,
+        assignments: list[dict[str, Any]],
+        inference_mode: str,
+        resources: dict[str, str],
+        state_size: str,
+        namespace: str,
+    ) -> dict[str, Any]:
+        if namespace != "apexfabric":
+            raise ValueError("catalog deployments must use the apexfabric namespace")
+        with self.sessions() as session:
+            entry, _deployment, _resolved, bundle, desired_state = self._catalog_deployment_candidate(
+                session,
+                catalog_id=catalog_id,
+                deployment_key=deployment_key,
+                assignments=assignments,
+                inference_mode=inference_mode,
+                resources=resources,
+                state_size=state_size,
+            )
+            return {
+                "catalog_id": entry.catalog_id,
+                "bundle_sha256": bundle_sha256(bundle),
+                "image_reference": bundle["applications"][0]["image"]["repository"]
+                + "@"
+                + bundle["applications"][0]["image"]["digest"],
+                "bundle": bundle,
+                "desired_state": desired_state,
+            }
+
+    def commit_catalog_deployment(
+        self,
+        *,
+        catalog_id: str,
+        deployment_key: str,
+        assignments: list[dict[str, Any]],
+        inference_mode: str,
+        resources: dict[str, str],
+        state_size: str,
+        namespace: str,
+        preview_bundle_sha256: str,
+        idempotency_key: str,
+        actor: str,
+        request_id: str,
+    ) -> DeploymentAssignmentSet:
+        if namespace != "apexfabric":
+            raise ValueError("catalog deployments must use the apexfabric namespace")
+        with self.sessions.begin() as session:
+            site = self.current_site(session)
+            idempotent_deployment = session.scalar(
+                select(SolutionDeployment)
+                .where(
+                    SolutionDeployment.site_id == site.id,
+                    SolutionDeployment.deployment_key == deployment_key,
+                    SolutionDeployment.deleted_at.is_(None),
+                )
+                .with_for_update()
+            )
+            if idempotent_deployment is not None:
+                existing = session.scalar(
+                    select(DeploymentAssignmentSet).where(
+                        DeploymentAssignmentSet.deployment_id
+                        == idempotent_deployment.id,
+                        DeploymentAssignmentSet.idempotency_key == idempotency_key,
+                    )
+                )
+                if existing is not None:
+                    return existing
+            entry, deployment, resolved, bundle, _desired_state = self._catalog_deployment_candidate(
+                session,
+                catalog_id=catalog_id,
+                deployment_key=deployment_key,
+                assignments=assignments,
+                inference_mode=inference_mode,
+                resources=resources,
+                state_size=state_size,
+                lock_deployment=True,
+            )
+            actual_sha = bundle_sha256(bundle)
+            if actual_sha != preview_bundle_sha256:
+                raise ValueError("deployment changed after preview; preview it again")
+            if deployment is None:
+                deployment = SolutionDeployment(
+                    site_id=site.id,
+                    deployment_key=deployment_key,
+                    solution_id="traffic-edge",
+                    namespace=namespace,
+                    registry=entry.local_registry,
+                )
+                session.add(deployment)
+                session.flush()
+            deployment.registry = entry.local_registry
+            bundle_revision = self._store_bundle_revision(
+                session, deployment, bundle, "catalog_commit", actor
+            )
+            assignment_set = DeploymentAssignmentSet(
+                deployment_id=deployment.id,
+                bundle_revision_id=bundle_revision.id,
+                desired_revision=deployment.next_desired_revision,
+                idempotency_key=idempotency_key,
+                actor=actor,
+            )
+            deployment.next_desired_revision += 1
+            session.add(assignment_set)
+            session.flush()
+            for camera, profile, credential, item in resolved:
+                camera_assignment = CameraDeploymentAssignment(
+                    assignment_set_id=assignment_set.id,
+                    camera_id=camera.id,
+                    stream_profile_id=profile.id,
+                    credential_version_id=credential.id if credential else None,
+                    ordinal=item["ordinal"],
+                    requested_fps=int(item.get("fps", 8)),
+                )
+                session.add(camera_assignment)
+                session.flush()
+                for use_case in item["apps"]:
+                    session.add(CameraApplicationAssignment(
+                        camera_assignment_id=camera_assignment.id,
+                        bundle_application="runtime",
+                        use_case_key=use_case,
+                        configuration=copy.deepcopy(item["config"]),
+                    ))
+            self._set_desired(session, deployment.id, assignment_set.id)
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="deployment.catalog.commit",
+                target_type="deployment",
+                target_id=deployment_key,
+                details={
+                    "catalog_id": catalog_id,
+                    "bundle_sha256": actual_sha,
+                    "desired_revision": assignment_set.desired_revision,
+                },
+            )
+            return assignment_set
+
     @staticmethod
     def _store_bundle_revision(
         session: Session,
@@ -1144,6 +1578,10 @@ class ManagementService:
             )
             if template is None:
                 raise ValueError("deployment has no registered bundle")
+            if template.canonical_bundle.get("configuration", {}).get("catalog_id"):
+                raise ValueError(
+                    "catalog deployment changes require /deployments/preview"
+                )
             site = session.get(Site, deployment.site_id)
             if site is None:
                 raise ValueError("deployment site is missing")
@@ -1471,6 +1909,38 @@ class ManagementService:
                     if sync and sync.applied_assignment_set_id
                     else None
                 )
+                desired_bundle = (
+                    session.get(SolutionBundleRevision, desired.bundle_revision_id)
+                    if desired else None
+                )
+                applied_bundle = (
+                    session.get(SolutionBundleRevision, applied.bundle_revision_id)
+                    if applied else None
+                )
+                snapshots = session.scalars(
+                    select(DeploymentAssignmentSet)
+                    .where(DeploymentAssignmentSet.deployment_id == deployment.id)
+                    .order_by(DeploymentAssignmentSet.desired_revision.desc())
+                    .limit(20)
+                ).all()
+                history = []
+                seen_bundle_ids: set[uuid.UUID] = set()
+                for snapshot in snapshots:
+                    if snapshot.bundle_revision_id in seen_bundle_ids:
+                        continue
+                    revision = session.get(
+                        SolutionBundleRevision, snapshot.bundle_revision_id
+                    )
+                    if revision is None:
+                        continue
+                    seen_bundle_ids.add(snapshot.bundle_revision_id)
+                    image = revision.canonical_bundle["applications"][0]["image"]
+                    history.append({
+                        "bundle_sha256": revision.bundle_sha256,
+                        "desired_revision": snapshot.desired_revision,
+                        "image_digest": image.get("digest"),
+                        "created_at": revision.created_at.isoformat(),
+                    })
                 result.append(
                     {
                         "deployment_id": deployment.deployment_key,
@@ -1481,6 +1951,21 @@ class ManagementService:
                         "desired_revision": desired.desired_revision if desired else None,
                         "applied_revision": applied.desired_revision if applied else None,
                         "last_error_code": sync.last_error_code if sync else None,
+                        "catalog_id": (
+                            desired_bundle.canonical_bundle.get("configuration", {}).get("catalog_id")
+                            if desired_bundle else None
+                        ),
+                        "desired_bundle_sha256": (
+                            desired_bundle.bundle_sha256 if desired_bundle else None
+                        ),
+                        "applied_bundle_sha256": (
+                            applied_bundle.bundle_sha256 if applied_bundle else None
+                        ),
+                        "applied_image_digest": (
+                            applied_bundle.canonical_bundle["applications"][0]["image"].get("digest")
+                            if applied_bundle else None
+                        ),
+                        "bundle_history": history,
                     }
                 )
             return result

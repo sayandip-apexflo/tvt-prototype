@@ -211,10 +211,12 @@ def render(bundle: dict[str, Any], namespace: str) -> list[dict[str, Any]]:
                     },
                 },
                 {"name": "compiled-plans", "emptyDir": {}},
+                {"name": "apexfabric-tmp", "emptyDir": {}},
             ])
             # The contracted main entrypoint recompiles and atomically updates
             # generated plan files before launching the solution runtime.
             container["volumeMounts"].append({"name": "compiled-plans", "mountPath": "/plans"})
+            container["volumeMounts"].append({"name": "apexfabric-tmp", "mountPath": "/tmp/apexfabric"})
             # The contracted solution-image entrypoint validates and compiles
             # desired state before it launches the runtime as well.
             container["volumeMounts"].append({
@@ -293,7 +295,7 @@ def render(bundle: dict[str, Any], namespace: str) -> list[dict[str, Any]]:
                 for mount in container["volumeMounts"]
                 if (mount["mountPath"].startswith("/models/")
                     or mount["mountPath"].startswith("/run/secrets/apexfabric/")
-                    or mount["mountPath"] in {"/dev/dri", "/dev/accel"})
+                    or mount["mountPath"] in {"/dev/dri", "/dev/accel", "/tmp/apexfabric"})
             )
             pod_spec["initContainers"] = [{
                 "name": "plan-compiler",

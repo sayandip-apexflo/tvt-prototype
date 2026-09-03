@@ -378,6 +378,42 @@ class CameraStatus(Base):
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class SolutionCatalogEntry(Base):
+    __tablename__ = "solution_catalog_entries"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('unresolved','available','unavailable')",
+            name="solution_catalog_status",
+        ),
+        Index("ix_solution_catalog_name_version", "solution_name", "version"),
+    )
+    catalog_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    solution_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    hardware_profile: Mapped[str] = mapped_column(String(128), nullable=False)
+    architectures: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    local_registry: Mapped[str] = mapped_column(String(255), nullable=False)
+    repository: Mapped[str] = mapped_column(String(255), nullable=False)
+    tag: Mapped[str] = mapped_column(String(255), nullable=False)
+    resolved_digest: Mapped[str | None] = mapped_column(String(71))
+    status: Mapped[str] = mapped_column(
+        String(16), default="unresolved", nullable=False, index=True
+    )
+    contract_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    desired_state_schema: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    desired_state_example: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    checksums: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    last_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
 class SolutionDeployment(Base, IdMixin, TimeMixin):
     __tablename__ = "solution_deployments"
     __table_args__ = (UniqueConstraint("site_id", "deployment_key"),)

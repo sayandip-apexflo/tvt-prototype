@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
+import re
 import subprocess
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -47,6 +49,7 @@ class WorkCamera:
     path: str
     fps: int
     apps: tuple[str, ...]
+    configuration: dict[str, Any]
     credential: tuple[uuid.UUID, bytes | None, bytes | None, int, int] | None
 
 
@@ -63,6 +66,32 @@ class SyncWorkItem:
     operation_id: uuid.UUID
     claim_token: uuid.UUID
     cameras: tuple[WorkCamera, ...]
+    previous: AppliedState | None
+
+
+@dataclass(frozen=True)
+class AppliedState:
+    desired_revision: int
+    assignment_set_id: uuid.UUID
+    bundle: dict[str, Any]
+    cameras: tuple[WorkCamera, ...]
+
+
+class CrictlImagePuller:
+    """Preflight immutable images through the K3s/containerd namespace."""
+
+    def __init__(self, command: tuple[str, ...] = ("k3s", "crictl"), timeout: int = 300):
+        self.command = command
+        self.timeout = timeout
+
+    def __call__(self, image_reference: str) -> None:
+        subprocess.run(
+            [*self.command, "pull", image_reference],
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=self.timeout,
+        )
 
 
 def build_rtsp_url(camera: WorkCamera, credential: dict[str, Any] | None) -> str:
@@ -101,12 +130,14 @@ class SyncWorker:
         worker_id: str,
         rollout_timeout: int = 180,
         lease_seconds: int = 600,
+        image_puller: Any | None = None,
     ) -> None:
         self.sessions = sessions
         self.keyring = keyring
         self.kubectl = kubectl
         self.worker_id = worker_id
         self.rollout_timeout = rollout_timeout
+        self.image_puller = image_puller
         # A rollout is a blocking kubectl call, so the claim must remain fenced
         # for the entire rollout plus enough time to persist its result.
         self.lease_seconds = max(lease_seconds, rollout_timeout + 120)
@@ -211,55 +242,90 @@ class SyncWorker:
             site = session.get(Site, deployment.site_id)
             if bundle_revision is None or site is None:
                 raise RuntimeError("claimed bundle or site disappeared")
-            cameras: list[WorkCamera] = []
-            assignments = session.scalars(
+            sync = session.get(DeploymentSyncState, deployment.id)
+
+            def load_cameras(snapshot: DeploymentAssignmentSet) -> tuple[WorkCamera, ...]:
+                cameras: list[WorkCamera] = []
+                assignments = session.scalars(
                 select(CameraDeploymentAssignment)
-                .where(CameraDeploymentAssignment.assignment_set_id == desired.id)
+                .where(CameraDeploymentAssignment.assignment_set_id == snapshot.id)
                 .order_by(CameraDeploymentAssignment.ordinal)
-            ).all()
-            for assignment in assignments:
-                camera = session.get(Camera, assignment.camera_id)
-                profile = session.get(CameraStreamProfile, assignment.stream_profile_id)
-                if camera is None or profile is None:
-                    raise RuntimeError("assignment camera/profile disappeared")
-                endpoint = session.get(CameraEndpoint, profile.endpoint_id)
-                if endpoint is None:
-                    raise RuntimeError("assignment endpoint disappeared")
-                credential_value = None
-                if assignment.credential_version_id is not None:
-                    credential = session.get(
-                        CameraCredentialVersion, assignment.credential_version_id
-                    )
-                    if credential is None:
-                        raise RuntimeError("assignment credential disappeared")
-                    credential_value = (
-                        credential.id,
-                        credential.ciphertext,
-                        credential.nonce,
-                        credential.key_version,
-                        credential.aad_version,
-                    )
-                apps = session.scalars(
-                    select(CameraApplicationAssignment.use_case_key)
-                    .where(
-                        CameraApplicationAssignment.camera_assignment_id
-                        == assignment.id
-                    )
-                    .order_by(CameraApplicationAssignment.use_case_key)
                 ).all()
-                cameras.append(
-                    WorkCamera(
-                        camera_id=camera.id,
-                        camera_key=camera.camera_key,
-                        profile_id=profile.id,
-                        endpoint_scheme=endpoint.scheme,
-                        endpoint_host=endpoint.host,
-                        endpoint_port=endpoint.port,
-                        path=profile.path,
-                        fps=assignment.requested_fps,
-                        apps=tuple(apps),
-                        credential=credential_value,
+                for assignment in assignments:
+                    camera = session.get(Camera, assignment.camera_id)
+                    profile = session.get(CameraStreamProfile, assignment.stream_profile_id)
+                    if camera is None or profile is None:
+                        raise RuntimeError("assignment camera/profile disappeared")
+                    endpoint = session.get(CameraEndpoint, profile.endpoint_id)
+                    if endpoint is None:
+                        raise RuntimeError("assignment endpoint disappeared")
+                    credential_value = None
+                    if assignment.credential_version_id is not None:
+                        credential = session.get(
+                            CameraCredentialVersion, assignment.credential_version_id
+                        )
+                        if credential is None:
+                            raise RuntimeError("assignment credential disappeared")
+                        credential_value = (
+                            credential.id,
+                            credential.ciphertext,
+                            credential.nonce,
+                            credential.key_version,
+                            credential.aad_version,
+                        )
+                    app_assignments = session.scalars(
+                        select(CameraApplicationAssignment)
+                        .where(
+                            CameraApplicationAssignment.camera_assignment_id
+                            == assignment.id
+                        )
+                        .order_by(CameraApplicationAssignment.use_case_key)
+                    ).all()
+                    apps = tuple(item.use_case_key for item in app_assignments)
+                    configurations = {
+                        json.dumps(item.configuration, sort_keys=True, separators=(",", ":"))
+                        for item in app_assignments
+                    }
+                    if len(configurations) > 1:
+                        raise RuntimeError("camera applications have inconsistent geometry")
+                    configuration = (
+                        json.loads(next(iter(configurations))) if configurations else {}
                     )
+                    cameras.append(
+                        WorkCamera(
+                            camera_id=camera.id,
+                            camera_key=camera.camera_key,
+                            profile_id=profile.id,
+                            endpoint_scheme=endpoint.scheme,
+                            endpoint_host=endpoint.host,
+                            endpoint_port=endpoint.port,
+                            path=profile.path,
+                            fps=assignment.requested_fps,
+                            apps=apps,
+                            configuration=configuration,
+                            credential=credential_value,
+                        )
+                    )
+                return tuple(cameras)
+
+            cameras = load_cameras(desired)
+            previous = None
+            if sync is not None and sync.applied_assignment_set_id is not None:
+                applied = session.get(
+                    DeploymentAssignmentSet, sync.applied_assignment_set_id
+                )
+                if applied is None:
+                    raise RuntimeError("applied assignment state disappeared")
+                applied_bundle = session.get(
+                    SolutionBundleRevision, applied.bundle_revision_id
+                )
+                if applied_bundle is None:
+                    raise RuntimeError("applied bundle state disappeared")
+                previous = AppliedState(
+                    desired_revision=applied.desired_revision,
+                    assignment_set_id=applied.id,
+                    bundle=applied_bundle.canonical_bundle,
+                    cameras=load_cameras(applied),
                 )
             return SyncWorkItem(
                 deployment_id=deployment.id,
@@ -272,7 +338,8 @@ class SyncWorker:
                 attempt_id=attempt_id,
                 operation_id=operation_id,
                 claim_token=token,
-                cameras=tuple(cameras),
+                cameras=cameras,
+                previous=previous,
             )
 
     def _secret_inputs(self, work: SyncWorkItem) -> dict[str, Any]:
@@ -289,8 +356,7 @@ class SyncWorker:
                     camera.credential[3],
                     camera.credential[4],
                 )
-            desired_cameras.append(
-                {
+            desired_camera = {
                     "camera_id": camera.camera_key,
                     "source": (
                         f"file:/run/secrets/apexfabric/{camera.camera_key}.rtsp"
@@ -299,7 +365,9 @@ class SyncWorker:
                     "fps": camera.fps,
                     "apps": list(camera.apps),
                 }
-            )
+            if camera.configuration:
+                desired_camera["config"] = camera.configuration
+            desired_cameras.append(desired_camera)
             sources[camera.camera_key] = build_rtsp_url(camera, credential)
         return {
             "desired_state": {
@@ -335,11 +403,87 @@ class SyncWorker:
             attempt.phase = phase
             sync.claim_until = utc_now() + timedelta(seconds=self.lease_seconds)
 
+    def _preflight_images(self, work: SyncWorkItem) -> None:
+        if not work.bundle.get("configuration", {}).get("catalog_id"):
+            return
+        if self.image_puller is None:
+            raise RuntimeError("catalog image pull preflight is not configured")
+        references = []
+        for application in work.bundle["applications"]:
+            image = application["image"]
+            digest = image.get("digest")
+            if not isinstance(digest, str) or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", digest
+            ):
+                raise RuntimeError("catalog bundle image is not immutable")
+            references.append(f"{image['repository']}@{digest}")
+        self._phase(work, "pulling_images")
+        for reference in sorted(set(references)):
+            self.image_puller(reference)
+
+    def _restore_previous(self, work: SyncWorkItem) -> None:
+        if work.previous is None:
+            return
+        previous = replace(
+            work,
+            desired_revision=work.previous.desired_revision,
+            assignment_set_id=work.previous.assignment_set_id,
+            bundle=work.previous.bundle,
+            cameras=work.previous.cameras,
+        )
+        self._phase(work, "restoring_previous")
+        inputs = self._secret_inputs(previous)
+        secret_list = build_camera_secret_list(
+            previous.bundle, inputs, previous.namespace
+        )
+        if secret_list is None:
+            raise RuntimeError("previous bundle has no Secret contract")
+        for item in secret_list["items"]:
+            item["metadata"].setdefault("annotations", {}).update(
+                {
+                    "tvt.apexfabric.com/desired-revision": str(
+                        previous.desired_revision
+                    ),
+                    "tvt.apexfabric.com/operation-id": str(work.operation_id),
+                    "tvt.apexfabric.com/recovery": "previous-applied",
+                }
+            )
+        manifest = self._server_side_secret_manifest(secret_list)
+        self.kubectl.run(
+            "apply",
+            "--server-side",
+            "--field-manager=tvt-camera-sync",
+            "--force-conflicts",
+            "-f",
+            "-",
+            input_text=json.dumps(manifest, separators=(",", ":")),
+        )
+        report = reconcile(previous.bundle, previous.namespace, self.kubectl)
+        for deployment in report["observed"]:
+            if deployment.get("desired_replicas", 0) <= 0:
+                continue
+            name = deployment["name"]
+            self.kubectl.run(
+                "rollout", "restart", f"deployment/{name}", "-n", previous.namespace
+            )
+            self.kubectl.run(
+                "rollout",
+                "status",
+                f"deployment/{name}",
+                "-n",
+                previous.namespace,
+                f"--timeout={self.rollout_timeout}s",
+            )
+
     def run_once(self) -> dict[str, Any] | None:
         work = self.claim()
         if work is None:
             return None
+        mutation_started = False
+        recovery_error: Exception | None = None
+        recovered = False
         try:
+            self._preflight_images(work)
             inputs = self._secret_inputs(work)
             secret_list = build_camera_secret_list(
                 work.bundle, inputs, work.namespace
@@ -366,6 +510,7 @@ class SyncWorker:
                 "-",
                 input_text=json.dumps(manifest, separators=(",", ":")),
             )
+            mutation_started = True
             # Release plaintext-bearing object graphs as soon as kubectl has
             # consumed stdin. Python cannot guarantee physical zeroization.
             del manifest
@@ -404,7 +549,18 @@ class SyncWorker:
                 "configured_secrets": configured_secrets,
             }
         except Exception as error:
-            self._record_failure(work, error)
+            if mutation_started and work.previous is not None:
+                try:
+                    self._restore_previous(work)
+                    recovered = True
+                except Exception as restore_error:
+                    recovery_error = restore_error
+            self._record_failure(
+                work,
+                error,
+                recovered=recovered,
+                recovery_error=recovery_error,
+            )
             raise
 
     def _record_success(
@@ -475,7 +631,14 @@ class SyncWorker:
                 )
             )
 
-    def _record_failure(self, work: SyncWorkItem, error: Exception) -> None:
+    def _record_failure(
+        self,
+        work: SyncWorkItem,
+        error: Exception,
+        *,
+        recovered: bool = False,
+        recovery_error: Exception | None = None,
+    ) -> None:
         now = utc_now()
         safe_error = redact_text(str(error))
         code = (
@@ -498,12 +661,19 @@ class SyncWorker:
             attempt.status = "failed"
             attempt.finished_at = now
             attempt.error_code = code
-            attempt.safe_detail = {"error": safe_error}
+            attempt.safe_detail = {
+                "error": safe_error,
+                "previous_applied_bundle_restored": recovered,
+            }
+            if recovery_error is not None:
+                attempt.safe_detail["recovery_error"] = redact_text(
+                    str(recovery_error)
+                )
             attempt.retry_at = now + timedelta(seconds=retry_delay)
             operation.status = "failed"
             operation.finished_at = now
             operation.error_code = code
-            operation.safe_result = {"error": safe_error}
+            operation.safe_result = copy.deepcopy(attempt.safe_detail)
             if sync.desired_assignment_set_id == work.assignment_set_id:
                 sync.state = "failed"
                 sync.next_attempt_at = attempt.retry_at

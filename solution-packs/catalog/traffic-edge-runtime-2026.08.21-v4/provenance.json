@@ -1,0 +1,34 @@
+{
+  "format_version": 1,
+  "catalog_id": "traffic-edge-runtime:2026.08.21-v4",
+  "pipeline": {
+    "repository": "https://github.com/kiranmaibattu-cyber/PIPELINE.git",
+    "commit": "6513562c9d27eba511322280e19e054c3948ae4d"
+  },
+  "delivery": {
+    "branch": "apexfabric-v1-intel-images",
+    "directory": "delivery/apexfabric-v1/intel-285h/traffic",
+    "version": "2026.08.21-v4"
+  },
+  "archive": {
+    "filename": "image-2026.08.21-v4.tar",
+    "size": 1930041856,
+    "sha256": "a6787bba6a27bc486f90b4c4dd41681d051c7c834568d99bc4a884d177d10e0f",
+    "loaded_image": "traffic-edge-runtime:intel-285h-2026.08.21-v4"
+  },
+  "local_image": {
+    "repository": "apexfabric/traffic-edge-runtime",
+    "tag": "intel-285h-2026.08.21-v4"
+  },
+  "files": {
+    "image-contract.yaml": {
+      "sha256": "f90f2f7d248531903f13df6249f7192ecbf1e877120522ad0c27d952e9554f08"
+    },
+    "desired-state.schema.json": {
+      "sha256": "ff7482d1bcc69a6c2a77ec2d1784397628b30d4450f42b443bd6db93718a30e8"
+    },
+    "desired-state.example.json": {
+      "sha256": "0f4a8313e4a2593caad3091b14dd14f973d03294d11555b0a8a63744edf9fa00"
+    }
+  }
+}

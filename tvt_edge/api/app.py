@@ -113,6 +113,29 @@ class AssignmentInput(StrictModel):
     apps: list[str]
     fps: int = 8
     bundle_application: str = "runtime"
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class DeploymentResourcesInput(StrictModel):
+    cpu_request: str = "8"
+    cpu_limit: str = "16"
+    memory_request: str = "16Gi"
+    memory_limit: str = "32Gi"
+
+
+class CatalogDeploymentPreview(StrictModel):
+    catalog_id: str
+    deployment_id: str
+    namespace: str = "apexfabric"
+    inference_mode: str = "cpu-compatible"
+    resources: DeploymentResourcesInput = Field(default_factory=DeploymentResourcesInput)
+    state_size: str = "50Gi"
+    assignments: list[AssignmentInput]
+
+
+class CatalogDeploymentCommit(CatalogDeploymentPreview):
+    preview_bundle_sha256: str
+    idempotency_key: str
 
 
 class AssignmentCommit(StrictModel):
@@ -295,6 +318,18 @@ def create_app(
             if result["status"] == "healthy":
                 result["status"] = "degraded"
         return result
+
+    @app.get("/api/v1/solutions")
+    def list_solutions() -> list[dict[str, Any]]:
+        return service.list_solutions()
+
+    @app.post("/api/v1/solutions/refresh")
+    def refresh_solutions(
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> list[dict[str, Any]]:
+        actor, request_id = identity(request, x_tvt_actor)
+        return service.refresh_solutions(actor=actor, request_id=request_id)
 
     @app.get("/api/v1/cluster/workloads/{deployment_name}/telemetry")
     def workload_telemetry(deployment_name: str) -> dict[str, Any]:
@@ -539,8 +574,8 @@ def create_app(
         run = service.queue_discovery("operator", actor, request_id)
         return {"operation_id": str(run.id), "status": run.status}
 
-    @app.post("/api/v1/deployments", status_code=201)
-    def register_deployment(
+    @app.post("/internal/v1/deployments/bundles", status_code=201)
+    def register_trusted_bundle(
         body: DeploymentInput,
         request: Request,
         x_tvt_actor: str | None = Header(default=None),
@@ -558,6 +593,52 @@ def create_app(
             request_id,
         )
         return {"deployment_id": deployment.deployment_key}
+
+    @app.post("/api/v1/deployments/preview")
+    def preview_deployment(body: CatalogDeploymentPreview) -> dict[str, Any]:
+        if body.namespace != allowed_namespace:
+            raise ValueError(
+                f"deployment namespace must be {allowed_namespace!r} on this edge"
+            )
+        return service.preview_catalog_deployment(
+            catalog_id=body.catalog_id,
+            deployment_key=body.deployment_id,
+            assignments=[item.model_dump() for item in body.assignments],
+            inference_mode=body.inference_mode,
+            resources=body.resources.model_dump(),
+            state_size=body.state_size,
+            namespace=body.namespace,
+        )
+
+    @app.post("/api/v1/deployments", status_code=201)
+    def commit_catalog_deployment(
+        body: CatalogDeploymentCommit,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        if body.namespace != allowed_namespace:
+            raise ValueError(
+                f"deployment namespace must be {allowed_namespace!r} on this edge"
+            )
+        assignment_set = service.commit_catalog_deployment(
+            catalog_id=body.catalog_id,
+            deployment_key=body.deployment_id,
+            assignments=[item.model_dump() for item in body.assignments],
+            inference_mode=body.inference_mode,
+            resources=body.resources.model_dump(),
+            state_size=body.state_size,
+            namespace=body.namespace,
+            preview_bundle_sha256=body.preview_bundle_sha256,
+            idempotency_key=body.idempotency_key,
+            actor=actor,
+            request_id=request_id,
+        )
+        return {
+            "deployment_id": body.deployment_id,
+            "desired_revision": assignment_set.desired_revision,
+            "state": "pending",
+        }
 
     @app.get("/api/v1/deployments")
     def list_deployments() -> list[dict[str, Any]]:

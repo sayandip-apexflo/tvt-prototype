@@ -2,12 +2,14 @@
 set -Eeuo pipefail
 
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REGISTRY=""
+# shellcheck source=config/platform.env
+source "${REPO_ROOT}/config/platform.env"
+REGISTRY="${LOCAL_REGISTRY_ADDRESS}"
 SCHEME="http"
 RESTART=false
 
 usage() {
-  echo "usage: bash scripts/configure-k3s-registry.sh --registry HOST[:PORT] [--scheme http|https] [--restart]" >&2
+  echo "usage: bash scripts/configure-k3s-registry.sh [--registry HOST[:PORT]] [--scheme http|https] [--restart]" >&2
 }
 
 while (($#)); do
@@ -19,9 +21,16 @@ while (($#)); do
   esac
 done
 
-if [[ -z "${REGISTRY}" || "${REGISTRY}" == *"://"* || "${REGISTRY}" == */* || "${REGISTRY}" =~ [[:space:]] ]]; then
+if [[ ! "${REGISTRY}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$ ]]; then
   echo "--registry must be a HOST[:PORT] value" >&2
   exit 2
+fi
+if [[ "${REGISTRY}" == *:* ]]; then
+  registry_port="${REGISTRY##*:}"
+  if ((10#${registry_port} < 1 || 10#${registry_port} > 65535)); then
+    echo "--registry port must be between 1 and 65535" >&2
+    exit 2
+  fi
 fi
 if [[ "${SCHEME}" != http && "${SCHEME}" != https ]]; then
   echo "--scheme must be http or https" >&2

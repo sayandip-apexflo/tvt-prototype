@@ -15,7 +15,7 @@ from alembic.config import Config
 
 from tvt_edge.api import create_app
 from tvt_edge.camera import DiscoveryWorker, ValidationWorker
-from tvt_edge.cluster import ClusterStatusReader, SyncWorker
+from tvt_edge.cluster import ClusterStatusReader, CrictlImagePuller, SyncWorker
 from tvt_edge.db.session import build_engine, build_session_factory
 from tvt_edge.legacy import import_sqlite_lifecycle
 from tvt_edge.observability import configure_json_logging
@@ -69,6 +69,18 @@ def parser() -> argparse.ArgumentParser:
     legacy.add_argument("database", type=Path)
     legacy.add_argument("--archive-read-only", action="store_true")
     commands.add_parser("retention", help="apply bounded management-history retention")
+    seed_solutions = commands.add_parser(
+        "seed-solutions", help="idempotently seed immutable solution metadata"
+    )
+    seed_solutions.add_argument(
+        "--delivery-directory",
+        type=Path,
+        default=(
+            ROOT
+            / "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
+        ),
+    )
+    seed_solutions.add_argument("--registry", default="127.0.0.1:5000")
     return root
 
 
@@ -190,6 +202,15 @@ def main(argv: list[str] | None = None) -> int:
         result = service.apply_retention()
         print(json.dumps(result, sort_keys=True))
         return 0
+    if args.command == "seed-solutions":
+        result = service.seed_solution_catalog(
+            args.delivery_directory,
+            args.registry,
+            actor="bootstrap",
+            request_id="bootstrap:solution-catalog:v4",
+        )
+        print(json.dumps(result, sort_keys=True))
+        return 0
     if args.command == "api":
         import uvicorn
         from prometheus_client import start_http_server
@@ -227,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         kubectl_client(settings.kubeconfig),
         worker_id=settings.sync_worker_id,
         rollout_timeout=settings.rollout_timeout,
+        image_puller=CrictlImagePuller(timeout=settings.rollout_timeout),
     )
     discovery_worker = DiscoveryWorker(
         sessions,

@@ -68,14 +68,14 @@ Validate and render the unchanged Traffic runtime bundle:
 ```bash
 .venv/bin/tvt-k3s validate solution-packs/traffic/traffic-edge-runtime-intel-285h.yaml
 .venv/bin/tvt-k3s render solution-packs/traffic/traffic-edge-runtime-intel-285h.yaml \
-  --registry registry.local:5000 > /tmp/tvt-traffic-rendered.yaml
+  --registry 127.0.0.1:5000 > /tmp/tvt-traffic-rendered.yaml
 ```
 
 Test the direct-camera Secret and render contracts without contacting K3s:
 
 ```bash
 .venv/bin/tvt-k3s apply solution-packs/traffic/traffic-edge-runtime-intel-285h.yaml \
-  --registry registry.local:5000 \
+  --registry 127.0.0.1:5000 \
   --secret-inputs examples/traffic.secret-inputs.example.json \
   --dry-run
 ```
@@ -85,6 +85,77 @@ credentials in a tracked file. The management service builds the same input
 ephemerally from its encrypted inventory. Non-dry-run `tvt-k3s apply` and the
 old local SQLite lifecycle commands are retired from the production CLI.
 
+### Edge-local OCI registry
+
+Workload images are stored on the edge device in a Docker Distribution 2.8.3
+registry. The registry container image is pinned to its Linux `amd64` digest,
+the service publishes only on `127.0.0.1:5000`, and image data persists in the
+host directory `/var/lib/tvt/registry`.
+
+```text
+Docker build/pull -> Docker push -> 127.0.0.1:5000 -> K3s/containerd pull
+                         systemd: Docker -> registry -> K3s
+```
+
+Install Docker and curl from Ubuntu, then install the registry. The installer
+pulls the immutable registry image, installs its systemd unit and the K3s
+ordering drop-in, writes `/etc/rancher/k3s/registries.yaml`, and restarts K3s
+only when K3s is already active:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y docker.io curl
+sudo bash scripts/install-local-registry.sh
+```
+
+The registry intentionally has no TLS or authentication because it is reachable
+only through the host loopback interface. Do not change the publish address
+without adding TLS, authentication, firewall policy, and a corresponding threat
+review. Re-running the installer retains `/var/lib/tvt/registry` and reconciles
+the service to the pinned image.
+
+### PIPELINE Traffic image import
+
+The Traffic workload comes from the `PIPELINE` ApexFabric V1 delivery branch,
+but synchronization fetches exact commit
+`6513562c9d27eba511322280e19e054c3948ae4d` rather than following mutable branch
+HEAD. The production artifact is the baked-model v4 archive at
+`delivery/apexfabric-v1/intel-285h/traffic/image-2026.08.21-v4.tar`; its size,
+SHA-256, image contract, expected model hashes, and local image identity are
+pinned in `config/pipeline.env`.
+
+Import it after the local registry is running:
+
+```bash
+sudo apt-get install -y git git-lfs
+sudo bash scripts/import-pipeline-traffic-image.sh
+```
+
+The archive path verifies the 1.93 GB Git LFS artifact before loading it. The
+script validates the Linux `amd64` OCI/runtime contract and the six baked
+OpenVINO model files without starting the CV runtime, pushes the versioned tag
+to `127.0.0.1:5000`, verifies the registry manifest digest against its bytes,
+and atomically writes a private immutable lock under `build/pipeline/` for a
+repository run. When that lock still matches the registry, a repeat invocation
+is a no-op. `--mode build` is developer qualification only and is never used by
+automated synchronization.
+
+See [PIPELINE Traffic image provenance](docs/PIPELINE-TRAFFIC-IMAGE.md) for the
+complete v4 provenance, contract, model checksums, and lock format.
+
+For an installed edge, install the root oneshot and persistent timer, run the
+first import, and verify the known-good lock and registry bytes:
+
+```bash
+sudo bash scripts/install-pipeline-image-sync.sh
+sudo systemctl start tvt-pipeline-image-sync.service
+sudo bash scripts/verify-pipeline-image-sync.sh
+```
+
+Installed synchronization stores operational state under
+`/var/lib/tvt/pipeline`. It never deletes older images, generates a bundle, or
+changes a Kubernetes workload.
+
 ### Single-node K3s plane
 
 Install the frozen K3s version and configure its registry mirror. Online
@@ -92,7 +163,6 @@ installation must be requested explicitly:
 
 ```bash
 sudo bash scripts/install-k3s-single-node.sh \
-  --registry registry.local:5000 \
   --download-installer
 ```
 
@@ -101,7 +171,6 @@ binary instead:
 
 ```bash
 sudo bash scripts/install-k3s-single-node.sh \
-  --registry registry.local:5000 \
   --installer /media/tvt/k3s/install.sh \
   --k3s-binary /media/tvt/k3s/k3s
 ```
@@ -110,7 +179,7 @@ Build and publish the two initial control images. This also resolves the
 registry manifests and writes an immutable digest lock:
 
 ```bash
-bash scripts/publish-control-images.sh --registry registry.local:5000
+bash scripts/publish-control-images.sh --registry 127.0.0.1:5000
 ```
 
 Apply and verify the node-management plane using that lock:
@@ -125,8 +194,15 @@ Verification requires a Ready node, healthy reporter/controller rollouts, an
 accepted `ApexNodeStatus`, the controller-owned qualification label, expected
 RBAC, and digest-pinned workload images.
 
-Use `--registry-scheme https` and `--scheme https` for a TLS registry. The
-initial HTTP mode is only for the isolated on-site registry network.
+Verify the complete Docker-to-registry-to-containerd path after K3s is ready:
+
+```bash
+sudo bash scripts/verify-local-registry.sh
+```
+
+The verifier pushes a digest-pinned BusyBox smoke image, resolves its digest
+from the local registry, pulls that immutable reference with `k3s crictl`, and
+confirms it in containerd's image list. It is safe to run repeatedly.
 
 ### Host management plane and Solution Pack lifecycle
 
@@ -142,8 +218,9 @@ sudo systemctl enable --now tvt-edge.service tvt-camera-sync.service \
 ```
 
 The bootstrap creates the local role/database, generates the credential key,
-runs Alembic, and installs—but deliberately does not enable—the units, including
-the fixed K3s API recovery watchdog. Edit the
+runs Alembic, idempotently seeds the vendored v4 Traffic entry into the
+PostgreSQL solution catalog, and installs—but deliberately does not enable—the
+units, including the fixed K3s API recovery watchdog. Edit the
 environment file before enabling them. Initialize the site and register the
 unchanged Traffic bundle with the loopback service:
 
@@ -159,8 +236,23 @@ sudo -u tvt-edge /opt/tvt/venv/bin/tvt-edge init-site \
   plant-01 edge-01 'Plant 01' --timezone Asia/Kolkata
 ```
 
-Register the bundle with `POST http://127.0.0.1:8088/api/v1/deployments` as a
-JSON object containing `bundle`, `namespace`, and `registry`.
+Catalog state is read with `GET /api/v1/solutions` and explicitly refreshed
+from the edge-local OCI registry with `POST /api/v1/solutions/refresh`.
+Refreshing only resolves the v4 tag and availability; it does not register or
+modify deployments. Create or reconfigure a deployment through the Solutions
+page, or call `POST /api/v1/deployments/preview` followed by
+`POST /api/v1/deployments` with the returned `bundle_sha256`. Raw bundle upload
+is restricted to the trusted internal installer endpoint.
+
+Catalog deployment commits accept only an `available` entry with a resolved
+`sha256:` digest. The generated Traffic bundle carries that digest, uses the
+same image for the plan compiler and runtime, mounts camera Secrets and desired
+state, supplies `/plans`, `/tmp/apexfabric`, retained `/state`, `/dev/dri`, and
+`/dev/accel`, and never creates a model mount or model PVC. The synchronization
+worker runs `k3s crictl pull repository@sha256:...` before changing Kubernetes.
+If rollout fails after mutation, it restores the previous complete bundle,
+camera Secret snapshot, and image digest while leaving the failed revision
+pending for operator action or explicit rollback.
 
 The same edge service hosts the React management console at
 `http://127.0.0.1:8088/`. It includes site health, camera onboarding and

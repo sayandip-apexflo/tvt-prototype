@@ -1,0 +1,38 @@
+[Unit]
+Description=Synchronize the pinned PIPELINE Traffic image into the TVT registry
+Requires=docker.service tvt-local-registry.service
+After=network-online.target docker.service tvt-local-registry.service
+Wants=network-online.target
+ConditionArchitecture=x86-64
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=TVT_PIPELINE_STATE_DIR=/var/lib/tvt/pipeline
+EnvironmentFile=-/etc/tvt/pipeline-image-sync.env
+ExecStart=/opt/tvt/scripts/import-pipeline-traffic-image.sh --mode archive --work-dir /var/lib/tvt/pipeline/work --lock-output /var/lib/tvt/pipeline/traffic-image.lock.json --concurrency-lock /var/lib/tvt/pipeline/import.lock
+StateDirectory=tvt/pipeline
+StateDirectoryMode=0700
+TimeoutStartSec=75min
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/tvt/pipeline /run/docker.sock
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+UMask=0077
+

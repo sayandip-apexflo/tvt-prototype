@@ -5,6 +5,7 @@ import unittest
 import uuid
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 import httpx
@@ -15,7 +16,8 @@ from sqlalchemy.pool import StaticPool
 from tvt_edge.api import create_app
 from tvt_edge.cli import parser as edge_parser
 from tvt_edge.cluster import ClusterStatusReader
-from tvt_edge.cluster.sync import SyncWorker
+from tvt_edge.cluster.sync import CrictlImagePuller, SyncWorker
+from apexfabric.solution_management.renderer import render
 from tvt_edge.db.models import (
     Base,
     AuditEvent,
@@ -26,6 +28,7 @@ from tvt_edge.db.models import (
     KubernetesResourceRef,
     LegacyImport,
     SolutionBundleRevision,
+    SolutionCatalogEntry,
     utc_now,
 )
 from tvt_edge.legacy import import_sqlite_lifecycle
@@ -35,6 +38,9 @@ from tvt_runtime.state import DeploymentStore
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CATALOG_DELIVERY = ROOT / "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
+CATALOG_ID = "traffic-edge-runtime:2026.08.21-v4"
+CATALOG_DIGEST = "sha256:" + "1" * 64
 
 
 class FakeKubectl:
@@ -229,6 +235,259 @@ class ManagementPlaneTests(unittest.TestCase):
             "assignment",
             "assignment-1",
         )
+
+    def catalog_service(self, digest=CATALOG_DIGEST):
+        service = ManagementService(
+            self.sessions, self.keyring, catalog_resolver=lambda *_args: digest
+        )
+        service.seed_solution_catalog(CATALOG_DELIVERY, "127.0.0.1:5000")
+        service.refresh_solutions(actor="test", request_id="catalog-refresh")
+        return service
+
+    @staticmethod
+    def catalog_request():
+        return {
+            "catalog_id": CATALOG_ID,
+            "deployment_key": "traffic-v4",
+            "assignments": [
+                {
+                    "camera_id": "camera-01",
+                    "apps": ["wrong_way", "vehicle_counting"],
+                    "fps": 8,
+                    "config": {
+                        "lines": {
+                            "wrong_way": [
+                                {
+                                    "name": "direction",
+                                    "a": [0.1, 0.5],
+                                    "b": [0.9, 0.5],
+                                    "direction": "a_to_b",
+                                }
+                            ]
+                        }
+                    },
+                }
+            ],
+            "inference_mode": "gpu-npu",
+            "resources": {},
+            "state_size": "50Gi",
+            "namespace": "apexfabric",
+        }
+
+    def prepare_catalog_deployment(self):
+        self.service.create_site(
+            "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"
+        )
+        self.onboard()
+        service = self.catalog_service()
+        request = self.catalog_request()
+        preview = service.preview_catalog_deployment(**request)
+        committed = service.commit_catalog_deployment(
+            **request,
+            preview_bundle_sha256=preview["bundle_sha256"],
+            idempotency_key="catalog-commit-1",
+            actor="test",
+            request_id="catalog-commit-1",
+        )
+        return service, request, preview, committed
+
+    def test_catalog_preview_builds_digest_only_complete_runtime_bundle(self):
+        self.service.create_site(
+            "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"
+        )
+        self.onboard()
+        service = self.catalog_service()
+        preview = service.preview_catalog_deployment(**self.catalog_request())
+        bundle = preview["bundle"]
+        self.assertIn("@sha256:", preview["image_reference"])
+        self.assertEqual(
+            bundle["configuration"]["catalog_id"], CATALOG_ID
+        )
+        self.assertNotIn("rtsp://", json.dumps(preview))
+        objects = render(bundle, "apexfabric")
+        pod = next(item for item in objects if item["kind"] == "Deployment")["spec"]["template"]["spec"]
+        main = pod["containers"][0]
+        compiler = pod["initContainers"][0]
+        self.assertEqual(main["image"], compiler["image"])
+        self.assertIn("@sha256:", main["image"])
+        main_mounts = {item["mountPath"] for item in main["volumeMounts"]}
+        compiler_mounts = {item["mountPath"] for item in compiler["volumeMounts"]}
+        self.assertTrue({"/state", "/plans", "/tmp/apexfabric", "/dev/dri", "/dev/accel"}.issubset(main_mounts))
+        self.assertTrue({"/plans", "/tmp/apexfabric", "/dev/dri", "/dev/accel"}.issubset(compiler_mounts))
+        self.assertFalse(any(path.startswith("/models/") for path in main_mounts | compiler_mounts))
+        desired_camera = preview["desired_state"]["cameras"][0]
+        self.assertIn("wrong_way", desired_camera["config"]["lines"])
+
+    def test_catalog_commit_requires_matching_preview_and_available_digest(self):
+        self.service.create_site(
+            "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"
+        )
+        self.onboard()
+        service = self.catalog_service()
+        request = self.catalog_request()
+        with self.assertRaisesRegex(ValueError, "preview it again"):
+            service.commit_catalog_deployment(
+                **request,
+                preview_bundle_sha256="0" * 64,
+                idempotency_key="bad-preview",
+                actor="test",
+                request_id="bad-preview",
+            )
+        with self.sessions.begin() as session:
+            entry = session.get(SolutionCatalogEntry, CATALOG_ID)
+            entry.status = "unresolved"
+            entry.resolved_digest = None
+        with self.assertRaisesRegex(ValueError, "available catalog"):
+            service.preview_catalog_deployment(**request)
+        with self.sessions.begin() as session:
+            entry = session.get(SolutionCatalogEntry, CATALOG_ID)
+            entry.status = "available"
+            entry.resolved_digest = CATALOG_DIGEST
+            entry.tag = "latest"
+        with self.assertRaisesRegex(ValueError, "mutable-only"):
+            service.preview_catalog_deployment(**request)
+
+    def test_catalog_preview_and_commit_are_the_public_deployment_api(self):
+        self.service.create_site(
+            "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"
+        )
+        self.onboard()
+        self.catalog_service()
+        request = self.catalog_request()
+        body = {**request, "deployment_id": request["deployment_key"]}
+        del body["deployment_key"]
+        app = create_app(self.sessions, self.keyring)
+        from types import SimpleNamespace
+        from tvt_edge.api.app import CatalogDeploymentCommit, CatalogDeploymentPreview
+
+        preview_route = self.route_handler(
+            app, "/api/v1/deployments/preview", "POST"
+        )
+        commit_route = self.route_handler(app, "/api/v1/deployments", "POST")
+        preview = preview_route(CatalogDeploymentPreview(**body))
+        commit = commit_route(
+            CatalogDeploymentCommit(
+                **body,
+                preview_bundle_sha256=preview["bundle_sha256"],
+                idempotency_key="api-catalog-commit",
+            ),
+            SimpleNamespace(state=SimpleNamespace(request_id="api:catalog")),
+            None,
+        )
+        self.assertNotIn("rtsp://", json.dumps(preview))
+        self.assertEqual(commit["state"], "pending")
+
+    def test_catalog_sync_pulls_digest_before_any_kubernetes_mutation(self):
+        _service, _request, _preview, _committed = self.prepare_catalog_deployment()
+        client = FakeKubectl()
+        pulls = []
+        SyncWorker(
+            self.sessions,
+            self.keyring,
+            client,
+            worker_id="catalog-worker",
+            image_puller=pulls.append,
+        ).run_once()
+        self.assertEqual(pulls, [f"127.0.0.1:5000/apexfabric/traffic-edge-runtime@{CATALOG_DIGEST}"])
+        self.assertTrue(client.calls)
+
+    def test_production_preflight_uses_k3s_crictl_pull(self):
+        reference = f"127.0.0.1:5000/apexfabric/traffic-edge-runtime@{CATALOG_DIGEST}"
+        with patch("tvt_edge.cluster.sync.subprocess.run") as run:
+            CrictlImagePuller(timeout=17)(reference)
+        run.assert_called_once_with(
+            ["k3s", "crictl", "pull", reference],
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=17,
+        )
+
+    def test_catalog_pull_failure_preserves_applied_state_without_kubernetes_writes(self):
+        _service, _request, _preview, _committed = self.prepare_catalog_deployment()
+        client = FakeKubectl()
+
+        def reject_pull(_reference):
+            raise ValueError("containerd import is unavailable")
+
+        with self.assertRaisesRegex(ValueError, "containerd import is unavailable"):
+            SyncWorker(
+                self.sessions,
+                self.keyring,
+                client,
+                worker_id="pull-failure-worker",
+                image_puller=reject_pull,
+            ).run_once()
+        self.assertEqual(client.calls, [])
+        with self.sessions() as session:
+            sync = session.scalar(select(DeploymentSyncState))
+            self.assertIsNone(sync.applied_assignment_set_id)
+            self.assertEqual(sync.state, "failed")
+
+    def test_rollout_failure_restores_previous_complete_bundle_and_digest(self):
+        service, request, first_preview, first = self.prepare_catalog_deployment()
+        SyncWorker(
+            self.sessions,
+            self.keyring,
+            FakeKubectl(),
+            worker_id="first-worker",
+            image_puller=lambda _reference: None,
+        ).run_once()
+        second_digest = "sha256:" + "2" * 64
+        with self.sessions.begin() as session:
+            entry = session.get(SolutionCatalogEntry, CATALOG_ID)
+            entry.resolved_digest = second_digest
+            entry.status = "available"
+        second_preview = service.preview_catalog_deployment(**request)
+        service.commit_catalog_deployment(
+            **request,
+            preview_bundle_sha256=second_preview["bundle_sha256"],
+            idempotency_key="catalog-commit-2",
+            actor="test",
+            request_id="catalog-commit-2",
+        )
+
+        class FailNewRolloutOnce(FakeKubectl):
+            def __init__(self):
+                super().__init__()
+                self.failed = False
+
+            def run(self, *arguments, input_text=None, check=True):
+                if arguments[:2] == ("rollout", "status") and not self.failed:
+                    self.failed = True
+                    self.calls.append((arguments, input_text))
+                    raise ValueError("new image rollout failed")
+                return super().run(*arguments, input_text=input_text, check=check)
+
+        client = FailNewRolloutOnce()
+        with self.assertRaisesRegex(ValueError, "new image rollout failed"):
+            SyncWorker(
+                self.sessions,
+                self.keyring,
+                client,
+                worker_id="second-worker",
+                image_puller=lambda _reference: None,
+            ).run_once()
+        manifests = "\n".join(text or "" for _args, text in client.calls)
+        self.assertIn(f"@{second_digest}", manifests)
+        self.assertIn(f"@{CATALOG_DIGEST}", manifests)
+        with self.sessions() as session:
+            sync = session.scalar(select(DeploymentSyncState))
+            applied = session.get(DeploymentAssignmentSet, sync.applied_assignment_set_id)
+            attempts = session.scalars(
+                select(DeploymentSyncAttempt).order_by(DeploymentSyncAttempt.started_at)
+            ).all()
+            self.assertEqual(applied.id, first.id)
+            self.assertTrue(attempts[-1].safe_detail["previous_applied_bundle_restored"])
+        rollback = service.rollback(
+            "traffic-v4", first_preview["bundle_sha256"], "test", "explicit-rollback"
+        )
+        with self.sessions() as session:
+            revision = session.get(SolutionBundleRevision, rollback.bundle_revision_id)
+            self.assertEqual(
+                revision.canonical_bundle["applications"][0]["image"]["digest"],
+                CATALOG_DIGEST,
+            )
 
     def test_credentials_are_write_only_and_assignment_revision_is_immutable(self):
         committed = self.commit()

@@ -1,34 +1,133 @@
-"""Persistent Solution Pack catalog backed by immutable OCI image digests."""
+"""Immutable delivery metadata loading and OCI Distribution digest resolution."""
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import re
-import sqlite3
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+import jsonschema
 import yaml
 
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
-MANIFEST_ACCEPT = ", ".join((
-    "application/vnd.oci.image.index.v1+json",
-    "application/vnd.oci.image.manifest.v1+json",
-    "application/vnd.docker.distribution.manifest.list.v2+json",
-    "application/vnd.docker.distribution.manifest.v2+json",
-))
+MANIFEST_ACCEPT = ", ".join(
+    (
+        "application/vnd.oci.image.index.v1+json",
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    )
+)
+MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 
 
 class CatalogError(RuntimeError):
-    pass
+    """Raised when catalog metadata or an OCI registry response is invalid."""
 
 
-def resolve_registry_digest(registry: str, repository: str, reference: str, timeout: int = 10) -> str:
-    """Resolve a registry tag to the digest returned by the V2 manifest API."""
+def _read_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise CatalogError(f"cannot read valid JSON metadata {path.name}: {error}") from error
+
+
+def _sha256(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise CatalogError(f"cannot read catalog metadata {path.name}: {error}") from error
+
+
+def load_delivery_metadata(directory: Path) -> dict[str, Any]:
+    """Load and verify a vendored delivery against its provenance document."""
+
+    provenance = _read_json(directory / "provenance.json")
+    if not isinstance(provenance, dict) or provenance.get("format_version") != 1:
+        raise CatalogError("unsupported or invalid provenance format")
+    files = provenance.get("files")
+    if not isinstance(files, dict) or not files:
+        raise CatalogError("provenance does not record catalog file checksums")
+    checksums: dict[str, str] = {}
+    for filename, record in files.items():
+        if (
+            not isinstance(filename, str)
+            or Path(filename).name != filename
+            or not isinstance(record, dict)
+        ):
+            raise CatalogError("provenance contains an invalid file record")
+        expected = record.get("sha256")
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise CatalogError(f"provenance checksum is invalid for {filename}")
+        actual = _sha256(directory / filename)
+        if actual != expected:
+            raise CatalogError(f"catalog metadata checksum mismatch for {filename}")
+        checksums[filename] = actual
+
+    try:
+        contract = yaml.safe_load(
+            (directory / "image-contract.yaml").read_text(encoding="utf-8")
+        )
+    except (OSError, yaml.YAMLError) as error:
+        raise CatalogError(f"cannot read valid image contract: {error}") from error
+    schema = _read_json(directory / "desired-state.schema.json")
+    example = _read_json(directory / "desired-state.example.json")
+    if not isinstance(contract, dict):
+        raise CatalogError("image contract must be an object")
+    try:
+        jsonschema.Draft202012Validator.check_schema(schema)
+        jsonschema.Draft202012Validator(schema).validate(example)
+    except (jsonschema.SchemaError, jsonschema.ValidationError) as error:
+        raise CatalogError(f"desired-state metadata is invalid: {error.message}") from error
+
+    delivery = provenance.get("delivery") or {}
+    archive = provenance.get("archive") or {}
+    local_image = provenance.get("local_image") or {}
+    if contract.get("name") != "traffic-edge-runtime":
+        raise CatalogError("unexpected solution name in image contract")
+    if str(contract.get("version")) != delivery.get("version"):
+        raise CatalogError("image contract version disagrees with provenance")
+    if contract.get("architectures") != ["amd64"]:
+        raise CatalogError("Traffic delivery must declare only amd64")
+    if contract.get("hardwareProfile") != "intel-285h":
+        raise CatalogError("Traffic delivery hardware profile is not intel-285h")
+    if (contract.get("models") or {}).get("delivery") != "baked-in":
+        raise CatalogError("Traffic delivery must declare baked-in models")
+    if archive.get("loaded_image") != (
+        f"{contract['name']}:intel-285h-{contract['version']}"
+    ):
+        raise CatalogError("loaded image name disagrees with the image contract")
+    expected_catalog_id = f"{contract['name']}:{contract['version']}"
+    if provenance.get("catalog_id") != expected_catalog_id:
+        raise CatalogError("catalog ID disagrees with the image contract")
+    if local_image.get("tag") != f"intel-285h-{contract['version']}":
+        raise CatalogError("local image tag disagrees with the image contract")
+
+    return {
+        "catalog_id": expected_catalog_id,
+        "solution_name": contract["name"],
+        "version": str(contract["version"]),
+        "hardware_profile": contract["hardwareProfile"],
+        "architectures": contract["architectures"],
+        "repository": local_image.get("repository"),
+        "tag": local_image.get("tag"),
+        "contract": contract,
+        "desired_state_schema": schema,
+        "desired_state_example": example,
+        "provenance": provenance,
+        "checksums": checksums,
+    }
+
+
+def resolve_registry_digest(
+    registry: str, repository: str, reference: str, timeout: int = 10
+) -> str:
+    """Resolve a tag and verify the digest against exact manifest bytes."""
+
     registry_url = registry.rstrip("/")
     if "://" not in registry_url:
         registry_url = f"http://{registry_url}"
@@ -39,117 +138,19 @@ def resolve_registry_digest(registry: str, repository: str, reference: str, time
     )
     try:
         with urlopen(request, timeout=timeout) as response:
-            manifest = response.read(4 * 1024 * 1024 + 1)
+            manifest = response.read(MAX_MANIFEST_BYTES + 1)
             digest = response.headers.get("Docker-Content-Digest", "")
-    except (HTTPError, URLError, TimeoutError) as error:
-        raise CatalogError(f"cannot resolve {repository}:{reference}: {error}") from error
-    if not DIGEST_RE.fullmatch(digest):
-        raise CatalogError(f"registry returned an invalid or missing digest for {repository}:{reference}")
-    if len(manifest) > 4 * 1024 * 1024:
+    except (HTTPError, URLError, TimeoutError, OSError) as error:
+        raise CatalogError(
+            f"cannot resolve registry manifest for {repository}:{reference}"
+        ) from error
+    if len(manifest) > MAX_MANIFEST_BYTES:
         raise CatalogError(f"registry manifest is too large for {repository}:{reference}")
+    if not DIGEST_RE.fullmatch(digest):
+        raise CatalogError(
+            f"registry returned an invalid digest for {repository}:{reference}"
+        )
     computed = "sha256:" + hashlib.sha256(manifest).hexdigest()
     if digest != computed:
         raise CatalogError(f"registry digest mismatch for {repository}:{reference}")
     return digest
-
-
-class SolutionCatalog:
-    def __init__(self, database: Path):
-        self.database = database
-        self.database.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
-            connection.execute("""
-                CREATE TABLE IF NOT EXISTS solutions (
-                    catalog_id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    version TEXT NOT NULL,
-                    registry TEXT NOT NULL,
-                    repository TEXT NOT NULL,
-                    tag TEXT NOT NULL,
-                    digest TEXT,
-                    status TEXT NOT NULL,
-                    contract_json TEXT NOT NULL,
-                    desired_state_schema_json TEXT,
-                    desired_state_example_json TEXT,
-                    last_error TEXT,
-                    updated_at TEXT NOT NULL
-                )
-            """)
-
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database)
-        connection.row_factory = sqlite3.Row
-        return connection
-
-    def seed_delivery(self, directory: Path, registry: str, repository: str) -> None:
-        contract = yaml.safe_load((directory / "image-contract.yaml").read_text(encoding="utf-8"))
-        schema_path = directory / "desired-state.schema.json"
-        example_path = directory / "desired-state.example.json"
-        schema = json.loads(schema_path.read_text(encoding="utf-8")) if schema_path.exists() else None
-        example = json.loads(example_path.read_text(encoding="utf-8")) if example_path.exists() else None
-        name = contract["name"]
-        version = str(contract["version"])
-        tag = f"intel-285h-{version}" if name == "traffic-edge-runtime" else version
-        catalog_id = f"{name}:{version}"
-        now = datetime.now(timezone.utc).isoformat()
-        with self._connect() as connection:
-            connection.execute("""
-                INSERT INTO solutions (
-                    catalog_id, name, version, registry, repository, tag, digest, status,
-                    contract_json, desired_state_schema_json, desired_state_example_json,
-                    last_error, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'unresolved', ?, ?, ?, NULL, ?)
-                ON CONFLICT(catalog_id) DO UPDATE SET
-                    name=excluded.name, version=excluded.version, registry=excluded.registry,
-                    repository=excluded.repository, tag=excluded.tag,
-                    contract_json=excluded.contract_json,
-                    desired_state_schema_json=excluded.desired_state_schema_json,
-                    desired_state_example_json=excluded.desired_state_example_json,
-                    updated_at=excluded.updated_at
-            """, (
-                catalog_id, name, version, registry, repository, tag,
-                json.dumps(contract, sort_keys=True),
-                json.dumps(schema, sort_keys=True) if schema is not None else None,
-                json.dumps(example, sort_keys=True) if example is not None else None,
-                now,
-            ))
-
-    @staticmethod
-    def _row(row: sqlite3.Row) -> dict[str, Any]:
-        result = dict(row)
-        result["contract"] = json.loads(result.pop("contract_json"))
-        schema = result.pop("desired_state_schema_json")
-        example = result.pop("desired_state_example_json")
-        result["desired_state_schema"] = json.loads(schema) if schema else None
-        result["desired_state_example"] = json.loads(example) if example else None
-        result["image"] = {
-            "repository": f"{result['registry']}/{result['repository']}",
-            "tag": result["tag"],
-            "digest": result["digest"],
-        }
-        return result
-
-    def list(self) -> list[dict[str, Any]]:
-        with self._connect() as connection:
-            rows = connection.execute("SELECT * FROM solutions ORDER BY name, version").fetchall()
-        return [self._row(row) for row in rows]
-
-    def get(self, catalog_id: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
-            row = connection.execute("SELECT * FROM solutions WHERE catalog_id = ?", (catalog_id,)).fetchone()
-        return self._row(row) if row else None
-
-    def refresh(self) -> list[dict[str, Any]]:
-        with self._connect() as connection:
-            rows = connection.execute("SELECT catalog_id, registry, repository, tag FROM solutions").fetchall()
-            for row in rows:
-                try:
-                    digest = resolve_registry_digest(row["registry"], row["repository"], row["tag"])
-                    status, error = "available", None
-                except CatalogError as caught:
-                    digest, status, error = None, "unavailable", str(caught)
-                connection.execute(
-                    "UPDATE solutions SET digest=?, status=?, last_error=?, updated_at=? WHERE catalog_id=?",
-                    (digest, status, error, datetime.now(timezone.utc).isoformat(), row["catalog_id"]),
-                )
-        return self.list()

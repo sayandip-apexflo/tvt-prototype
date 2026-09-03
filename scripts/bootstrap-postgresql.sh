@@ -104,6 +104,11 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
   GRANT USAGE, SELECT ON SEQUENCES TO "tvt-edge";
 SQL
+runuser -u tvt-edge -- env TVT_DATABASE_URL=postgresql+psycopg:///tvt \
+  "${VENV}/bin/tvt-edge" seed-solutions \
+  --delivery-directory \
+  "${REPO_ROOT}/solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4" \
+  --registry 127.0.0.1:5000
 runuser -u postgres -- psql -v ON_ERROR_STOP=1 -d tvt <<'SQL'
 GRANT CONNECT ON DATABASE tvt TO "tvt-alert";
 GRANT USAGE ON SCHEMA public TO "tvt-alert";
