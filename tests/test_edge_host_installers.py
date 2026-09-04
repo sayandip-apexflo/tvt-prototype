@@ -20,6 +20,7 @@ class EdgeHostInstallerTests(unittest.TestCase):
             ROOT / "install-tvt-edge-host.sh",
             ROOT / "scripts/build-tvt-edge-release.sh",
             ROOT / "scripts/make-tvt-edge-release.sh",
+            ROOT / "scripts/make-tvt-online-test-kit.sh",
             ROOT / "scripts/verify-tvt-edge-release.sh",
             ROOT / "scripts/lib/tvt-installer-common.sh",
         ]
