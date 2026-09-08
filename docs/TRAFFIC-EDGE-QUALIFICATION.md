@@ -67,7 +67,7 @@ package in `/opt/tvt/venv`, then install the runner and pinned contracts:
 
 ```bash
 sudo bash scripts/install-traffic-qualification.sh
-sudo /opt/tvt/scripts/qualify-traffic-edge.sh traffic-v4 \
+sudo /opt/tvt/venv/bin/tvt-traffic-qualify traffic-v4 \
   --strict-events \
   --output /var/lib/tvt/qualification/traffic-v4-steady.json
 ```
@@ -83,7 +83,7 @@ deployment ID, namespace, inference settings, resources, state size, and
 camera-ID/application assignments. Then run:
 
 ```bash
-sudo /opt/tvt/scripts/qualify-traffic-edge.sh traffic-v4 \
+sudo /opt/tvt/venv/bin/tvt-traffic-qualify traffic-v4 \
   --deployment-request /var/lib/tvt/qualification/deployment-request.json \
   --commit-preview \
   --idempotency-key phase5-traffic-v4-001 \
@@ -101,12 +101,12 @@ Capture a passing pre-reboot report, perform the reboot separately, and pass
 the original report as the post-reboot baseline:
 
 ```bash
-sudo /opt/tvt/scripts/qualify-traffic-edge.sh traffic-v4 \
+sudo /opt/tvt/venv/bin/tvt-traffic-qualify traffic-v4 \
   --checkpoint pre-reboot \
   --output /var/lib/tvt/qualification/traffic-v4-pre-reboot.json
 sudo reboot
 # Wait for the host and services to return.
-sudo /opt/tvt/scripts/qualify-traffic-edge.sh traffic-v4 \
+sudo /opt/tvt/venv/bin/tvt-traffic-qualify traffic-v4 \
   --checkpoint post-reboot \
   --baseline /var/lib/tvt/qualification/traffic-v4-pre-reboot.json \
   --output /var/lib/tvt/qualification/traffic-v4-post-reboot.json
@@ -123,7 +123,7 @@ Obtain the exact complete bundle digest from its safe report or deployment
 history, then run:
 
 ```bash
-sudo /opt/tvt/scripts/qualify-traffic-edge.sh traffic-v4 \
+sudo /opt/tvt/venv/bin/tvt-traffic-qualify traffic-v4 \
   --checkpoint post-rollback \
   --baseline /var/lib/tvt/qualification/traffic-v4-target-baseline.json \
   --rollback-bundle-sha256 <target-complete-bundle-sha256> \

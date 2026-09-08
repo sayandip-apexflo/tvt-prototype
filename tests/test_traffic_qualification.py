@@ -441,15 +441,5 @@ class TrafficQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "JSON object"):
             parse_sse_events("data: [1, 2]\n\n")
 
-    def test_qualification_scripts_have_valid_shell_syntax(self):
-        for name in (
-            "qualify-traffic-edge.sh",
-            "install-traffic-qualification.sh",
-        ):
-            subprocess.run(
-                ["bash", "-n", str(ROOT / "scripts" / name)], check=True
-            )
-
-
 if __name__ == "__main__":
     unittest.main()

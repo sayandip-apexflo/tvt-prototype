@@ -348,13 +348,6 @@ The management API exposes `GET /api/v1/alerts`, acknowledgement at
 `POST /api/v1/alerts/{alert_id}/acknowledge`, and redacted outbox history at
 `GET /api/v1/alerts/{alert_id}/notifications`.
 
-Existing installations should enable K3s datastore Secret encryption during a
-reviewed maintenance window:
-
-```bash
-sudo bash scripts/enable-k3s-secrets-encryption.sh
-```
-
 New K3s installs enable `secretbox` datastore encryption automatically. The
 management database stores camera credentials only as AES-256-GCM ciphertext;
 the API never returns credential material, logs and error details are redacted,
