@@ -9,6 +9,78 @@ The commands below use the `0.1.0-0090aca6ffef` kit as an example. Substitute
 the filename and extracted directory printed by the current build report when
 using a newer kit.
 
+## Automated, resumable Steps 1-10
+
+`scripts/install-tvt-online-steps-1-10.sh` performs the target-side work in
+this runbook as one fail-fast, resumable command. Transfer that script beside
+the current archive and checksum; transfer remains a workstation action and
+the SSH password must still be entered interactively. The script records a
+root-only pre-install baseline in `/var/lib/tvt-online-test-install` before it
+changes the host. That baseline is required by the paired reset script.
+
+On the target, run one command with deployment-specific, non-secret site
+values:
+
+```bash
+sudo bash /home/admin1/install-tvt-online-steps-1-10.sh --archive /home/admin1/tvt-edge-online-test-kit-0.1.0-0090aca6ffef.tar.gz --checksum /home/admin1/tvt-edge-online-test-kit-0.1.0-0090aca6ffef.tar.gz.sha256 --site-id plant-1 --edge-id plant-1-edge-1 --site-name "Plant 1" --timezone Asia/Kolkata --install-group admin1
+```
+
+Exit status `194` means that a required reboot boundary was reached. Reboot,
+reconnect, and run the exact same one-line command. Completed stages are not
+repeated. A pre-existing K3s agent is removed only when the command also has
+`--approve-k3s-agent-removal`; a server or partial Kubernetes installation is
+rejected before host mutation. Original agent credentials are never captured,
+so the reset cannot rejoin that former cluster.
+
+The combined installer verifies the outer checksum, every internally listed
+file, the artifact manifest, driver/OpenVINO devices, local Registry, exact
+bundled K3s pin, node-management plane, Traffic import, PostgreSQL, TVT units,
+timers, API health, and the TVT self-check. It loads the Traffic image and
+catalog but does not deploy Traffic workloads or configure cameras, external
+monitoring, notification policy, or email delivery.
+
+Run the paired reset without options to print its impact without changing the
+host:
+
+```bash
+sudo bash /opt/tvt/tvt-edge-online-test-kit-0.1.0-0090aca6ffef/source/scripts/reset-tvt-online-test-host.sh
+```
+
+After review and explicit approval, its destructive form is:
+
+```bash
+sudo bash /opt/tvt/tvt-edge-online-test-kit-0.1.0-0090aca6ffef/source/scripts/reset-tvt-online-test-host.sh --execute --confirm ERASE-TVT-ONLINE-TEST
+```
+
+It drops the TVT database and roles, uninstalls the test K3s server and its
+cluster/local-storage state, removes TVT services/accounts/runtime, removes
+only Docker tags introduced during the run, restores changed or displaced
+package versions, purges packages absent from the baseline, restores prior
+manual-package and Docker/PostgreSQL service states, and preserves the
+transferred archive in `/home`. It refuses to operate without its paired
+baseline. Reboot after it completes before starting the next test cycle.
+
+For a deliberately destructive lab reset that ignores the baseline and also
+removes matching components that predate TVT, first review its plan:
+
+```bash
+sudo bash /opt/tvt/tvt-edge-online-test-kit-0.1.0-0090aca6ffef/source/scripts/reset-tvt-online-test-host.sh --force-full-stack
+```
+
+Run it only when loss of all K3s/Kubernetes state, every Docker/containerd
+container/image/volume, every PostgreSQL cluster/database, and the installed
+Intel userspace GPU/NPU/media stack is acceptable:
+
+```bash
+sudo bash /opt/tvt/tvt-edge-online-test-kit-0.1.0-0090aca6ffef/source/scripts/reset-tvt-online-test-host.sh --force-full-stack --execute --confirm ERASE-ENTIRE-TVT-STACK
+```
+
+This mode preserves files under `/home`, the Ubuntu kernel, and its built-in
+`i915`, `xe`, and `intel_vpu` modules. Removing the qualified kernel or
+essential Ubuntu utilities would make the device unable to run Steps 1-10.
+The mode intentionally does not run a global `apt autoremove`, because that
+could delete unrelated orphaned OS packages outside the named stack.
+
 ## 1. Transfer the archive
 
 Run on the build workstation:

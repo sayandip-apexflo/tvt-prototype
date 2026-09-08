@@ -330,6 +330,15 @@ cannot read home directories. The complete command sequence is in
 variables after every SSH reconnect or reboot, and copy underscores literally;
 do not escape them as \`\\_\`.
 
+For a clean test host, \`source/scripts/install-tvt-online-steps-1-10.sh\`
+provides the same target-side sequence as one resumable command. Copy that
+script out of the archive or transfer the repository copy beside the archive
+before starting. Exit status 194 is an intentional reboot boundary: reboot,
+reconnect, and rerun the same command. Its paired
+\`source/scripts/reset-tvt-online-test-host.sh\` defaults to a non-mutating plan
+and requires both a captured pre-install baseline and explicit destructive
+confirmation.
+
 ## Target order
 
 Run from the extracted \`source/\` directory on Ubuntu 24.04 amd64:

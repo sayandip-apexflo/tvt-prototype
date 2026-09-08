@@ -113,6 +113,15 @@ if [[ "${installed_version}" != "${K3S_VERSION}" ]]; then
   echo "installed K3s ${installed_version} does not match pinned ${K3S_VERSION}" >&2
   exit 1
 fi
+nodes_seen=false
+for _attempt in {1..60}; do
+  if "${SUDO[@]}" k3s kubectl get nodes -o name 2>/dev/null | grep -q '^node/'; then
+    nodes_seen=true
+    break
+  fi
+  sleep 2
+done
+${nodes_seen} || { echo "K3s did not register its node within 120 seconds" >&2; exit 1; }
 "${SUDO[@]}" k3s kubectl wait --for=condition=Ready node --all --timeout=180s
 mapfile -t nodes < <("${SUDO[@]}" k3s kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
 if [[ ${#nodes[@]} -ne 1 || -z "${nodes[0]}" ]]; then

@@ -20,27 +20,30 @@ def _module_loaded(*names: str) -> bool:
     return any((Path("/sys/module") / name).exists() for name in names)
 
 
-def _va_api_available() -> tuple[bool, str | None]:
+def _va_api_available(render_nodes: list[str]) -> tuple[bool, str | None]:
     executable = shutil.which("vainfo")
-    if executable is None:
+    if executable is None or not render_nodes:
         return False, None
-    try:
-        result = subprocess.run(
-            [executable],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env={**os.environ, "LIBVA_DISPLAY": os.getenv("LIBVA_DISPLAY", "drm")},
+    for device in render_nodes:
+        try:
+            result = subprocess.run(
+                [executable, "--display", "drm", "--device", device],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env={**os.environ, "LIBVA_DISPLAY": "drm"},
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        output = (result.stdout + result.stderr).strip()
+        version = next(
+            (line.strip() for line in output.splitlines() if "VA-API version" in line),
+            None,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return False, None
-    output = (result.stdout + result.stderr).strip()
-    version = next(
-        (line.strip() for line in output.splitlines() if "VA-API version" in line),
-        None,
-    )
-    return result.returncode == 0, version
+        if result.returncode == 0:
+            return True, version
+    return False, None
 
 
 def discover() -> dict[str, Any]:
@@ -52,7 +55,7 @@ def discover() -> dict[str, Any]:
 
     gpu_nodes = _device_nodes("/dev/dri/renderD*")
     npu_nodes = _device_nodes("/dev/accel/accel*")
-    va_available, va_version = _va_api_available()
+    va_available, va_version = _va_api_available(gpu_nodes)
     return {
         "schema_version": "tvt-1.0.0",
         "hardware": {

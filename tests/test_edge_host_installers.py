@@ -43,6 +43,8 @@ class EdgeHostInstallerTests(unittest.TestCase):
             "scripts/install-k3s-plane.sh", "scripts/verify-k3s-plane.sh",
             "scripts/import-pipeline-traffic-image.sh", "scripts/verify-pipeline-image-inspect.py",
             "scripts/verify-docker-archive-tag.py",
+            "scripts/install-tvt-online-steps-1-10.sh",
+            "scripts/reset-tvt-online-test-host.sh",
             "scripts/verify-pipeline-image-sync.sh", "scripts/install-pipeline-image-sync.sh",
             "scripts/bootstrap-postgresql.sh", "scripts/install-tvt-kubeconfig.sh",
             "scripts/install-traffic-qualification.sh",

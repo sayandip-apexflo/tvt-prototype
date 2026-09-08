@@ -17,6 +17,7 @@ class BootstrapScriptTests(unittest.TestCase):
         self.assertIn("refusing to reconfigure an existing non-single-node cluster", installer)
         self.assertIn("an existing K3s agent installation was detected", installer)
         self.assertIn("a K3s binary exists without a K3s server service", installer)
+        self.assertIn("K3s did not register its node within 120 seconds", installer)
 
     def test_plane_requires_digest_lock_and_verification(self):
         installer = self.text("install-k3s-plane.sh")
@@ -25,6 +26,15 @@ class BootstrapScriptTests(unittest.TestCase):
         self.assertIn("tvt_runtime.image_lock render", installer)
         self.assertIn("@sha256:", verifier)
         self.assertIn("apexnodestatus", verifier)
+
+    def test_node_reporter_has_explicit_test_kit_device_access(self):
+        manifest = (ROOT / "deploy/k8s/apexfabric-node-management.yaml").read_text()
+        discovery = (
+            ROOT / "apexfabric/node_management/discovery/discovery.py"
+        ).read_text()
+        self.assertIn("privileged: true", manifest)
+        self.assertIn("seccompProfile: {type: Unconfined}", manifest)
+        self.assertIn('[executable, "--display", "drm", "--device", device]', discovery)
 
     def test_registry_file_is_installed_private(self):
         configuration = self.text("configure-k3s-registry.sh")
