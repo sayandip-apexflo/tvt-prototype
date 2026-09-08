@@ -177,10 +177,11 @@ sudo python3 -m json.tool /var/lib/tvt/hardware-driver-recipe.json
 sudo reboot
 ```
 
-This installs the locked Intel stack, `metis-dkms` 1.4.17, and the Voyager
-1.6.1 runtime. The Metis DKMS build requires headers for the running kernel.
-With Secure Boot enabled, enroll the generated module-signing MOK during the
-reboot before continuing.
+This always installs the locked Intel compute/media stack. It first checks PCI
+sysfs for Axelera vendor ID `0x1f9d`; only an equipped host gets
+`metis-dkms` 1.4.17 and Voyager 1.6.1. The Metis DKMS build requires headers
+for the running kernel. With Secure Boot enabled, enroll the generated
+module-signing MOK during the reboot before continuing.
 
 The normal command is correct for a 285H. Use `--allow-unverified-hardware`
 only after separately auditing a non-285H equivalent; that override bypasses
@@ -196,9 +197,7 @@ TVT_KIT_ROOT=/opt/tvt/tvt-edge-online-test-kit-0.1.0-0090aca6ffef
 
 test -e /dev/dri/renderD128
 test -e /dev/accel/accel0
-test -d /sys/class/metis
-compgen -G '/dev/metis-*'
-lsmod | grep -E '^(i915|xe|intel_vpu|metis)\b'
+lsmod | grep -E '^(i915|xe|intel_vpu)\b'
 vainfo --display drm --device /dev/dri/renderD128
 clinfo -l
 
@@ -212,6 +211,10 @@ if missing:
     raise SystemExit("missing OpenVINO devices: " + ", ".join(sorted(missing)))
 PY
 
+# Run these Metis/Voyager checks only when an Axelera card is present:
+test -d /sys/class/metis
+compgen -G '/dev/metis-*'
+lsmod | grep -E '^metis\b'
 /opt/apexfabric/voyager-1.6.1/bin/python - <<'PY'
 import importlib.metadata
 import axelera.runtime

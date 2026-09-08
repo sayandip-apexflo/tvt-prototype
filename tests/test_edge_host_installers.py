@@ -63,6 +63,9 @@ class EdgeHostInstallerTests(unittest.TestCase):
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(relative.encode())
+        (root / "hardware/driver-recipe.json").write_text(
+            json.dumps({"voyager": {"enabled": True}}), encoding="utf-8"
+        )
         (root / "manifest.json").write_text(
             json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
         )
@@ -229,6 +232,10 @@ tvt_run_stage {state} 0.1.0 sample worker
             'dkms status -m metis',
             'Pin-Priority: 1001',
             'voyager-wheels',
+            'TVT_PCI_SYSFS_ROOT',
+            '0x1f9d',
+            'ocl-icd-libopencl1',
+            '"enabled": axelera_enabled',
         ):
             self.assertIn(required, installer)
         self.assertIn('"schema_version": 2', installer)
@@ -282,6 +289,7 @@ tvt_run_stage {state} 0.1.0 sample worker
                 "apt": {"metis-dkms": "1.4.17"},
                 "wheels": {"openvino.whl": hashlib.sha256(wheel).hexdigest()},
                 "voyager": {
+                    "enabled": True,
                     "runtime_version": "1.6.1",
                     "driver_package": "metis-dkms",
                     "driver_version": "1.4.17",
@@ -316,12 +324,10 @@ tvt_run_stage {state} 0.1.0 sample worker
                 "python3", str(ROOT / "scripts/tvt-release-inputs.py"),
                 "--input-directory", str(root),
             ]
-            subprocess.run(
-                base[:2] + ["create", *base[2:], "--output", str(lock),
-                 "--release-version", "0.1.0", "--source-commit", "a" * 40,
-                 "--platform-config", str(platform), "--pipeline-config", str(pipeline)],
-                check=True,
-            )
+            create = base[:2] + ["create", *base[2:], "--output", str(lock),
+                "--release-version", "0.1.0", "--source-commit", "a" * 40,
+                "--platform-config", str(platform), "--pipeline-config", str(pipeline)]
+            subprocess.run(create, check=True)
             verify = base[:2] + ["verify", *base[2:], "--lock", str(lock),
                 "--release-version", "0.1.0", "--source-commit", "a" * 40,
                 "--platform-config", str(platform), "--pipeline-config", str(pipeline)]
@@ -335,6 +341,25 @@ tvt_run_stage {state} 0.1.0 sample worker
             rejected = subprocess.run(verify, capture_output=True, text=True)
             self.assertNotEqual(rejected.returncode, 0)
             self.assertIn("does not match its lock", rejected.stderr)
+
+            # An Intel-only closure is valid without Metis or Voyager artifacts.
+            (root / "images/registry.tar").write_bytes(b"registry")
+            (root / "hardware/voyager-wheels/axelera_rt.whl").unlink()
+            recipe["apt"] = {}
+            recipe["voyager"] = {
+                "enabled": False,
+                "runtime_version": None,
+                "driver_package": None,
+                "driver_version": None,
+                "firmware_recommended": None,
+                "board_controller_recommended": None,
+                "wheels": {},
+            }
+            (root / "hardware/driver-recipe.json").write_text(
+                json.dumps(recipe), encoding="utf-8"
+            )
+            subprocess.run(create, check=True)
+            subprocess.run(verify, check=True)
 
 
 if __name__ == "__main__":

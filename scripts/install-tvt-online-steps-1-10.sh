@@ -15,6 +15,19 @@ APPROVE_AGENT_REMOVAL=false
 
 log() { printf 'tvt-online-install: %s\n' "$*"; }
 fail() { printf 'tvt-online-install: ERROR: %s\n' "$*" >&2; exit 1; }
+axelera_hardware_present() {
+  local pci_root="${TVT_PCI_SYSFS_ROOT:-/sys/bus/pci/devices}"
+  local vendor_file vendor
+  local -a vendor_files
+  shopt -s nullglob
+  vendor_files=("${pci_root}"/*/vendor)
+  shopt -u nullglob
+  for vendor_file in "${vendor_files[@]}"; do
+    read -r vendor <"${vendor_file}" || continue
+    [[ ${vendor,,} == 0x1f9d ]] && return 0
+  done
+  return 1
+}
 usage() {
   echo "usage: sudo bash scripts/install-tvt-online-steps-1-10.sh --archive FILE --checksum FILE --site-id ID --edge-id ID --site-name NAME [--timezone ZONE] [--install-group GROUP] [--approve-k3s-agent-removal]" >&2
 }
@@ -289,14 +302,21 @@ fi
 
 if ((stage < 3)); then
   [[ $(<"${STATE_DIR}/driver-install-boot-id") != "$(cat /proc/sys/kernel/random/boot_id)" ]] || fail "reboot after driver installation has not occurred"
-  log "verifying Intel GPU/NPU, Metis, VA-API, OpenCL, OpenVINO, and Voyager"
+  axelera_present=false
+  if axelera_hardware_present; then axelera_present=true; fi
+  locked_axelera="$(jq -r '.voyager.enabled' /var/lib/tvt/hardware-driver-recipe.json)"
+  [[ ${locked_axelera} == "${axelera_present}" ]] || fail "current Axelera PCI hardware presence does not match the installed driver recipe"
+  log "verifying the Intel GPU/NPU, VA-API, OpenCL, and OpenVINO stack"
   [[ -e /dev/dri/renderD128 && -e /dev/accel/accel0 ]] || fail "required Intel device nodes are missing"
   lsmod | grep -Eq '^(i915|xe)\b' || fail "Intel GPU module is not loaded"
   lsmod | grep -Eq '^intel_vpu\b' || fail "Intel NPU module is not loaded"
-  lsmod | grep -Eq '^metis\b' || fail "Metis PCIe module is not loaded"
-  [[ -d /sys/class/metis ]] || fail "/sys/class/metis is missing"
-  compgen -G '/dev/metis-*' >/dev/null || fail "Metis device nodes are missing"
-  [[ $(dpkg-query -W -f='${Version}' metis-dkms 2>/dev/null || true) == 1.4.17 ]] || fail "metis-dkms 1.4.17 is not installed"
+  if ${axelera_present}; then
+    log "Axelera PCI hardware detected; verifying Metis and Voyager"
+    lsmod | grep -Eq '^metis\b' || fail "Metis PCIe module is not loaded"
+    [[ -d /sys/class/metis ]] || fail "/sys/class/metis is missing"
+    compgen -G '/dev/metis-*' >/dev/null || fail "Metis device nodes are missing"
+    [[ $(dpkg-query -W -f='${Version}' metis-dkms 2>/dev/null || true) == 1.4.17 ]] || fail "metis-dkms 1.4.17 is not installed"
+  fi
   vainfo --display drm --device /dev/dri/renderD128 >/dev/null
   clinfo -l
   /opt/apexfabric/openvino-env/bin/python - <<'PY'
@@ -307,7 +327,8 @@ print("OpenVINO devices:", sorted(devices))
 if missing:
     raise SystemExit("missing OpenVINO devices: " + ", ".join(sorted(missing)))
 PY
-  /opt/apexfabric/voyager-1.6.1/bin/python - <<'PY'
+  if ${axelera_present}; then
+    /opt/apexfabric/voyager-1.6.1/bin/python - <<'PY'
 import importlib.metadata
 import axelera.runtime
 version = importlib.metadata.version("axelera-rt")
@@ -315,10 +336,11 @@ print("Voyager runtime:", version)
 if version != "1.6.1":
     raise SystemExit(f"axelera-rt is {version}; expected 1.6.1")
 PY
+  fi
   rm -f /var/lib/tvt/hardware-driver-reboot-required
   write_stage 3
   stage=3
-  log "hardware verification passed: Intel GPU/NPU, Metis, OpenVINO, and Voyager 1.6.1 are available"
+  log "hardware verification passed for the detected accelerator set"
 fi
 
 if ((stage < 4)); then

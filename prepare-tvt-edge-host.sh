@@ -126,16 +126,39 @@ install_hardware() {
   [[ -f ${REBOOT_MARKER} ]] || tvt_fail "hardware installer did not create its reboot marker"
 }
 
+axelera_hardware_present() {
+  local pci_root="${TVT_PCI_SYSFS_ROOT:-/sys/bus/pci/devices}"
+  local vendor_file vendor
+  local -a vendor_files
+  shopt -s nullglob
+  vendor_files=("${pci_root}"/*/vendor)
+  shopt -u nullglob
+  for vendor_file in "${vendor_files[@]}"; do
+    read -r vendor <"${vendor_file}" || continue
+    [[ ${vendor,,} == 0x1f9d ]] && return 0
+  done
+  return 1
+}
+
 verify_post_reboot() {
+  local axelera_present=false
+  if axelera_hardware_present; then axelera_present=true; fi
+  local locked_axelera hardware_recipe
+  hardware_recipe="${TVT_HARDWARE_STATE_DIRECTORY:-/var/lib/tvt}/hardware-driver-recipe.json"
+  locked_axelera="$(tvt_json_get "${hardware_recipe}" voyager.enabled 2>/dev/null || true)"
+  [[ ${locked_axelera} == "${axelera_present}" ]] || tvt_fail \
+    "current Axelera PCI hardware presence does not match the installed driver recipe"
   [[ -e /dev/dri/renderD128 ]] || tvt_fail "/dev/dri/renderD128 is missing"
   [[ -e /dev/accel/accel0 ]] || tvt_fail "/dev/accel/accel0 is missing"
   if ! grep -Eq '^(i915|xe) ' /proc/modules; then tvt_fail "neither i915 nor xe is loaded"; fi
   grep -Eq '^intel_vpu ' /proc/modules || tvt_fail "intel_vpu is not loaded"
-  grep -Eq '^metis ' /proc/modules || tvt_fail "Metis PCIe module is not loaded"
-  [[ -d /sys/class/metis ]] || tvt_fail "/sys/class/metis is missing"
-  compgen -G '/dev/metis-*' >/dev/null || tvt_fail "Metis device nodes are missing"
-  [[ $(dpkg-query -W -f='${Version}' metis-dkms 2>/dev/null || true) == 1.4.17 ]] || \
-    tvt_fail "metis-dkms 1.4.17 is not installed"
+  if ${axelera_present}; then
+    grep -Eq '^metis ' /proc/modules || tvt_fail "Metis PCIe module is not loaded"
+    [[ -d /sys/class/metis ]] || tvt_fail "/sys/class/metis is missing"
+    compgen -G '/dev/metis-*' >/dev/null || tvt_fail "Metis device nodes are missing"
+    [[ $(dpkg-query -W -f='${Version}' metis-dkms 2>/dev/null || true) == 1.4.17 ]] || \
+      tvt_fail "metis-dkms 1.4.17 is not installed"
+  fi
   timeout 30s vainfo >/dev/null 2>&1 || tvt_fail "vainfo verification failed"
   timeout 30s clinfo -l >/dev/null 2>&1 || tvt_fail "clinfo platform listing failed"
   local openvino_python="${TVT_OPENVINO_PYTHON:-/opt/apexfabric/openvino-env/bin/python}"
@@ -147,15 +170,17 @@ missing = {"CPU", "GPU", "NPU"} - devices
 if missing:
     raise SystemExit("OpenVINO devices missing: " + ", ".join(sorted(missing)))
 PY
-  local voyager_python="${TVT_VOYAGER_PYTHON:-/opt/apexfabric/voyager-1.6.1/bin/python}"
-  [[ -x ${voyager_python} ]] || tvt_fail "Voyager 1.6.1 runtime environment is missing"
-  "${voyager_python}" - <<'PY'
+  if ${axelera_present}; then
+    local voyager_python="${TVT_VOYAGER_PYTHON:-/opt/apexfabric/voyager-1.6.1/bin/python}"
+    [[ -x ${voyager_python} ]] || tvt_fail "Voyager 1.6.1 runtime environment is missing"
+    "${voyager_python}" - <<'PY'
 import importlib.metadata
 import axelera.runtime
 version = importlib.metadata.version("axelera-rt")
 if version != "1.6.1":
     raise SystemExit(f"axelera-rt is {version}; expected 1.6.1")
 PY
+  fi
   systemctl is-active --quiet docker.service || tvt_fail "Docker is not active"
   docker info >/dev/null 2>&1 || tvt_fail "Docker is not healthy"
   systemctl is-active --quiet postgresql.service || tvt_fail "PostgreSQL is not active"

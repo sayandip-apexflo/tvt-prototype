@@ -17,6 +17,7 @@ readonly VOYAGER_RUNTIME_VERSION="1.6.1"
 readonly METIS_FIRMWARE_RECOMMENDED="1.6.0"
 readonly METIS_BOARD_CONTROLLER_RECOMMENDED="7.4"
 readonly VOYAGER_PYPI_INDEX="https://software.axelera.ai/artifactory/api/pypi/axelera-pypi/simple"
+readonly PCI_SYSFS_ROOT="${TVT_PCI_SYSFS_ROOT:-/sys/bus/pci/devices}"
 readonly STATE_DIRECTORY="${TVT_HARDWARE_STATE_DIRECTORY:-/var/lib/tvt}"
 readonly CACHE_DIRECTORY="${TVT_HARDWARE_CACHE_DIRECTORY:-/var/cache/tvt/hardware-drivers}"
 readonly LOCK_FILE="${STATE_DIRECTORY}/hardware-driver-recipe.json"
@@ -50,10 +51,11 @@ if [[ ${MODE} == offline ]]; then
   BUNDLE="$(cd "${BUNDLE}" && pwd -P)"
 fi
 
-readonly -a APT_PACKAGES=(
+APT_PACKAGES=(
   libze-intel-gpu1
   libze1
   intel-opencl-icd
+  ocl-icd-libopencl1
   clinfo
   intel-gsc
   intel-media-va-driver-non-free
@@ -64,10 +66,6 @@ readonly -a APT_PACKAGES=(
   vainfo
   libtbb12
   python3-venv
-  dkms
-  build-essential
-  "linux-headers-$(uname -r)"
-  metis-dkms
 )
 readonly -a PYTHON_PACKAGES=(openvino openvino-genai)
 readonly -a VOYAGER_PYTHON_PACKAGES=("axelera-rt==${VOYAGER_RUNTIME_VERSION}")
@@ -76,8 +74,6 @@ readonly -a VOYAGER_PYTHON_PACKAGES=("axelera-rt==${VOYAGER_RUNTIME_VERSION}")
 [[ ! -L ${STATE_DIRECTORY} ]] || fail "refusing symlinked state directory: ${STATE_DIRECTORY}"
 [[ ! -L ${CACHE_DIRECTORY} ]] || fail "refusing symlinked cache directory: ${CACHE_DIRECTORY}"
 [[ ! -L ${VENV_DIRECTORY} ]] || fail "refusing symlinked OpenVINO environment: ${VENV_DIRECTORY}"
-[[ ! -L ${VOYAGER_VENV_DIRECTORY} ]] || fail "refusing symlinked Voyager environment: ${VOYAGER_VENV_DIRECTORY}"
-[[ ! -L ${METIS_APT_PREFERENCE} ]] || fail "refusing symlinked Metis APT preference: ${METIS_APT_PREFERENCE}"
 [[ -r /etc/os-release ]] || fail "/etc/os-release is missing"
 
 # shellcheck disable=SC1091
@@ -100,12 +96,37 @@ if ! modinfo i915 >/dev/null 2>&1 && ! modinfo xe >/dev/null 2>&1; then
   fail "kernel $(uname -r) provides neither the i915 nor xe Intel graphics module"
 fi
 
+AXELERA_HARDWARE_PRESENT=false
+axelera_pci_address=""
+shopt -s nullglob
+vendor_files=("${PCI_SYSFS_ROOT}"/*/vendor)
+shopt -u nullglob
+for vendor_file in "${vendor_files[@]}"; do
+  read -r pci_vendor <"${vendor_file}" || continue
+  if [[ ${pci_vendor,,} == 0x1f9d ]]; then
+    AXELERA_HARDWARE_PRESENT=true
+    axelera_pci_address="$(basename "$(dirname "${vendor_file}")")"
+    break
+  fi
+done
+if ${AXELERA_HARDWARE_PRESENT}; then
+  [[ ! -L ${VOYAGER_VENV_DIRECTORY} ]] || fail "refusing symlinked Voyager environment: ${VOYAGER_VENV_DIRECTORY}"
+  [[ ! -L ${METIS_APT_PREFERENCE} ]] || fail "refusing symlinked Metis APT preference: ${METIS_APT_PREFERENCE}"
+  log "detected Axelera PCI hardware at ${axelera_pci_address}; enabling Metis/Voyager installation"
+  APT_PACKAGES+=(dkms build-essential "linux-headers-$(uname -r)" metis-dkms)
+else
+  log "no Axelera PCI hardware (vendor 0x1f9d) detected; installing only the Intel accelerator/media stack"
+fi
+readonly -a APT_PACKAGES
+
 export DEBIAN_FRONTEND=noninteractive
-install -d -o root -g root -m 0755 /etc/apt/preferences.d
-printf 'Package: metis-dkms\nPin: version %s\nPin-Priority: 1001\n' \
-  "${METIS_DKMS_VERSION}" >"${METIS_APT_PREFERENCE}.new"
-chmod 0644 "${METIS_APT_PREFERENCE}.new"
-mv -f -- "${METIS_APT_PREFERENCE}.new" "${METIS_APT_PREFERENCE}"
+if ${AXELERA_HARDWARE_PRESENT}; then
+  install -d -o root -g root -m 0755 /etc/apt/preferences.d
+  printf 'Package: metis-dkms\nPin: version %s\nPin-Priority: 1001\n' \
+    "${METIS_DKMS_VERSION}" >"${METIS_APT_PREFERENCE}.new"
+  chmod 0644 "${METIS_APT_PREFERENCE}.new"
+  mv -f -- "${METIS_APT_PREFERENCE}.new" "${METIS_APT_PREFERENCE}"
+fi
 if [[ ${MODE} == online ]]; then
   apt-get update
   apt-get install -y --no-install-recommends \
@@ -117,35 +138,37 @@ if [[ ${MODE} == online ]]; then
     add-apt-repository -y "${DRIVER_PPA}"
   fi
 
-  [[ ! -L ${AXELERA_APT_KEYRING} ]] || fail "refusing symlinked Axelera keyring: ${AXELERA_APT_KEYRING}"
-  [[ ! -L ${AXELERA_APT_SOURCE} ]] || fail "refusing symlinked Axelera APT source: ${AXELERA_APT_SOURCE}"
-  install -d -o root -g root -m 0755 /etc/apt/keyrings
-  if [[ -e ${AXELERA_APT_KEYRING} || -e ${AXELERA_APT_SOURCE} ]]; then
-    [[ -f ${AXELERA_APT_KEYRING} && -f ${AXELERA_APT_SOURCE} ]] || \
-      fail "the existing Axelera APT configuration is incomplete"
-    key_fingerprint="$(gpg --show-keys --with-colons "${AXELERA_APT_KEYRING}" | awk -F: '$1 == "fpr" {print $10; exit}')"
-    [[ ${key_fingerprint} == "${AXELERA_APT_KEY_FINGERPRINT}" ]] || \
-      fail "the existing Axelera key fingerprint is ${key_fingerprint:-missing}; expected ${AXELERA_APT_KEY_FINGERPRINT}"
-    grep -Fqs "${AXELERA_APT_REPOSITORY} ubuntu24 main" "${AXELERA_APT_SOURCE}" || \
-      fail "the existing Axelera APT source is not the supported Ubuntu 24.04 repository"
-  else
-    key_download="$(mktemp)"
-    curl --fail --location --silent --show-error \
-      --proto '=https' --tlsv1.2 --connect-timeout 15 --retry 3 --retry-all-errors \
-      --max-time 120 --output "${key_download}" "${AXELERA_APT_KEY_URL}"
-    key_fingerprint="$(gpg --show-keys --with-colons "${key_download}" | awk -F: '$1 == "fpr" {print $10; exit}')"
-    [[ ${key_fingerprint} == "${AXELERA_APT_KEY_FINGERPRINT}" ]] || {
+  if ${AXELERA_HARDWARE_PRESENT}; then
+    [[ ! -L ${AXELERA_APT_KEYRING} ]] || fail "refusing symlinked Axelera keyring: ${AXELERA_APT_KEYRING}"
+    [[ ! -L ${AXELERA_APT_SOURCE} ]] || fail "refusing symlinked Axelera APT source: ${AXELERA_APT_SOURCE}"
+    install -d -o root -g root -m 0755 /etc/apt/keyrings
+    if [[ -e ${AXELERA_APT_KEYRING} || -e ${AXELERA_APT_SOURCE} ]]; then
+      [[ -f ${AXELERA_APT_KEYRING} && -f ${AXELERA_APT_SOURCE} ]] || \
+        fail "the existing Axelera APT configuration is incomplete"
+      key_fingerprint="$(gpg --show-keys --with-colons "${AXELERA_APT_KEYRING}" | awk -F: '$1 == "fpr" {print $10; exit}')"
+      [[ ${key_fingerprint} == "${AXELERA_APT_KEY_FINGERPRINT}" ]] || \
+        fail "the existing Axelera key fingerprint is ${key_fingerprint:-missing}; expected ${AXELERA_APT_KEY_FINGERPRINT}"
+      grep -Fqs "${AXELERA_APT_REPOSITORY} ubuntu24 main" "${AXELERA_APT_SOURCE}" || \
+        fail "the existing Axelera APT source is not the supported Ubuntu 24.04 repository"
+    else
+      key_download="$(mktemp)"
+      curl --fail --location --silent --show-error \
+        --proto '=https' --tlsv1.2 --connect-timeout 15 --retry 3 --retry-all-errors \
+        --max-time 120 --output "${key_download}" "${AXELERA_APT_KEY_URL}"
+      key_fingerprint="$(gpg --show-keys --with-colons "${key_download}" | awk -F: '$1 == "fpr" {print $10; exit}')"
+      [[ ${key_fingerprint} == "${AXELERA_APT_KEY_FINGERPRINT}" ]] || {
+        rm -f -- "${key_download}"
+        fail "Axelera APT signing-key fingerprint is ${key_fingerprint:-missing}; expected ${AXELERA_APT_KEY_FINGERPRINT}"
+      }
+      gpg --batch --yes --dearmor --output "${AXELERA_APT_KEYRING}.new" "${key_download}"
       rm -f -- "${key_download}"
-      fail "Axelera APT signing-key fingerprint is ${key_fingerprint:-missing}; expected ${AXELERA_APT_KEY_FINGERPRINT}"
-    }
-    gpg --batch --yes --dearmor --output "${AXELERA_APT_KEYRING}.new" "${key_download}"
-    rm -f -- "${key_download}"
-    chmod 0644 "${AXELERA_APT_KEYRING}.new"
-    mv -f -- "${AXELERA_APT_KEYRING}.new" "${AXELERA_APT_KEYRING}"
-    printf 'deb [arch=amd64 signed-by=%s] %s ubuntu24 main\n' \
-      "${AXELERA_APT_KEYRING}" "${AXELERA_APT_REPOSITORY}" >"${AXELERA_APT_SOURCE}.new"
-    chmod 0644 "${AXELERA_APT_SOURCE}.new"
-    mv -f -- "${AXELERA_APT_SOURCE}.new" "${AXELERA_APT_SOURCE}"
+      chmod 0644 "${AXELERA_APT_KEYRING}.new"
+      mv -f -- "${AXELERA_APT_KEYRING}.new" "${AXELERA_APT_KEYRING}"
+      printf 'deb [arch=amd64 signed-by=%s] %s ubuntu24 main\n' \
+        "${AXELERA_APT_KEYRING}" "${AXELERA_APT_REPOSITORY}" >"${AXELERA_APT_SOURCE}.new"
+      chmod 0644 "${AXELERA_APT_SOURCE}.new"
+      mv -f -- "${AXELERA_APT_SOURCE}.new" "${AXELERA_APT_SOURCE}"
+    fi
   fi
   apt-get update
 fi
@@ -218,14 +241,16 @@ pathlib.Path(sys.argv[2]).write_text(
 PY
   (cd "${wheels}" && sha256sum -- *.whl | sort -k2) >"${wheel_sums}"
 
-  log "resolving and caching the Voyager ${VOYAGER_RUNTIME_VERSION} runtime wheel closure"
-  install -d -m 0755 "${voyager_wheels}"
-  python3 -m venv "${work_directory}/voyager-resolver-venv"
-  "${work_directory}/voyager-resolver-venv/bin/python" -m pip download \
-    --disable-pip-version-check --no-cache-dir --only-binary=:all: \
-    --extra-index-url "${VOYAGER_PYPI_INDEX}" --dest "${voyager_wheels}" \
-    "${VOYAGER_PYTHON_PACKAGES[@]}"
-  python3 - "${voyager_wheels}" "${VOYAGER_RUNTIME_VERSION}" <<'PY'
+  : >"${voyager_sums}"
+  if ${AXELERA_HARDWARE_PRESENT}; then
+    log "resolving and caching the Voyager ${VOYAGER_RUNTIME_VERSION} runtime wheel closure"
+    install -d -m 0755 "${voyager_wheels}"
+    python3 -m venv "${work_directory}/voyager-resolver-venv"
+    "${work_directory}/voyager-resolver-venv/bin/python" -m pip download \
+      --disable-pip-version-check --no-cache-dir --only-binary=:all: \
+      --extra-index-url "${VOYAGER_PYPI_INDEX}" --dest "${voyager_wheels}" \
+      "${VOYAGER_PYTHON_PACKAGES[@]}"
+    python3 - "${voyager_wheels}" "${VOYAGER_RUNTIME_VERSION}" <<'PY'
 import email
 import pathlib
 import re
@@ -245,7 +270,8 @@ for wheel in wheels.glob("*.whl"):
 if versions.get("axelera-rt") != expected:
     raise SystemExit(f"pip resolved axelera-rt {versions.get('axelera-rt')!r}; expected {expected!r}")
 PY
-  (cd "${voyager_wheels}" && sha256sum -- *.whl | sort -k2) >"${voyager_sums}"
+    (cd "${voyager_wheels}" && sha256sum -- *.whl | sort -k2) >"${voyager_sums}"
+  fi
 
   log "resolving and caching the latest Intel NPU Ubuntu 24.04 release"
   curl --fail --location --silent --show-error \
@@ -289,19 +315,23 @@ PY
   install -d -m 0755 "${CACHE_DIRECTORY}/wheels"
   cp -a "${wheels}/." "${CACHE_DIRECTORY}/wheels/"
   rm -rf -- "${CACHE_DIRECTORY}/voyager-wheels"
-  install -d -m 0755 "${CACHE_DIRECTORY}/voyager-wheels"
-  cp -a "${voyager_wheels}/." "${CACHE_DIRECTORY}/voyager-wheels/"
+  if ${AXELERA_HARDWARE_PRESENT}; then
+    install -d -m 0755 "${CACHE_DIRECTORY}/voyager-wheels"
+    cp -a "${voyager_wheels}/." "${CACHE_DIRECTORY}/voyager-wheels/"
+  fi
   install -m 0644 "${npu_archive}" "${CACHE_DIRECTORY}/linux-npu-driver.tar.gz"
 
   python3 - "${LOCK_FILE}.new" "${apt_pins}" "${requirements}" "${wheel_sums}" "${voyager_sums}" \
     "${npu_fields[0]:-}" "${npu_fields[1]:-}" "${npu_url}" "${npu_sha256}" \
     "$(uname -r)" "${VOYAGER_RUNTIME_VERSION}" "${METIS_DKMS_VERSION}" \
-    "${METIS_FIRMWARE_RECOMMENDED}" "${METIS_BOARD_CONTROLLER_RECOMMENDED}" <<'PY'
+    "${METIS_FIRMWARE_RECOMMENDED}" "${METIS_BOARD_CONTROLLER_RECOMMENDED}" \
+    "${AXELERA_HARDWARE_PRESENT}" <<'PY'
 import json
 import pathlib
 import sys
 
-output, apt_file, requirements_file, sums_file, voyager_sums_file, tag, asset, url, digest, kernel, voyager_version, metis_version, firmware, board_controller = sys.argv[1:]
+output, apt_file, requirements_file, sums_file, voyager_sums_file, tag, asset, url, digest, kernel, voyager_version, metis_version, firmware, board_controller, axelera_present = sys.argv[1:]
+axelera_enabled = axelera_present == "true"
 apt = dict(line.split("=", 1) for line in pathlib.Path(apt_file).read_text().splitlines())
 python = dict(line.split("==", 1) for line in pathlib.Path(requirements_file).read_text().splitlines())
 wheels = {}
@@ -325,11 +355,12 @@ recipe = {
     "wheels": wheels,
     "npu": {"release": tag, "asset": asset, "url": url, "sha256": digest},
     "voyager": {
-        "runtime_version": voyager_version,
-        "driver_package": "metis-dkms",
-        "driver_version": metis_version,
-        "firmware_recommended": firmware,
-        "board_controller_recommended": board_controller,
+        "enabled": axelera_enabled,
+        "runtime_version": voyager_version if axelera_enabled else None,
+        "driver_package": "metis-dkms" if axelera_enabled else None,
+        "driver_version": metis_version if axelera_enabled else None,
+        "firmware_recommended": firmware if axelera_enabled else None,
+        "board_controller_recommended": board_controller if axelera_enabled else None,
         "wheels": voyager_wheels,
     },
 }
@@ -340,13 +371,15 @@ PY
 }
 
 validate_lock_and_cache() {
-  python3 - "${LOCK_FILE}" "${CACHE_DIRECTORY}" "$(uname -r)" <<'PY'
+  python3 - "${LOCK_FILE}" "${CACHE_DIRECTORY}" "$(uname -r)" \
+    "${AXELERA_HARDWARE_PRESENT}" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 
 lock_path, cache_path, kernel = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+axelera_detected = sys.argv[4] == "true"
 recipe = json.loads(lock_path.read_text(encoding="utf-8"))
 expected = {
     "schema_version": 2,
@@ -375,18 +408,31 @@ for filename, expected_digest in recipe["wheels"].items():
     if not wheel.is_file() or sha256(wheel) != expected_digest:
         raise SystemExit(f"cached wheel is missing or does not match the lock: {filename}")
 voyager = recipe.get("voyager", {})
-if voyager.get("runtime_version") != "1.6.1" or voyager.get("driver_version") != "1.4.17":
-    raise SystemExit("locked Voyager/Metis versions do not match Voyager 1.6.1 and metis-dkms 1.4.17")
-if voyager.get("firmware_recommended") != "1.6.0" or voyager.get("board_controller_recommended") != "7.4":
-    raise SystemExit("locked Metis firmware compatibility recommendations are invalid")
-if recipe.get("apt", {}).get("metis-dkms") != voyager.get("driver_version"):
-    raise SystemExit("locked metis-dkms APT version does not match the Voyager compatibility pin")
-for filename, expected_digest in voyager.get("wheels", {}).items():
-    wheel = cache_path / "voyager-wheels" / filename
-    if not wheel.is_file() or sha256(wheel) != expected_digest:
-        raise SystemExit(f"cached Voyager wheel is missing or does not match the lock: {filename}")
-if not voyager.get("wheels"):
-    raise SystemExit("locked Voyager runtime has no wheel closure")
+if not isinstance(voyager.get("enabled"), bool):
+    raise SystemExit("locked recipe has no valid Voyager enabled flag")
+if voyager["enabled"] != axelera_detected:
+    raise SystemExit("locked recipe does not match current Axelera PCI hardware presence; remove the lock and regenerate it")
+if axelera_detected:
+    if voyager.get("runtime_version") != "1.6.1" or voyager.get("driver_version") != "1.4.17":
+        raise SystemExit("locked Voyager/Metis versions do not match Voyager 1.6.1 and metis-dkms 1.4.17")
+    if voyager.get("firmware_recommended") != "1.6.0" or voyager.get("board_controller_recommended") != "7.4":
+        raise SystemExit("locked Metis firmware compatibility recommendations are invalid")
+    if recipe.get("apt", {}).get("metis-dkms") != voyager.get("driver_version"):
+        raise SystemExit("locked metis-dkms APT version does not match the Voyager compatibility pin")
+    if not voyager.get("wheels"):
+        raise SystemExit("locked Voyager runtime has no wheel closure")
+    for filename, expected_digest in voyager["wheels"].items():
+        wheel = cache_path / "voyager-wheels" / filename
+        if not wheel.is_file() or sha256(wheel) != expected_digest:
+            raise SystemExit(f"cached Voyager wheel is missing or does not match the lock: {filename}")
+else:
+    if "metis-dkms" in recipe.get("apt", {}):
+        raise SystemExit("Intel-only recipe unexpectedly pins metis-dkms")
+    if voyager.get("wheels") != {} or any(voyager.get(key) is not None for key in (
+        "runtime_version", "driver_package", "driver_version",
+        "firmware_recommended", "board_controller_recommended",
+    )):
+        raise SystemExit("Intel-only recipe unexpectedly contains a Voyager/Metis closure")
 PY
 }
 
@@ -398,15 +444,17 @@ if [[ ! -f ${LOCK_FILE} ]]; then
     [[ -f ${offline_hardware}/linux-npu-driver.tar.gz ]] || \
       fail "offline Intel NPU archive is missing"
     [[ -d ${offline_hardware}/wheels ]] || fail "offline OpenVINO wheels are missing"
-    [[ -d ${offline_hardware}/voyager-wheels ]] || fail "offline Voyager runtime wheels are missing"
     install -m 0644 "${offline_hardware}/driver-recipe.json" "${LOCK_FILE}"
     install -m 0644 "${offline_hardware}/linux-npu-driver.tar.gz" \
       "${CACHE_DIRECTORY}/linux-npu-driver.tar.gz"
     install -d -m 0755 "${CACHE_DIRECTORY}/wheels"
     cp -a "${offline_hardware}/wheels/." "${CACHE_DIRECTORY}/wheels/"
     rm -rf -- "${CACHE_DIRECTORY}/voyager-wheels"
-    install -d -m 0755 "${CACHE_DIRECTORY}/voyager-wheels"
-    cp -a "${offline_hardware}/voyager-wheels/." "${CACHE_DIRECTORY}/voyager-wheels/"
+    if ${AXELERA_HARDWARE_PRESENT}; then
+      [[ -d ${offline_hardware}/voyager-wheels ]] || fail "offline Voyager runtime wheels are missing"
+      install -d -m 0755 "${CACHE_DIRECTORY}/voyager-wheels"
+      cp -a "${offline_hardware}/voyager-wheels/." "${CACHE_DIRECTORY}/voyager-wheels/"
+    fi
   else
     resolve_recipe
   fi
@@ -447,17 +495,19 @@ else
   apt-get install -y --no-install-recommends --allow-downgrades "${apt_pins[@]}"
 fi
 
-actual_metis_version="$(dpkg-query -W -f='${Version}' metis-dkms 2>/dev/null || true)"
-[[ ${actual_metis_version} == "${METIS_DKMS_VERSION}" ]] || \
-  fail "metis-dkms is ${actual_metis_version:-missing}; expected ${METIS_DKMS_VERSION} for Voyager ${VOYAGER_RUNTIME_VERSION}"
-if ! dkms status -m metis -v "${METIS_DKMS_VERSION}" -k "$(uname -r)" 2>/dev/null | grep -Eq ': installed$'; then
-  log "completing the Metis DKMS build for kernel $(uname -r)"
-  dkms autoinstall -k "$(uname -r)"
+if ${AXELERA_HARDWARE_PRESENT}; then
+  actual_metis_version="$(dpkg-query -W -f='${Version}' metis-dkms 2>/dev/null || true)"
+  [[ ${actual_metis_version} == "${METIS_DKMS_VERSION}" ]] || \
+    fail "metis-dkms is ${actual_metis_version:-missing}; expected ${METIS_DKMS_VERSION} for Voyager ${VOYAGER_RUNTIME_VERSION}"
+  if ! dkms status -m metis -v "${METIS_DKMS_VERSION}" -k "$(uname -r)" 2>/dev/null | grep -Eq ': installed$'; then
+    log "completing the Metis DKMS build for kernel $(uname -r)"
+    dkms autoinstall -k "$(uname -r)"
+  fi
+  dkms status -m metis -v "${METIS_DKMS_VERSION}" -k "$(uname -r)" 2>/dev/null | grep -Eq ': installed$' || \
+    fail "Metis DKMS ${METIS_DKMS_VERSION} is not installed for kernel $(uname -r)"
+  modinfo -k "$(uname -r)" metis >/dev/null 2>&1 || \
+    fail "the Metis module is unavailable for kernel $(uname -r)"
 fi
-dkms status -m metis -v "${METIS_DKMS_VERSION}" -k "$(uname -r)" 2>/dev/null | grep -Eq ': installed$' || \
-  fail "Metis DKMS ${METIS_DKMS_VERSION} is not installed for kernel $(uname -r)"
-modinfo -k "$(uname -r)" metis >/dev/null 2>&1 || \
-  fail "the Metis module is unavailable for kernel $(uname -r)"
 
 log "installing the locked Intel NPU release"
 npu_extract="${work_directory}/npu"
@@ -482,33 +532,37 @@ python3 -m venv --clear "${VENV_DIRECTORY}"
   --no-index --find-links="${CACHE_DIRECTORY}/wheels" "${python_pins[@]}"
 chmod -R go+rX "${VENV_DIRECTORY}"
 
-log "installing the locked Voyager ${VOYAGER_RUNTIME_VERSION} runtime"
-voyager_ready=false
-if [[ -x ${VOYAGER_VENV_DIRECTORY}/bin/python ]] && \
-  "${VOYAGER_VENV_DIRECTORY}/bin/python" - "${VOYAGER_RUNTIME_VERSION}" <<'PY'
+if ${AXELERA_HARDWARE_PRESENT}; then
+  log "installing the locked Voyager ${VOYAGER_RUNTIME_VERSION} runtime"
+  voyager_ready=false
+  if [[ -x ${VOYAGER_VENV_DIRECTORY}/bin/python ]] && \
+    "${VOYAGER_VENV_DIRECTORY}/bin/python" - "${VOYAGER_RUNTIME_VERSION}" <<'PY'
 import importlib.metadata
 import sys
 raise SystemExit(importlib.metadata.version("axelera-rt") != sys.argv[1])
 PY
-then
-  if "${VOYAGER_VENV_DIRECTORY}/bin/python" -m pip check >/dev/null 2>&1; then
-    voyager_ready=true
+  then
+    if "${VOYAGER_VENV_DIRECTORY}/bin/python" -m pip check >/dev/null 2>&1; then
+      voyager_ready=true
+    fi
   fi
+  if ! ${voyager_ready}; then
+    install -d -m 0755 "$(dirname "${VOYAGER_VENV_DIRECTORY}")"
+    python3 -m venv --clear "${VOYAGER_VENV_DIRECTORY}"
+    "${VOYAGER_VENV_DIRECTORY}/bin/python" -m pip install --disable-pip-version-check \
+      --no-index --find-links="${CACHE_DIRECTORY}/voyager-wheels" \
+      "${VOYAGER_PYTHON_PACKAGES[@]}"
+  fi
+  "${VOYAGER_VENV_DIRECTORY}/bin/python" -m pip check
+  chmod -R go+rX "${VOYAGER_VENV_DIRECTORY}"
 fi
-if ! ${voyager_ready}; then
-  install -d -m 0755 "$(dirname "${VOYAGER_VENV_DIRECTORY}")"
-  python3 -m venv --clear "${VOYAGER_VENV_DIRECTORY}"
-  "${VOYAGER_VENV_DIRECTORY}/bin/python" -m pip install --disable-pip-version-check \
-    --no-index --find-links="${CACHE_DIRECTORY}/voyager-wheels" \
-    "${VOYAGER_PYTHON_PACKAGES[@]}"
-fi
-"${VOYAGER_VENV_DIRECTORY}/bin/python" -m pip check
-chmod -R go+rX "${VOYAGER_VENV_DIRECTORY}"
 
 modprobe i915 2>/dev/null || modprobe xe 2>/dev/null || true
 modprobe intel_vpu 2>/dev/null || true
-if ! modprobe metis 2>/dev/null; then
-  log "Metis is installed but could not be loaded before reboot; check Secure Boot/MOK enrollment if post-reboot verification fails"
+if ${AXELERA_HARDWARE_PRESENT}; then
+  if ! modprobe metis 2>/dev/null; then
+    log "Metis is installed but could not be loaded before reboot; check Secure Boot/MOK enrollment if post-reboot verification fails"
+  fi
 fi
 install -m 0644 /dev/null "${REBOOT_MARKER}"
 printf 'installed_at=%s\nkernel=%s\nrecipe=%s\n' \

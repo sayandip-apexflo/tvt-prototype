@@ -58,7 +58,7 @@ inputs/
 │   ├── driver-recipe.json
 │   ├── linux-npu-driver.tar.gz
 │   ├── wheels/
-│   └── voyager-wheels/
+│   └── voyager-wheels/        # only when recipe voyager.enabled is true
 └── apt/
     └── *.deb
 ```
@@ -150,7 +150,7 @@ and validates the closure, collect:
 /var/lib/tvt/hardware-driver-recipe.json
 /var/cache/tvt/hardware-drivers/linux-npu-driver.tar.gz
 /var/cache/tvt/hardware-drivers/wheels/
-/var/cache/tvt/hardware-drivers/voyager-wheels/
+/var/cache/tvt/hardware-drivers/voyager-wheels/  # Axelera hosts only
 ```
 
 Copy these into `inputs/hardware/` using the names in the input layout. The
@@ -161,10 +161,10 @@ different qualified-kernel policy without repeating hardware qualification.
 
 Resolve packages on a clean Ubuntu 24.04 amd64 VM using the same repositories
 and package pins as the target. Include the preparation packages plus every
-package/version listed in `hardware/driver-recipe.json`, including
-`metis-dkms`, DKMS build dependencies, and the active kernel headers, along
-with all transitive `.deb` dependencies. Copy the resulting packages into
-`inputs/apt/`.
+package/version listed in `hardware/driver-recipe.json`. When
+`voyager.enabled` is true, that includes `metis-dkms`, DKMS build dependencies,
+and the active kernel headers. Include all transitive `.deb` dependencies and
+copy the resulting packages into `inputs/apt/`.
 
 A directory listing and successful checksum do not prove that the APT closure
 is complete. The acceptance test is an installation in a clean VM with its
@@ -257,6 +257,7 @@ sha256sum /srv/tvt-release/inputs/k3s/*
 sha256sum /srv/tvt-release/inputs/hardware/driver-recipe.json
 sha256sum /srv/tvt-release/inputs/hardware/linux-npu-driver.tar.gz
 sha256sum /srv/tvt-release/inputs/hardware/wheels/*
+# Axelera closures only:
 sha256sum /srv/tvt-release/inputs/hardware/voyager-wheels/*
 sha256sum /srv/tvt-release/inputs/apt/*.deb
 ```

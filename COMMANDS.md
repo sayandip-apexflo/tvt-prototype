@@ -426,15 +426,18 @@ The command:
 - enables the Intel graphics PPA used by `k3s-prototype`;
 - resolves and installs the matching Intel GPU, media, Level Zero, OpenCL,
   oneVPL, VA-API, and NPU packages from the Internet;
-- installs `metis-dkms` 1.4.17 with the active kernel headers and verifies its
-  DKMS build, matching the Voyager 1.6.1 compatibility line;
-- installs the pinned Voyager 1.6.1 runtime in
-  `/opt/apexfabric/voyager-1.6.1`;
+- scans PCI sysfs for Axelera vendor ID `0x1f9d` and, only when present,
+  installs `metis-dkms` 1.4.17 with the active kernel headers and Voyager
+  1.6.1 in `/opt/apexfabric/voyager-1.6.1`;
+- on Intel-only devices, installs `intel-opencl-icd`, `libze-intel-gpu1`,
+  `ocl-icd-libopencl1`, and `intel-media-va-driver-non-free` without adding
+  the Axelera repository or runtime;
 - installs `openvino` and `openvino-genai` in
   `/opt/apexfabric/openvino-env`;
 - writes the exact resolved recipe to
   `/var/lib/tvt/hardware-driver-recipe.json`; and
-- caches the locked NPU archive and OpenVINO/Voyager wheel closures under
+- caches the locked NPU archive and OpenVINO wheel closure, plus the Voyager
+  wheel closure when Axelera is detected, under
   `/var/cache/tvt/hardware-drivers` for repeatable retries.
 
 If an audited Intel host is compatible but its CPU model string is not exactly
@@ -458,9 +461,10 @@ deleting it authorizes the selection of newer versions.
 sudo python3 -m json.tool /var/lib/tvt/hardware-driver-recipe.json
 ```
 
-This prints the exact APT versions, OpenVINO and Voyager versions and wheel
-hashes, the Metis compatibility pins, Intel NPU release URL and digest, OS,
-architecture, and kernel tuple selected during the first resolution.
+This prints the exact APT versions, the `voyager.enabled` hardware decision,
+wheel hashes, Intel NPU release URL and digest, OS, architecture, and kernel
+tuple selected during the first resolution. Metis compatibility pins and
+Voyager hashes are present only for an Axelera-equipped host.
 
 ### 4. Reboot the edge device
 
@@ -476,14 +480,14 @@ matched runtime. Wait for the device to return before continuing.
 ```bash
 test -e /dev/dri/renderD128
 test -e /dev/accel/accel0
-test -d /sys/class/metis
-compgen -G '/dev/metis-*'
-lsmod | grep -E '^(i915|xe|intel_vpu|metis)\b'
+lsmod | grep -E '^(i915|xe|intel_vpu)\b'
 ```
 
 These commands confirm that the GPU render node, NPU accelerator node, Intel
-graphics module, Intel NPU module, and Axelera Metis devices are present after reboot. A non-zero exit
-status means hardware qualification has not succeeded.
+graphics module, and Intel NPU module are present after reboot. On a host with
+an Axelera PCI card, also verify `/sys/class/metis`, `/dev/metis-*`, and the
+`metis` module. A non-zero exit status means hardware qualification has not
+succeeded.
 
 ### 6. Verify the media and compute runtimes
 
@@ -510,7 +514,7 @@ if missing:
 PY
 ```
 
-Verify the isolated Voyager runtime:
+If Axelera PCI hardware was detected, verify the isolated Voyager runtime:
 
 ```bash
 /opt/apexfabric/voyager-1.6.1/bin/python - <<'PY'

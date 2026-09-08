@@ -296,7 +296,8 @@ cat >"${kit}/README-target-install.md" <<EOF
 
 This is an experimental online-install kit for source commit \`${SOURCE_COMMIT}\`.
 It is not the checksum-complete offline production release. Ubuntu packages,
-Intel drivers, the Axelera Metis driver, Voyager, and OpenVINO must be resolved on the target. The qualified
+Intel drivers and OpenVINO must be resolved on the target. Axelera Metis and
+Voyager are resolved only when PCI detection finds an Axelera card. The qualified
 hardware target is the Intel Core Ultra 9 285H. Use the unverified-hardware
 override only for a separately audited equivalent device.
 
@@ -344,11 +345,11 @@ confirmation.
 Run from the extracted \`source/\` directory on Ubuntu 24.04 amd64:
 
 1. Stop competing GPU/NPU workloads and ensure adequate free disk.
-2. Install the Intel and Axelera stack online with
+2. Install the Intel stack and any detected Axelera stack online with
    \`sudo bash scripts/install-tvt-hardware-drivers.sh --mode online\`.
-3. Reboot and verify \`/dev/dri/renderD128\`, \`/dev/accel/accel0\`,
-   \`/dev/metis-*\`, VA-API, OpenCL, OpenVINO CPU/GPU/NPU discovery, and the
-   Voyager 1.6.1 runtime.
+3. Reboot and verify \`/dev/dri/renderD128\`, \`/dev/accel/accel0\`, VA-API,
+   OpenCL, and OpenVINO CPU/GPU/NPU discovery. When Axelera was detected, also
+   verify \`/dev/metis-*\` and the Voyager 1.6.1 runtime.
 4. Install the local Registry from \`../images/registry.tar\`.
 5. Install K3s using \`../k3s/install.sh\` and \`../k3s/k3s\`.
 6. Publish the two control archives with \`--archive-dir ../images\`, then

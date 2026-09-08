@@ -64,7 +64,6 @@ done
 [[ -f ${HARDWARE_DIRECTORY}/driver-recipe.json ]] || { echo "hardware driver-recipe.json is missing" >&2; exit 1; }
 [[ -f ${HARDWARE_DIRECTORY}/linux-npu-driver.tar.gz ]] || { echo "hardware NPU archive is missing" >&2; exit 1; }
 [[ -d ${HARDWARE_DIRECTORY}/wheels ]] || { echo "hardware wheel directory is missing" >&2; exit 1; }
-[[ -d ${HARDWARE_DIRECTORY}/voyager-wheels ]] || { echo "hardware Voyager wheel directory is missing" >&2; exit 1; }
 if [[ -e ${OUTPUT} ]]; then
   [[ -d ${OUTPUT} && -z $(find "${OUTPUT}" -mindepth 1 -maxdepth 1 -print -quit) ]] || {
     echo "output directory must be empty: ${OUTPUT}" >&2

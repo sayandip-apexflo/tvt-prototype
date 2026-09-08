@@ -98,8 +98,6 @@ def input_files(root: pathlib.Path, lock_path: pathlib.Path | None = None) -> di
         raise InputError("required release inputs are missing: " + ", ".join(missing))
     if not any(name.startswith("hardware/wheels/") and name.endswith(".whl") for name in result):
         raise InputError("hardware/wheels contains no wheel files")
-    if not any(name.startswith("hardware/voyager-wheels/") and name.endswith(".whl") for name in result):
-        raise InputError("hardware/voyager-wheels contains no wheel files")
     if not any(name.startswith("apt/") and name.endswith(".deb") for name in result):
         raise InputError("apt contains no Debian packages")
     unsupported = sorted(
@@ -159,33 +157,52 @@ def validate_hardware(root: pathlib.Path, files: dict[str, pathlib.Path]) -> dic
     voyager = recipe.get("voyager")
     if not isinstance(voyager, dict):
         raise InputError("hardware recipe has no Voyager runtime closure")
-    expected_voyager = {
-        "runtime_version": "1.6.1",
-        "driver_package": "metis-dkms",
-        "driver_version": "1.4.17",
-        "firmware_recommended": "1.6.0",
-        "board_controller_recommended": "7.4",
-    }
-    for key, value in expected_voyager.items():
-        if voyager.get(key) != value:
-            raise InputError(f"hardware recipe Voyager {key} does not equal {value!r}")
-    if recipe.get("apt", {}).get("metis-dkms") != "1.4.17":
-        raise InputError("hardware recipe does not pin metis-dkms 1.4.17")
-    voyager_pins = voyager.get("wheels")
-    if not isinstance(voyager_pins, dict) or not voyager_pins:
-        raise InputError("hardware recipe has no Voyager wheel closure")
+    if not isinstance(voyager.get("enabled"), bool):
+        raise InputError("hardware recipe Voyager enabled flag is not boolean")
+    apt_pins = recipe.get("apt")
+    if not isinstance(apt_pins, dict):
+        raise InputError("hardware recipe has no APT package closure")
     actual_voyager_wheels = {
         name.removeprefix("hardware/voyager-wheels/")
         for name in files
         if name.startswith("hardware/voyager-wheels/") and name.endswith(".whl")
     }
-    if set(voyager_pins) != actual_voyager_wheels:
-        raise InputError("hardware Voyager wheel files do not exactly match the driver recipe")
-    for filename, expected_digest in voyager_pins.items():
-        if not isinstance(expected_digest, str) or not DIGEST.fullmatch(expected_digest):
-            raise InputError(f"hardware recipe has an invalid Voyager wheel digest: {filename}")
-        if sha256(root / "hardware/voyager-wheels" / filename) != expected_digest:
-            raise InputError(f"hardware Voyager wheel does not match the recipe: {filename}")
+    if voyager["enabled"]:
+        expected_voyager = {
+            "runtime_version": "1.6.1",
+            "driver_package": "metis-dkms",
+            "driver_version": "1.4.17",
+            "firmware_recommended": "1.6.0",
+            "board_controller_recommended": "7.4",
+        }
+        for key, value in expected_voyager.items():
+            if voyager.get(key) != value:
+                raise InputError(f"hardware recipe Voyager {key} does not equal {value!r}")
+        if apt_pins.get("metis-dkms") != "1.4.17":
+            raise InputError("hardware recipe does not pin metis-dkms 1.4.17")
+        voyager_pins = voyager.get("wheels")
+        if not isinstance(voyager_pins, dict) or not voyager_pins:
+            raise InputError("hardware recipe has no Voyager wheel closure")
+        if set(voyager_pins) != actual_voyager_wheels:
+            raise InputError("hardware Voyager wheel files do not exactly match the driver recipe")
+        for filename, expected_digest in voyager_pins.items():
+            if not isinstance(expected_digest, str) or not DIGEST.fullmatch(expected_digest):
+                raise InputError(f"hardware recipe has an invalid Voyager wheel digest: {filename}")
+            if sha256(root / "hardware/voyager-wheels" / filename) != expected_digest:
+                raise InputError(f"hardware Voyager wheel does not match the recipe: {filename}")
+    else:
+        if "metis-dkms" in apt_pins:
+            raise InputError("Intel-only hardware recipe unexpectedly pins metis-dkms")
+        if actual_voyager_wheels:
+            raise InputError("Intel-only release unexpectedly contains Voyager wheels")
+        if voyager.get("wheels") != {} or any(
+            voyager.get(key) is not None
+            for key in (
+                "runtime_version", "driver_package", "driver_version",
+                "firmware_recommended", "board_controller_recommended",
+            )
+        ):
+            raise InputError("Intel-only hardware recipe contains a Voyager/Metis closure")
     return {"kernel_version": kernel, "recipe_sha256": sha256(root / "hardware/driver-recipe.json")}
 
 

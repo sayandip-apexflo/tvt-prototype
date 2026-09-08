@@ -19,13 +19,14 @@ sudo ./install-tvt-edge-host.sh \
   --site-config /media/tvt/site.yaml
 ```
 
-The first preparation pass installs host packages and the pinned Intel/Metis
-driver closure plus Voyager 1.6.1, records
+The first preparation pass installs host packages and the pinned Intel driver
+closure. If PCI detection finds Axelera vendor ID `0x1f9d`, it also installs
+Metis 1.4.17 and Voyager 1.6.1. It records
 `/var/lib/tvt/install/prepare-state.json`, and stops without rebooting. The
-second pass proves that the reboot occurred and verifies GPU, NPU, Metis,
-VA-API, OpenCL, OpenVINO, Voyager, Docker, and PostgreSQL before clearing the driver
-reboot marker. The application installer will not run before that state is
-`prepared`.
+second pass proves that the reboot occurred and verifies GPU, NPU, VA-API,
+OpenCL, OpenVINO, Docker, and PostgreSQL, plus Metis/Voyager when detected,
+before clearing the driver reboot marker. The application installer will not
+run before that state is `prepared`.
 
 A site file contains identifiers only; never put credentials in it:
 
