@@ -606,7 +606,7 @@ class ValidationWorker:
                     )
                 )
                 .order_by(CameraValidationAttempt.created_at)
-                .with_for_update(skip_locked=True)
+                .with_for_update(of=CameraValidationAttempt, skip_locked=True)
                 .limit(1)
             )
             if attempt is None:
