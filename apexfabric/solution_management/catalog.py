@@ -107,7 +107,7 @@ def load_delivery_metadata(directory: Path) -> dict[str, Any]:
     if (contract.get("models") or {}).get("delivery") != "baked-in":
         raise CatalogError("Traffic delivery must declare baked-in models")
     if archive.get("loaded_image") != (
-        f"{contract['name']}:intel-285h-{contract['version']}"
+        f"localhost/{contract['name']}:intel-285h-{contract['version']}"
     ):
         raise CatalogError("loaded image name disagrees with the image contract")
     expected_catalog_id = f"{contract['name']}:{contract['version']}"

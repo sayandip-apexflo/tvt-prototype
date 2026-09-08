@@ -129,7 +129,7 @@ class PipelineImportTests(unittest.TestCase):
         self.assertEqual(values["PIPELINE_TRAFFIC_ARCHIVE_SIZE"], "1930041856")
         self.assertEqual(
             values["PIPELINE_TRAFFIC_ARCHIVE_IMAGE"],
-            "traffic-edge-runtime:intel-285h-2026.08.21-v4",
+            "localhost/traffic-edge-runtime:intel-285h-2026.08.21-v4",
         )
         self.assertEqual(values["PIPELINE_TRAFFIC_LOCAL_TAG"], "intel-285h-2026.08.21-v4")
         self.assertNotIn("latest", self.text("config/pipeline.env").lower())
@@ -165,6 +165,7 @@ class PipelineImportTests(unittest.TestCase):
             self.assertIn(required, combined)
         self.assertNotIn("docker run", script)
         self.assertIn('docker create "${source_image}"', script)
+        self.assertIn("verify-docker-archive-tag.py", script)
 
     def test_image_inspection_rejects_architecture_and_label_mismatch(self):
         values = self.pipeline_values()

@@ -79,6 +79,10 @@ class SolutionCatalogTests(unittest.TestCase):
         self.assertEqual(provenance["archive"]["filename"], "image-2026.08.21-v4.tar")
         self.assertEqual(provenance["archive"]["size"], 1930041856)
         self.assertEqual(
+            provenance["archive"]["loaded_image"],
+            "localhost/traffic-edge-runtime:intel-285h-2026.08.21-v4",
+        )
+        self.assertEqual(
             provenance["archive"]["sha256"],
             "a6787bba6a27bc486f90b4c4dd41681d051c7c834568d99bc4a884d177d10e0f",
         )

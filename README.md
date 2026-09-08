@@ -52,6 +52,13 @@ reproducible transport archive, checksum, and release report. The complete
 input, build, verification, publication, and new-commit rebuild procedure is in
 [TVT edge release build runbook](docs/EDGE-RELEASE-BUILD.md).
 
+For the experimental Internet-connected transfer kit, use the deterministic
+root-owned extraction and component installation procedure in
+[TVT online test-kit installation](docs/ONLINE-TEST-KIT-INSTALL.md). That
+procedure also repairs the restrictive transport permissions present in older
+test-kit archives. Do not retain the bundled Traffic archive under `/home`,
+because the hardened synchronization service cannot read home directories.
+
 The project includes five cameras. We have instructed the customer to install them at the appropriate locations:
 
 - 2 cameras at the main entrance to cover people entering and exiting

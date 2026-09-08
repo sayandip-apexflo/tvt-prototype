@@ -14,7 +14,7 @@
     "filename": "image-2026.08.21-v4.tar",
     "size": 1930041856,
     "sha256": "a6787bba6a27bc486f90b4c4dd41681d051c7c834568d99bc4a884d177d10e0f",
-    "loaded_image": "traffic-edge-runtime:intel-285h-2026.08.21-v4"
+    "loaded_image": "localhost/traffic-edge-runtime:intel-285h-2026.08.21-v4"
   },
   "local_image": {
     "repository": "apexfabric/traffic-edge-runtime",

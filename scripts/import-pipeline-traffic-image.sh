@@ -265,6 +265,8 @@ if [[ -n ${ARCHIVE_FILE} ]]; then
     echo "Traffic archive checksum verification failed" >&2
     exit 1
   }
+  python3 "${REPO_ROOT}/scripts/verify-docker-archive-tag.py" \
+    --archive "${ARCHIVE_FILE}" --expected "${PIPELINE_TRAFFIC_ARCHIVE_IMAGE}"
   timeout --signal=TERM 20m docker load --input "${ARCHIVE_FILE}"
   source_image="${PIPELINE_TRAFFIC_ARCHIVE_IMAGE}"
 else
@@ -346,6 +348,8 @@ if [[ "${MODE}" == archive ]]; then
     echo "Traffic archive checksum verification failed" >&2
     exit 1
   }
+  python3 "${REPO_ROOT}/scripts/verify-docker-archive-tag.py" \
+    --archive "${archive_path}" --expected "${PIPELINE_TRAFFIC_ARCHIVE_IMAGE}"
   timeout --signal=TERM 20m docker load --input "${archive_path}"
   source_image="${PIPELINE_TRAFFIC_ARCHIVE_IMAGE}"
 else

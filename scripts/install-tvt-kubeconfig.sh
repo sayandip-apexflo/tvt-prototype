@@ -41,7 +41,11 @@ done
 token="$(printf '%s' "${token_data}" | base64 --decode)"
 
 target_dir="$(dirname "${TARGET}")"
-install -d -o root -g tvt-edge -m 0750 "${target_dir}"
+if [[ ${target_dir} == /etc/tvt ]]; then
+  install -d -o root -g root -m 0755 "${target_dir}"
+else
+  install -d -o root -g tvt-edge -m 0750 "${target_dir}"
+fi
 temporary="$(mktemp "${target_dir}/.kubeconfig.XXXXXX")"
 trap 'rm -f "${temporary:-}"' EXIT
 chmod 0600 "${temporary}"

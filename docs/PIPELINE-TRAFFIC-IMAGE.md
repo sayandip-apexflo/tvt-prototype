@@ -11,7 +11,7 @@ The production artifact is:
 delivery/apexfabric-v1/intel-285h/traffic/image-2026.08.21-v4.tar
 size:   1930041856 bytes
 sha256: a6787bba6a27bc486f90b4c4dd41681d051c7c834568d99bc4a884d177d10e0f
-image:  traffic-edge-runtime:intel-285h-2026.08.21-v4
+image:  localhost/traffic-edge-runtime:intel-285h-2026.08.21-v4
 target: 127.0.0.1:5000/apexfabric/traffic-edge-runtime:intel-285h-2026.08.21-v4
 ```
 

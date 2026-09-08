@@ -15,6 +15,8 @@ class BootstrapScriptTests(unittest.TestCase):
         self.assertIn("INSTALL_K3S_VERSION", installer)
         self.assertIn("exactly one registered node", installer)
         self.assertIn("refusing to reconfigure an existing non-single-node cluster", installer)
+        self.assertIn("an existing K3s agent installation was detected", installer)
+        self.assertIn("a K3s binary exists without a K3s server service", installer)
 
     def test_plane_requires_digest_lock_and_verification(self):
         installer = self.text("install-k3s-plane.sh")
@@ -45,6 +47,22 @@ class BootstrapScriptTests(unittest.TestCase):
         self.assertIn("tvt-alert-dispatcher.service", bootstrap)
         self.assertIn('CREATE ROLE "tvt-alert" LOGIN', bootstrap)
         self.assertIn("alertmanager-webhook.token", bootstrap)
+        self.assertIn('readonly TARGET_CATALOG="/opt/tvt/solution-packs/catalog/', bootstrap)
+        self.assertIn('install -d -o root -g root -m 0755 "${TARGET_CATALOG}"', bootstrap)
+        self.assertIn('install -o root -g root -m 0644', bootstrap)
+        self.assertIn('--delivery-directory "${TARGET_CATALOG}"', bootstrap)
+
+    def test_shared_etc_tvt_parent_allows_separated_service_accounts_to_traverse(self):
+        bootstrap = self.text("bootstrap-postgresql.sh")
+        kubeconfig = self.text("install-tvt-kubeconfig.sh")
+        pipeline_sync = self.text("install-pipeline-image-sync.sh")
+        expected = "install -d -o root -g root -m 0755 /etc/tvt"
+        self.assertIn(expected, bootstrap)
+        self.assertIn(expected, pipeline_sync)
+        self.assertIn('install -d -o root -g root -m 0755 "${target_dir}"', kubeconfig)
+        self.assertIn("install -d -o root -g tvt-edge -m 0750 /etc/tvt/credential-keys", bootstrap)
+        self.assertIn('chown root:tvt-edge "${temporary}"', kubeconfig)
+        self.assertIn('chmod 0640 "${temporary}"', kubeconfig)
 
     def test_host_worker_uses_scoped_kubeconfig(self):
         foundation = (ROOT / "deploy/k8s/apexfabric-foundation.yaml").read_text()

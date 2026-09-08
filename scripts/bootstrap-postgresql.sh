@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly SOURCE_CATALOG="${REPO_ROOT}/solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
+readonly TARGET_CATALOG="/opt/tvt/solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
 VENV=/opt/tvt/venv
 
 usage() {
@@ -41,9 +43,23 @@ if ! id tvt-alert >/dev/null 2>&1; then
   useradd --system --gid tvt-alert --home-dir /var/lib/tvt-alert \
     --shell /usr/sbin/nologin tvt-alert
 fi
+# Both service accounts need search permission here; sensitive descendants stay restricted.
+install -d -o root -g root -m 0755 /etc/tvt
 install -d -o tvt-edge -g tvt-edge -m 0750 /var/lib/tvt
 install -d -o tvt-alert -g tvt-alert -m 0750 /var/lib/tvt-alert
 install -d -o root -g tvt-edge -m 0750 /etc/tvt/credential-keys
+install -d -o root -g root -m 0755 "${TARGET_CATALOG}"
+for filename in \
+  image-contract.yaml \
+  desired-state.schema.json \
+  desired-state.example.json \
+  metrics.schema.json \
+  analytics-event.schema.json \
+  analytics-event.example.json \
+  provenance.json; do
+  install -o root -g root -m 0644 \
+    "${SOURCE_CATALOG}/${filename}" "${TARGET_CATALOG}/${filename}"
+done
 if [[ ! -f /etc/tvt/credential-keys/v1.key ]]; then
   temporary_key="$(mktemp /etc/tvt/credential-keys/.v1.key.XXXXXX)"
   trap 'rm -f "${temporary_key:-}"' EXIT
@@ -106,8 +122,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 SQL
 runuser -u tvt-edge -- env TVT_DATABASE_URL=postgresql+psycopg:///tvt \
   "${VENV}/bin/tvt-edge" seed-solutions \
-  --delivery-directory \
-  "${REPO_ROOT}/solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4" \
+  --delivery-directory "${TARGET_CATALOG}" \
   --registry 127.0.0.1:5000
 runuser -u postgres -- psql -v ON_ERROR_STOP=1 -d tvt <<'SQL'
 GRANT CONNECT ON DATABASE tvt TO "tvt-alert";

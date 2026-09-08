@@ -43,6 +43,15 @@ files are preserved. Installation evidence is under `/var/lib/tvt/install/`.
 The remaining commands in this document are internal worker/developer
 procedures and are not the supported clean-host workflow.
 
+The experimental online test kit is not a production release bundle and must
+not be passed to the production entry points above. Its complete transfer,
+permission-safe extraction, driver reboot, component installation, and final
+verification procedure is in
+[TVT online test-kit installation](docs/ONLINE-TEST-KIT-INSTALL.md). Always use
+that extraction procedure, including its ownership/mode normalization, so both
+older restrictive archives and newly normalized archives behave consistently
+on every target box.
+
 For scripted package generation and rebuilding after a GitHub commit, run
 `scripts/make-tvt-edge-release.sh --help` and follow
 [TVT edge release build runbook](docs/EDGE-RELEASE-BUILD.md).

@@ -27,6 +27,18 @@ if [[ -n "${INSTALLER}" && ${DOWNLOAD_INSTALLER} == true ]]; then
   exit 2
 fi
 
+if systemctl cat k3s-agent.service >/dev/null 2>&1; then
+  echo "an existing K3s agent installation was detected" >&2
+  echo "TVT requires this device to be a standalone single-node K3s server" >&2
+  echo "remove or migrate the agent through its owner-approved uninstall procedure before continuing" >&2
+  exit 1
+fi
+if command -v k3s >/dev/null 2>&1 && ! systemctl cat k3s.service >/dev/null 2>&1; then
+  echo "a K3s binary exists without a K3s server service" >&2
+  echo "remove the incomplete or non-server installation before continuing" >&2
+  exit 1
+fi
+
 if ! systemctl is-active --quiet tvt-local-registry.service; then
   echo "the local registry is not active; run scripts/install-local-registry.sh first" >&2
   exit 1

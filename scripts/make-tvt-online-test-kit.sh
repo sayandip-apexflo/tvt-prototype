@@ -278,6 +278,9 @@ acquire_traffic() {
     fail "Traffic archive size is ${actual_size}, expected ${PIPELINE_TRAFFIC_ARCHIVE_SIZE}"
   actual_digest="$(sha256sum "${source_archive}" | awk '{print $1}')"
   [[ ${actual_digest} == "${PIPELINE_TRAFFIC_ARCHIVE_SHA256}" ]] || fail "Traffic archive checksum mismatch"
+  python3 scripts/verify-docker-archive-tag.py \
+    --archive "${source_archive}" --expected "${PIPELINE_TRAFFIC_ARCHIVE_IMAGE}" || \
+    fail "Traffic archive image tag does not match config/pipeline.env"
   destination="${kit}/images/traffic-edge-runtime-v4.tar"
   cp --reflink=auto --sparse=always "${source_archive}" "${destination}"
 }
@@ -293,19 +296,39 @@ cat >"${kit}/README-target-install.md" <<EOF
 
 This is an experimental online-install kit for source commit \`${SOURCE_COMMIT}\`.
 It is not the checksum-complete offline production release. Ubuntu packages,
-Intel drivers, and OpenVINO must be resolved on the target. The Intel 255H is
-not the formally qualified 285H, so use of the hardware override is explicit
-and the current Phase-5 host qualification will report a failure.
+Intel drivers, and OpenVINO must be resolved on the target. The qualified
+hardware target is the Intel Core Ultra 9 285H. Use the unverified-hardware
+override only for a separately audited equivalent device.
 
 ## Verify and unpack
 
-Verify the outer archive checksum before extraction. After extraction, verify
-the internal files:
+Verify the outer archive checksum before extraction. Extract into a root-owned,
+service-readable location rather than a home directory. The ownership and mode
+normalization below is safe because this kit contains no credentials, works
+with older kits that carried restrictive transport modes, and leaves the
+installing administrator with read/traverse access:
 
 \`\`\`bash
-cd ${kit_name}
-sha256sum --check checksums.sha256
+TVT_ARCHIVE="\$PWD/${kit_name}.tar.gz"
+TVT_KIT_ROOT="/opt/tvt/${kit_name}"
+TVT_INSTALL_GROUP="\$(id -gn)"
+
+sha256sum --check "\${TVT_ARCHIVE}.sha256"
+sudo install -d -o root -g root -m 0755 /opt/tvt
+sudo tar --extract --gzip --no-same-owner \
+  --file "\${TVT_ARCHIVE}" --directory /opt/tvt
+sudo chown -R root:"\${TVT_INSTALL_GROUP}" "\${TVT_KIT_ROOT}"
+sudo chmod -R u=rwX,g=rX,o= "\${TVT_KIT_ROOT}"
+cd "\${TVT_KIT_ROOT}"
+sha256sum --check --quiet checksums.sha256
 \`\`\`
+
+Do not use recursive mode \`777\`, do not make the kit user-owned, and do not
+keep the Traffic archive under \`/home\`; the hardened synchronization service
+cannot read home directories. The complete command sequence is in
+\`source/docs/ONLINE-TEST-KIT-INSTALL.md\`. Re-declare the documented path
+variables after every SSH reconnect or reboot, and copy underscores literally;
+do not escape them as \`\\_\`.
 
 ## Target order
 
@@ -313,7 +336,7 @@ Run from the extracted \`source/\` directory on Ubuntu 24.04 amd64:
 
 1. Stop competing GPU/NPU workloads and ensure adequate free disk.
 2. Install the Intel stack online with
-   \`sudo bash scripts/install-tvt-hardware-drivers.sh --mode online --allow-unverified-hardware\`.
+   \`sudo bash scripts/install-tvt-hardware-drivers.sh --mode online\`.
 3. Reboot and verify \`/dev/dri/renderD128\`, \`/dev/accel/accel0\`, VA-API,
    OpenCL, and OpenVINO CPU/GPU/NPU discovery.
 4. Install the local Registry from \`../images/registry.tar\`.
@@ -374,7 +397,7 @@ document = {
     "source_tests": tests,
     "architecture": "amd64",
     "target_os": "ubuntu-24.04",
-    "target_hardware": "intel-255h-unverified-equivalent",
+    "target_hardware": "intel-285h",
     "target_requires_network": True,
     "target_requires_driver_reboot": True,
     "contains_credentials": False,
@@ -392,8 +415,7 @@ document = {
         "openvino-wheel-closure",
     ],
     "warnings": [
-        "Intel 255H is not the formally qualified 285H profile",
-        "Phase-5 host.platform qualification will fail on the 255H",
+        "Non-285H systems require an explicit audited-equivalent override and are not formally qualified",
         "node-management Dockerfiles currently use a mutable python:3.12-slim build base",
         "the get.k3s.io installer is snapshotted and hashed here but has no repository-configured upstream pin",
     ],
@@ -403,12 +425,46 @@ document = {
 )
 PY
 
+# Transport archives contain no credentials. Normalize the staging tree so a
+# root extraction remains inspectable by any local administrator. Preserve the
+# executable bit only for files that were already executable (for example K3s
+# and repository scripts); all other files are read-only to group/other.
+find "${kit}" -type d -exec chmod 0755 {} +
+find "${kit}" -type f ! -perm /111 -exec chmod 0644 {} +
+find "${kit}" -type f -perm /111 -exec chmod 0755 {} +
+
 (
   cd "${kit}"
   find . -type f ! -name checksums.sha256 -printf '%P\0' \
     | sort -z | xargs -0 sha256sum -- >checksums.sha256
   sha256sum --check checksums.sha256
 )
+chmod 0644 "${kit}/checksums.sha256"
+
+python3 - "${kit}" <<'PY'
+import pathlib
+import stat
+import sys
+
+root = pathlib.Path(sys.argv[1])
+problems = []
+for path in [root, *root.rglob("*")]:
+    if path.is_symlink():
+        problems.append(f"symlink is not allowed in the transport kit: {path.relative_to(root)}")
+        continue
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if path.is_dir():
+        expected = 0o755
+    elif path.is_file():
+        expected = 0o755 if mode & 0o111 else 0o644
+    else:
+        problems.append(f"unsupported transport entry: {path.relative_to(root)}")
+        continue
+    if mode != expected:
+        problems.append(f"{path.relative_to(root)} has mode {mode:04o}; expected {expected:04o}")
+if problems:
+    raise SystemExit("transport permission verification failed:\n" + "\n".join(problems))
+PY
 
 source_epoch="$(git show -s --format=%ct "${SOURCE_COMMIT}")"
 temporary_archive="$(mktemp "${OUTPUT_DIRECTORY}/.${kit_name}.tar.gz.XXXXXX")"

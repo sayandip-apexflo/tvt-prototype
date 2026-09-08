@@ -147,7 +147,9 @@ install_node_management() {
 
 install_pipeline_image() {
   export PATH="${VENV_DIRECTORY}/bin:${PATH}"
-  install -d -o root -g root -m 0700 /var/lib/tvt/pipeline /etc/tvt
+  install -d -o root -g root -m 0700 /var/lib/tvt/pipeline
+  # Shared traversal only; credential and environment files remain private below it.
+  install -d -o root -g root -m 0755 /etc/tvt
   if [[ -n ${PIPELINE_CREDENTIALS_FILE} ]]; then
     if [[ -e /etc/tvt/pipeline-image-sync.env ]]; then
       cmp -s "${PIPELINE_CREDENTIALS_FILE}" /etc/tvt/pipeline-image-sync.env || \
@@ -281,6 +283,8 @@ PY
   [[ ${available} -ge 1 ]] || tvt_fail "Traffic catalog entry is not available"
   deployment_count="$(runuser -u postgres -- psql -d tvt -Atc 'SELECT count(*) FROM solution_deployments')"
   [[ ${deployment_count} == 0 ]] || tvt_fail "a Traffic deployment was created automatically"
+  [[ $(stat -c '%U:%G:%a' /etc/tvt) == root:root:755 ]] || \
+    tvt_fail "/etc/tvt ownership or permissions prevent service-account traversal"
   [[ $(stat -c '%a' /etc/tvt/credential-keys) == 750 ]] || tvt_fail "credential key directory permissions are unsafe"
   ! grep -Eiq '(^|_)(password|secret|token|credential|api_key)=' /etc/tvt/edge.env || \
     tvt_fail "inline credential-like values are forbidden in /etc/tvt/edge.env"

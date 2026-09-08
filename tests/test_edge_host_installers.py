@@ -42,6 +42,7 @@ class EdgeHostInstallerTests(unittest.TestCase):
             "scripts/install-k3s-single-node.sh", "scripts/publish-control-images.sh",
             "scripts/install-k3s-plane.sh", "scripts/verify-k3s-plane.sh",
             "scripts/import-pipeline-traffic-image.sh", "scripts/verify-pipeline-image-inspect.py",
+            "scripts/verify-docker-archive-tag.py",
             "scripts/verify-pipeline-image-sync.sh", "scripts/install-pipeline-image-sync.sh",
             "scripts/bootstrap-postgresql.sh", "scripts/install-tvt-kubeconfig.sh",
             "scripts/install-traffic-qualification.sh",
@@ -161,6 +162,11 @@ class EdgeHostInstallerTests(unittest.TestCase):
         self.assertIn("--archive-file", installer)
         self.assertNotIn("docker build", installer)
         self.assertNotIn("git clone", installer)
+
+    def test_integrated_installer_preserves_shared_etc_tvt_traversal(self) -> None:
+        installer = (ROOT / "install-tvt-edge-host.sh").read_text(encoding="utf-8")
+        self.assertIn("install -d -o root -g root -m 0755 /etc/tvt", installer)
+        self.assertIn("root:root:755", installer)
 
     def test_runtime_resource_root_can_be_release_owned(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

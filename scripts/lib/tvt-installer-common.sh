@@ -121,6 +121,7 @@ required_resources = {
     "scripts/install-k3s-single-node.sh", "scripts/publish-control-images.sh",
     "scripts/install-k3s-plane.sh", "scripts/verify-k3s-plane.sh",
     "scripts/import-pipeline-traffic-image.sh", "scripts/verify-pipeline-image-inspect.py",
+    "scripts/verify-docker-archive-tag.py",
     "scripts/verify-pipeline-image-sync.sh", "scripts/install-pipeline-image-sync.sh",
     "scripts/bootstrap-postgresql.sh", "scripts/install-tvt-kubeconfig.sh",
     "scripts/install-traffic-qualification.sh",

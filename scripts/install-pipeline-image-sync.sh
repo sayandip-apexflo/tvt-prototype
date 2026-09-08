@@ -52,7 +52,9 @@ curl --fail --silent --show-error --retry 2 --retry-delay 2 \
   "http://${LOCAL_REGISTRY_ADDRESS}/v2/" >/dev/null
 
 install -d -o root -g root -m 0755 /opt/tvt/scripts /opt/tvt/config
-install -d -o root -g root -m 0700 /var/lib/tvt/pipeline /etc/tvt
+install -d -o root -g root -m 0700 /var/lib/tvt/pipeline
+# Shared traversal only; credential and environment files remain private below it.
+install -d -o root -g root -m 0755 /etc/tvt
 install -o root -g root -m 0755 \
   "${REPO_ROOT}/scripts/import-pipeline-traffic-image.sh" \
   /opt/tvt/scripts/import-pipeline-traffic-image.sh
@@ -62,6 +64,9 @@ install -o root -g root -m 0755 \
 install -o root -g root -m 0755 \
   "${REPO_ROOT}/scripts/verify-pipeline-image-inspect.py" \
   /opt/tvt/scripts/verify-pipeline-image-inspect.py
+install -o root -g root -m 0755 \
+  "${REPO_ROOT}/scripts/verify-docker-archive-tag.py" \
+  /opt/tvt/scripts/verify-docker-archive-tag.py
 install -o root -g root -m 0644 \
   "${REPO_ROOT}/config/platform.env" /opt/tvt/config/platform.env
 install -o root -g root -m 0644 \
