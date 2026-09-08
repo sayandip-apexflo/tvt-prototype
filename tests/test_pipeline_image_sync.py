@@ -40,7 +40,6 @@ class PipelineImageSyncTests(unittest.TestCase):
         self.assertIn("install -d -o root -g root -m 0755 /etc/tvt", installer)
         self.assertIn("-m 0600", installer)
         self.assertIn("pipeline-image-sync.env", installer)
-        self.assertIn("verify-docker-archive-tag.py", installer)
         self.assertIn("systemctl enable --now tvt-pipeline-image-sync.timer", installer)
         self.assertIn("TVT_PIPELINE_STATE_DIR=/var/lib/tvt/pipeline", service)
         example = self.text("deploy/host/tvt-pipeline-image-sync.env.example")

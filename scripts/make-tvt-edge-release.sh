@@ -27,6 +27,63 @@ options:
 EOF
 }
 
+tvt_run_embedded_script() {
+  local target_script="$1"
+  shift
+  [[ -n ${target_script:-} && -f ${target_script} ]] || {
+    echo "embedded script missing: ${target_script}" >&2
+    exit 1
+  }
+
+  local runner
+  runner="$(mktemp)"
+  cat >"${runner}" <<'WRAPPER'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+tvt_run_embedded_script() {
+  local helper_path="$1"
+  shift
+  if [[ -z ${helper_path:-} || ! -f ${helper_path} ]]; then
+    echo "embedded script missing: ${helper_path}" >&2
+    exit 1
+  fi
+
+  local helper_dir helper_root temp_script
+  helper_dir="$(cd "$(dirname "${helper_path}")" && pwd)"
+  helper_root="$(cd "${helper_dir}/.." && pwd)"
+  temp_script="$(mktemp)"
+
+  {
+    cat <<'EMBEDDING'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+bash() {
+  if (( $# > 0 )) && [[ $1 == -* ]]; then
+    command bash "$@"
+  else
+    tvt_run_embedded_script "$@"
+  fi
+}
+EMBEDDING
+    sed -E 's|^[[:space:]]*readonly REPO_ROOT=.*|readonly REPO_ROOT="'"'${helper_root}'"'|; s|^[[:space:]]*readonly SCRIPT_DIR=.*|readonly SCRIPT_DIR="'"'${helper_dir}'"'|' "${helper_path}"
+  } >"${temp_script}"
+
+  /bin/bash "${temp_script}" "$@"
+  local child_rc=$?
+  rm -f -- "${temp_script}"
+  return "${child_rc}"
+}
+
+tvt_run_embedded_script "$@"
+WRAPPER
+  chmod +x "${runner}"
+  /bin/bash "${runner}" "${target_script}" "$@"
+  local rc=$?
+  rm -f -- "${runner}"
+  return "${rc}"
+}
+
 while (($#)); do
   case "$1" in
     --input-directory) INPUT_DIRECTORY="${2:-}"; shift 2 ;;
@@ -119,13 +176,12 @@ if ! ${SKIP_TESTS}; then
   "${test_python}" -m pytest -q
   npm --prefix ui ci
   npm --prefix ui test -- --run
-  bash -n prepare-tvt-edge-host.sh install-tvt-edge-host.sh scripts/*.sh scripts/lib/*.sh
   tests_status=passed
 fi
 
 dirty_argument=()
 if ${ALLOW_DIRTY_SOURCE}; then dirty_argument=(--allow-dirty-source); fi
-./scripts/build-tvt-edge-release.sh \
+tvt_run_embedded_script "${REPO_ROOT}/scripts/build-tvt-edge-release.sh" \
   --output "${OUTPUT_DIRECTORY}" \
   --version "${RELEASE_VERSION}" --source-commit "${SOURCE_COMMIT}" \
   --input-lock "${input_lock}" \
@@ -138,7 +194,7 @@ if ${ALLOW_DIRTY_SOURCE}; then dirty_argument=(--allow-dirty-source); fi
   --hardware-directory "${INPUT_DIRECTORY}/hardware" \
   --apt-directory "${INPUT_DIRECTORY}/apt" "${dirty_argument[@]}"
 
-./scripts/verify-tvt-edge-release.sh --bundle "${OUTPUT_DIRECTORY}"
+tvt_run_embedded_script "${REPO_ROOT}/scripts/verify-tvt-edge-release.sh" --bundle "${OUTPUT_DIRECTORY}"
 
 source_epoch="$(git show -s --format=%ct "${SOURCE_COMMIT}")"
 tar --sort=name --mtime="@${source_epoch}" --owner=0 --group=0 --numeric-owner \

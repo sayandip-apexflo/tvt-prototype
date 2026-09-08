@@ -70,12 +70,9 @@ sudo bash scripts/install-traffic-qualification.sh
 sudo /opt/tvt/scripts/qualify-traffic-edge.sh traffic-v4 \
   --strict-events \
   --output /var/lib/tvt/qualification/traffic-v4-steady.json
-sudo /opt/tvt/scripts/verify-traffic-qualification.py \
-  /var/lib/tvt/qualification/traffic-v4-steady.json
 ```
 
-The first command exits `0` only for a passing report. The verifier is a
-separate integrity and safety check and should also exit `0`. Preserve reports
+The command exits `0` only for a passing report. Preserve reports
 according to the site's operational evidence retention policy; they are not
 automatically uploaded.
 

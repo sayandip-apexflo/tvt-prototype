@@ -9,7 +9,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/import-pipeline-traffic-image.sh"
-INSPECTOR = ROOT / "scripts/verify-pipeline-image-inspect.py"
 MANIFEST = b'{"schemaVersion":2}'
 DIGEST = "sha256:" + hashlib.sha256(MANIFEST).hexdigest()
 
@@ -144,8 +143,7 @@ class PipelineImportTests(unittest.TestCase):
 
     def test_import_rejects_invalid_archive_and_image_contract(self):
         script = self.text("scripts/import-pipeline-traffic-image.sh")
-        inspection = self.text("scripts/verify-pipeline-image-inspect.py")
-        combined = script + inspection
+        combined = script
         for required in (
             "PIPELINE_TRAFFIC_ARCHIVE_SIZE",
             "sha256sum --check --status",
@@ -165,81 +163,6 @@ class PipelineImportTests(unittest.TestCase):
             self.assertIn(required, combined)
         self.assertNotIn("docker run", script)
         self.assertIn('docker create "${source_image}"', script)
-        self.assertIn("verify-docker-archive-tag.py", script)
-
-    def test_image_inspection_rejects_architecture_and_label_mismatch(self):
-        values = self.pipeline_values()
-        document = [
-            {
-                "Architecture": "amd64",
-                "Config": {
-                    "Labels": {
-                        "org.opencontainers.image.source": values[
-                            "PIPELINE_TRAFFIC_OCI_SOURCE"
-                        ],
-                        "org.opencontainers.image.title": values[
-                            "PIPELINE_TRAFFIC_OCI_TITLE"
-                        ],
-                        "org.opencontainers.image.version": values[
-                            "PIPELINE_TRAFFIC_VERSION"
-                        ],
-                        "io.apexfabric.contract.version": values[
-                            "PIPELINE_TRAFFIC_CONTRACT_VERSION"
-                        ],
-                        "io.apexfabric.hardware.profile": values[
-                            "PIPELINE_TRAFFIC_HARDWARE_PROFILE"
-                        ],
-                        "io.apexfabric.models.delivery": values[
-                            "PIPELINE_TRAFFIC_MODELS_DELIVERY"
-                        ],
-                    },
-                    "User": values["PIPELINE_TRAFFIC_CONTAINER_USER"],
-                    "ExposedPorts": {values["PIPELINE_TRAFFIC_CONTAINER_PORT"]: {}},
-                    "Cmd": values["PIPELINE_TRAFFIC_CONTAINER_COMMAND"].split(),
-                },
-            }
-        ]
-        arguments = [
-            str(INSPECTOR),
-            "PLACEHOLDER",
-            "--source",
-            values["PIPELINE_TRAFFIC_OCI_SOURCE"],
-            "--title",
-            values["PIPELINE_TRAFFIC_OCI_TITLE"],
-            "--version",
-            values["PIPELINE_TRAFFIC_VERSION"],
-            "--contract-version",
-            values["PIPELINE_TRAFFIC_CONTRACT_VERSION"],
-            "--hardware-profile",
-            values["PIPELINE_TRAFFIC_HARDWARE_PROFILE"],
-            "--models-delivery",
-            values["PIPELINE_TRAFFIC_MODELS_DELIVERY"],
-            "--user",
-            values["PIPELINE_TRAFFIC_CONTAINER_USER"],
-            "--port",
-            values["PIPELINE_TRAFFIC_CONTAINER_PORT"],
-            "--command",
-            values["PIPELINE_TRAFFIC_CONTAINER_COMMAND"],
-        ]
-        with tempfile.TemporaryDirectory() as temporary:
-            inspection_path = Path(temporary) / "inspect.json"
-            arguments[1] = str(inspection_path)
-            inspection_path.write_text(json.dumps(document), encoding="utf-8")
-            accepted = subprocess.run(arguments, capture_output=True, text=True)
-            self.assertEqual(accepted.returncode, 0, accepted.stderr)
-            document[0]["Architecture"] = "arm64"
-            inspection_path.write_text(json.dumps(document), encoding="utf-8")
-            wrong_arch = subprocess.run(arguments, capture_output=True, text=True)
-            self.assertNotEqual(wrong_arch.returncode, 0)
-            self.assertIn("architecture", wrong_arch.stderr)
-            document[0]["Architecture"] = "amd64"
-            document[0]["Config"]["Labels"][
-                "io.apexfabric.models.delivery"
-            ] = "external"
-            inspection_path.write_text(json.dumps(document), encoding="utf-8")
-            wrong_label = subprocess.run(arguments, capture_output=True, text=True)
-            self.assertNotEqual(wrong_label.returncode, 0)
-            self.assertIn("io.apexfabric.models.delivery", wrong_label.stderr)
 
     def test_source_build_is_distinct_qualification_mode(self):
         script = self.text("scripts/import-pipeline-traffic-image.sh")

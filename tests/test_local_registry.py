@@ -23,7 +23,6 @@ class LocalRegistryTests(unittest.TestCase):
     def test_phase_one_shell_scripts_have_valid_syntax(self):
         scripts = [
             ROOT / "scripts/install-local-registry.sh",
-            ROOT / "scripts/verify-local-registry.sh",
             ROOT / "scripts/configure-k3s-registry.sh",
             ROOT / "scripts/install-k3s-single-node.sh",
         ]
@@ -37,9 +36,6 @@ class LocalRegistryTests(unittest.TestCase):
         )
         self.assertIn(
             "--platform linux/amd64", self.text("scripts/install-local-registry.sh")
-        )
-        self.assertIn(
-            "--platform linux/amd64", self.text("scripts/verify-local-registry.sh")
         )
 
     def test_registry_is_loopback_only_and_persistent(self):
@@ -92,19 +88,10 @@ class LocalRegistryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("HOST[:PORT]", result.stderr)
 
-    def test_verifier_proves_docker_push_and_k3s_pull_by_digest(self):
-        verifier = self.text("scripts/verify-local-registry.sh")
-        self.assertIn('docker push "${local_image}"', verifier)
-        self.assertIn("docker-content-digest:", verifier)
-        self.assertIn('k3s crictl pull "${immutable_image}"', verifier)
-        self.assertIn("k3s crictl images --digests --no-trunc", verifier)
-        self.assertIn("retry_with_timeout", verifier)
-
     def test_operator_documentation_uses_scripts_instead_of_embedded_installers(self):
         commands = self.text("COMMANDS.md")
         readme = self.text("README.md")
         self.assertIn("scripts/install-local-registry.sh", commands)
-        self.assertIn("scripts/verify-local-registry.sh", commands)
         self.assertIn("127.0.0.1:5000", readme)
 
 

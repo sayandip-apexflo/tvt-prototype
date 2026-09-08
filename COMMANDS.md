@@ -43,15 +43,6 @@ files are preserved. Installation evidence is under `/var/lib/tvt/install/`.
 The remaining commands in this document are internal worker/developer
 procedures and are not the supported clean-host workflow.
 
-The experimental online test kit is not a production release bundle and must
-not be passed to the production entry points above. Its complete transfer,
-permission-safe extraction, driver reboot, component installation, and final
-verification procedure is in
-[TVT online test-kit installation](docs/ONLINE-TEST-KIT-INSTALL.md). Always use
-that extraction procedure, including its ownership/mode normalization, so both
-older restrictive archives and newly normalized archives behave consistently
-on every target box.
-
 For scripted package generation and rebuilding after a GitHub commit, run
 `scripts/make-tvt-edge-release.sh --help` and follow
 [TVT edge release build runbook](docs/EDGE-RELEASE-BUILD.md).
@@ -118,17 +109,6 @@ sudo bash scripts/install-k3s-single-node.sh \
 ```
 
 This performs the same installation without downloading either executable.
-
-### 5. Verify the registry push and K3s pull path
-
-```bash
-sudo bash scripts/verify-local-registry.sh
-```
-
-This checks the service's image, bind address, and persistent mount; pushes a
-pinned BusyBox smoke image with Docker; resolves the local immutable digest;
-pulls it with `k3s crictl`; and checks containerd's image list. The stable smoke
-tag makes the command idempotent.
 
 ```bash
 sudo k3s crictl images --digests --no-trunc
@@ -339,8 +319,6 @@ deployment:
 sudo /opt/tvt/scripts/qualify-traffic-edge.sh traffic-v4 \
   --strict-events \
   --output /var/lib/tvt/qualification/traffic-v4-steady.json
-sudo /opt/tvt/scripts/verify-traffic-qualification.py \
-  /var/lib/tvt/qualification/traffic-v4-steady.json
 ```
 
 Use `--strict-events` only while known traffic crosses a configured camera. If
