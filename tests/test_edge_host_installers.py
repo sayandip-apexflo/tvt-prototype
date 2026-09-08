@@ -57,6 +57,7 @@ class EdgeHostInstallerTests(unittest.TestCase):
             "tvt_edge/db/migrations/env.py", "packages/apt/runtime.deb",
             "hardware/driver-recipe.json", "hardware/linux-npu-driver.tar.gz",
             "hardware/wheels/openvino.whl",
+            "hardware/voyager-wheels/axelera_rt.whl",
         }
         for relative in required:
             path = root / relative
@@ -123,6 +124,7 @@ class EdgeHostInstallerTests(unittest.TestCase):
                 "images/node-status-controller.tar", "images/traffic-edge-runtime-v4.tar",
                 "k3s/install.sh", "k3s/k3s", "hardware/driver-recipe.json",
                 "hardware/linux-npu-driver.tar.gz", "hardware/wheels/openvino.whl",
+                "hardware/voyager-wheels/axelera_rt.whl",
                 "apt/runtime.deb",
             ]
             lock_files = {}
@@ -213,6 +215,24 @@ tvt_run_stage {state} 0.1.0 sample worker
             self.assertIn(option, install)
         self.assertIn("installation-report.json", install)
 
+    def test_hardware_installer_pins_metis_and_voyager_compatibility_line(self) -> None:
+        installer = (ROOT / "scripts/install-tvt-hardware-drivers.sh").read_text(
+            encoding="utf-8"
+        )
+        for required in (
+            'METIS_DKMS_VERSION="1.4.17"',
+            'VOYAGER_RUNTIME_VERSION="1.6.1"',
+            'METIS_FIRMWARE_RECOMMENDED="1.6.0"',
+            'METIS_BOARD_CONTROLLER_RECOMMENDED="7.4"',
+            'AXELERA_APT_KEY_FINGERPRINT="5AE357D1638F21311095816A82F63658F8BBFC11"',
+            '"linux-headers-$(uname -r)"',
+            'dkms status -m metis',
+            'Pin-Priority: 1001',
+            'voyager-wheels',
+        ):
+            self.assertIn(required, installer)
+        self.assertIn('"schema_version": 2', installer)
+
     def test_application_version_is_canonical_and_consistent(self) -> None:
         result = subprocess.run(
             ["python3", str(ROOT / "scripts/tvt-version.py"), "--check", "--expected", "0.1.0"],
@@ -232,6 +252,7 @@ tvt_run_stage {state} 0.1.0 sample worker
             traffic = b"traffic-image"
             npu = b"npu-archive"
             wheel = b"openvino-wheel"
+            voyager_wheel = b"voyager-wheel"
             files = {
                 "images/registry.tar": b"registry",
                 "images/node-reporter.tar": b"reporter",
@@ -241,6 +262,7 @@ tvt_run_stage {state} 0.1.0 sample worker
                 "k3s/k3s": b"#!/bin/sh\n",
                 "hardware/linux-npu-driver.tar.gz": npu,
                 "hardware/wheels/openvino.whl": wheel,
+                "hardware/voyager-wheels/axelera_rt.whl": voyager_wheel,
                 "apt/runtime.deb": b"deb",
             }
             for relative, content in files.items():
@@ -250,14 +272,25 @@ tvt_run_stage {state} 0.1.0 sample worker
             (root / "k3s/install.sh").chmod(0o755)
             (root / "k3s/k3s").chmod(0o755)
             recipe = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "hardware_profile": "intel-285h",
                 "os_id": "ubuntu",
                 "os_version_id": "24.04",
                 "architecture": "amd64",
                 "kernel_version": "6.8.0-test",
                 "npu": {"sha256": hashlib.sha256(npu).hexdigest()},
+                "apt": {"metis-dkms": "1.4.17"},
                 "wheels": {"openvino.whl": hashlib.sha256(wheel).hexdigest()},
+                "voyager": {
+                    "runtime_version": "1.6.1",
+                    "driver_package": "metis-dkms",
+                    "driver_version": "1.4.17",
+                    "firmware_recommended": "1.6.0",
+                    "board_controller_recommended": "7.4",
+                    "wheels": {
+                        "axelera_rt.whl": hashlib.sha256(voyager_wheel).hexdigest()
+                    },
+                },
             }
             (root / "hardware/driver-recipe.json").write_text(
                 json.dumps(recipe), encoding="utf-8"

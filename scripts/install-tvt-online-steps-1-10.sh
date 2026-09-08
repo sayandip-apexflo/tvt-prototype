@@ -130,7 +130,7 @@ initialize_baseline() {
     [[ ! -L ${STATE_DIR} ]] || fail "state directory is a symlink"
     return
   fi
-  for path in /etc/tvt /var/lib/tvt /var/lib/tvt-alert /opt/apexfabric/openvino-env "${KIT_ROOT}"; do
+  for path in /etc/tvt /var/lib/tvt /var/lib/tvt-alert /etc/apt/preferences.d/tvt-metis /opt/apexfabric/openvino-env /opt/apexfabric/voyager-1.6.1 "${KIT_ROOT}"; do
     [[ ! -e ${path} ]] || fail "pre-existing TVT path prevents a clean baseline: ${path}"
   done
   ! id tvt-edge >/dev/null 2>&1 || fail "pre-existing tvt-edge account prevents a clean baseline"
@@ -167,6 +167,11 @@ initialize_baseline() {
     printf 'true\n' >"${STATE_DIR}/intel-ppa-preexisting"
   else
     printf 'false\n' >"${STATE_DIR}/intel-ppa-preexisting"
+  fi
+  if [[ -e /etc/apt/sources.list.d/axelera.list || -e /etc/apt/keyrings/axelera.gpg ]]; then
+    printf 'true\n' >"${STATE_DIR}/axelera-apt-preexisting"
+  else
+    printf 'false\n' >"${STATE_DIR}/axelera-apt-preexisting"
   fi
   printf '%s\n' "${k3s_state}" >"${STATE_DIR}/baseline-k3s-state"
   printf '%s\n' "${ARCHIVE}" >"${STATE_DIR}/archive"
@@ -284,10 +289,14 @@ fi
 
 if ((stage < 3)); then
   [[ $(<"${STATE_DIR}/driver-install-boot-id") != "$(cat /proc/sys/kernel/random/boot_id)" ]] || fail "reboot after driver installation has not occurred"
-  log "verifying Intel GPU, NPU, VA-API, OpenCL, and OpenVINO"
+  log "verifying Intel GPU/NPU, Metis, VA-API, OpenCL, OpenVINO, and Voyager"
   [[ -e /dev/dri/renderD128 && -e /dev/accel/accel0 ]] || fail "required Intel device nodes are missing"
   lsmod | grep -Eq '^(i915|xe)\b' || fail "Intel GPU module is not loaded"
   lsmod | grep -Eq '^intel_vpu\b' || fail "Intel NPU module is not loaded"
+  lsmod | grep -Eq '^metis\b' || fail "Metis PCIe module is not loaded"
+  [[ -d /sys/class/metis ]] || fail "/sys/class/metis is missing"
+  compgen -G '/dev/metis-*' >/dev/null || fail "Metis device nodes are missing"
+  [[ $(dpkg-query -W -f='${Version}' metis-dkms 2>/dev/null || true) == 1.4.17 ]] || fail "metis-dkms 1.4.17 is not installed"
   vainfo --display drm --device /dev/dri/renderD128 >/dev/null
   clinfo -l
   /opt/apexfabric/openvino-env/bin/python - <<'PY'
@@ -298,10 +307,18 @@ print("OpenVINO devices:", sorted(devices))
 if missing:
     raise SystemExit("missing OpenVINO devices: " + ", ".join(sorted(missing)))
 PY
+  /opt/apexfabric/voyager-1.6.1/bin/python - <<'PY'
+import importlib.metadata
+import axelera.runtime
+version = importlib.metadata.version("axelera-rt")
+print("Voyager runtime:", version)
+if version != "1.6.1":
+    raise SystemExit(f"axelera-rt is {version}; expected 1.6.1")
+PY
   rm -f /var/lib/tvt/hardware-driver-reboot-required
   write_stage 3
   stage=3
-  log "hardware verification passed: renderD128, accel0, GPU/NPU modules, VA-API, OpenCL, and OpenVINO CPU/GPU/NPU are available"
+  log "hardware verification passed: Intel GPU/NPU, Metis, OpenVINO, and Voyager 1.6.1 are available"
 fi
 
 if ((stage < 4)); then

@@ -55,6 +55,12 @@ def discover() -> dict[str, Any]:
 
     gpu_nodes = _device_nodes("/dev/dri/renderD*")
     npu_nodes = _device_nodes("/dev/accel/accel*")
+    metis_class = Path("/sys/class/metis")
+    metis_nodes = sorted(
+        f"/dev/{entry.name}"
+        for entry in metis_class.glob("metis-*")
+        if entry.exists()
+    )
     va_available, va_version = _va_api_available(gpu_nodes)
     return {
         "schema_version": "tvt-1.0.0",
@@ -76,7 +82,11 @@ def discover() -> dict[str, Any]:
                 "device_nodes": npu_nodes,
                 "driver": {"loaded": _module_loaded("intel_vpu")},
             },
-            "metis": {"present": False, "device_nodes": []},
+            "metis": {
+                "present": bool(metis_nodes) and _module_loaded("metis"),
+                "device_nodes": metis_nodes,
+                "driver": {"loaded": _module_loaded("metis")},
+            },
         },
         "decoder": {
             "va_api": {"available": va_available, "version": va_version},

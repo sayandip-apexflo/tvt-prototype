@@ -19,10 +19,11 @@ sudo ./install-tvt-edge-host.sh \
   --site-config /media/tvt/site.yaml
 ```
 
-The first preparation pass installs host packages and the pinned Intel driver
-closure, records `/var/lib/tvt/install/prepare-state.json`, and stops without
-rebooting. The second pass proves that the reboot occurred and verifies GPU,
-NPU, VA-API, OpenCL, OpenVINO, Docker, and PostgreSQL before clearing the driver
+The first preparation pass installs host packages and the pinned Intel/Metis
+driver closure plus Voyager 1.6.1, records
+`/var/lib/tvt/install/prepare-state.json`, and stops without rebooting. The
+second pass proves that the reboot occurred and verifies GPU, NPU, Metis,
+VA-API, OpenCL, OpenVINO, Voyager, Docker, and PostgreSQL before clearing the driver
 reboot marker. The application installer will not run before that state is
 `prepared`.
 

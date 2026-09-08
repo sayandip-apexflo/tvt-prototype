@@ -177,6 +177,11 @@ sudo python3 -m json.tool /var/lib/tvt/hardware-driver-recipe.json
 sudo reboot
 ```
 
+This installs the locked Intel stack, `metis-dkms` 1.4.17, and the Voyager
+1.6.1 runtime. The Metis DKMS build requires headers for the running kernel.
+With Secure Boot enabled, enroll the generated module-signing MOK during the
+reboot before continuing.
+
 The normal command is correct for a 285H. Use `--allow-unverified-hardware`
 only after separately auditing a non-285H equivalent; that override bypasses
 only the CPU-model check and does not make the device formally qualified.
@@ -191,7 +196,9 @@ TVT_KIT_ROOT=/opt/tvt/tvt-edge-online-test-kit-0.1.0-0090aca6ffef
 
 test -e /dev/dri/renderD128
 test -e /dev/accel/accel0
-lsmod | grep -E '^(i915|xe|intel_vpu)\b'
+test -d /sys/class/metis
+compgen -G '/dev/metis-*'
+lsmod | grep -E '^(i915|xe|intel_vpu|metis)\b'
 vainfo --display drm --device /dev/dri/renderD128
 clinfo -l
 
@@ -203,6 +210,16 @@ print("OpenVINO devices:", sorted(devices))
 missing = {"CPU", "GPU", "NPU"} - devices
 if missing:
     raise SystemExit("missing OpenVINO devices: " + ", ".join(sorted(missing)))
+PY
+
+/opt/apexfabric/voyager-1.6.1/bin/python - <<'PY'
+import importlib.metadata
+import axelera.runtime
+
+version = importlib.metadata.version("axelera-rt")
+print("Voyager runtime:", version)
+if version != "1.6.1":
+    raise SystemExit(f"expected Voyager runtime 1.6.1, found {version}")
 PY
 ```
 

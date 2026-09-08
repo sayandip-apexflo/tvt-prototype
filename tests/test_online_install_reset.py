@@ -33,6 +33,8 @@ class OnlineInstallResetTests(unittest.TestCase):
             "checksums.sha256",
             "install-tvt-hardware-drivers.sh",
             "vainfo --display drm --device /dev/dri/renderD128",
+            "metis-dkms 1.4.17",
+            "voyager-1.6.1",
             "install-local-registry.sh",
             "install-k3s-single-node.sh",
             "install-k3s-plane.sh",
@@ -74,6 +76,7 @@ class OnlineInstallResetTests(unittest.TestCase):
         text = RESET.read_text(encoding="utf-8")
         self.assertIn("new-packages.txt", text)
         self.assertIn("changed-packages.tsv", text)
+        self.assertIn("axelera-apt-preexisting", text)
         self.assertIn("removed-packages.tsv", text)
         self.assertIn("new-docker-tags.txt", text)
         self.assertIn("APT would remove packages outside the captured install delta", text)

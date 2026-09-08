@@ -98,6 +98,8 @@ def input_files(root: pathlib.Path, lock_path: pathlib.Path | None = None) -> di
         raise InputError("required release inputs are missing: " + ", ".join(missing))
     if not any(name.startswith("hardware/wheels/") and name.endswith(".whl") for name in result):
         raise InputError("hardware/wheels contains no wheel files")
+    if not any(name.startswith("hardware/voyager-wheels/") and name.endswith(".whl") for name in result):
+        raise InputError("hardware/voyager-wheels contains no wheel files")
     if not any(name.startswith("apt/") and name.endswith(".deb") for name in result):
         raise InputError("apt contains no Debian packages")
     unsupported = sorted(
@@ -105,6 +107,7 @@ def input_files(root: pathlib.Path, lock_path: pathlib.Path | None = None) -> di
         for name in result
         if name not in REQUIRED_FILES
         and not (name.startswith("hardware/wheels/") and name.endswith(".whl"))
+        and not (name.startswith("hardware/voyager-wheels/") and name.endswith(".whl"))
         and not (name.startswith("apt/") and name.endswith(".deb"))
     )
     if unsupported:
@@ -121,7 +124,7 @@ def validate_hardware(root: pathlib.Path, files: dict[str, pathlib.Path]) -> dic
     except (OSError, json.JSONDecodeError) as error:
         raise InputError(f"invalid hardware driver recipe: {error}") from error
     expected = {
-        "schema_version": 1,
+        "schema_version": 2,
         "hardware_profile": "intel-285h",
         "os_id": "ubuntu",
         "os_version_id": "24.04",
@@ -153,6 +156,36 @@ def validate_hardware(root: pathlib.Path, files: dict[str, pathlib.Path]) -> dic
             raise InputError(f"hardware recipe has an invalid wheel digest: {filename}")
         if sha256(root / "hardware/wheels" / filename) != expected_digest:
             raise InputError(f"hardware wheel does not match the recipe: {filename}")
+    voyager = recipe.get("voyager")
+    if not isinstance(voyager, dict):
+        raise InputError("hardware recipe has no Voyager runtime closure")
+    expected_voyager = {
+        "runtime_version": "1.6.1",
+        "driver_package": "metis-dkms",
+        "driver_version": "1.4.17",
+        "firmware_recommended": "1.6.0",
+        "board_controller_recommended": "7.4",
+    }
+    for key, value in expected_voyager.items():
+        if voyager.get(key) != value:
+            raise InputError(f"hardware recipe Voyager {key} does not equal {value!r}")
+    if recipe.get("apt", {}).get("metis-dkms") != "1.4.17":
+        raise InputError("hardware recipe does not pin metis-dkms 1.4.17")
+    voyager_pins = voyager.get("wheels")
+    if not isinstance(voyager_pins, dict) or not voyager_pins:
+        raise InputError("hardware recipe has no Voyager wheel closure")
+    actual_voyager_wheels = {
+        name.removeprefix("hardware/voyager-wheels/")
+        for name in files
+        if name.startswith("hardware/voyager-wheels/") and name.endswith(".whl")
+    }
+    if set(voyager_pins) != actual_voyager_wheels:
+        raise InputError("hardware Voyager wheel files do not exactly match the driver recipe")
+    for filename, expected_digest in voyager_pins.items():
+        if not isinstance(expected_digest, str) or not DIGEST.fullmatch(expected_digest):
+            raise InputError(f"hardware recipe has an invalid Voyager wheel digest: {filename}")
+        if sha256(root / "hardware/voyager-wheels" / filename) != expected_digest:
+            raise InputError(f"hardware Voyager wheel does not match the recipe: {filename}")
     return {"kernel_version": kernel, "recipe_sha256": sha256(root / "hardware/driver-recipe.json")}
 
 

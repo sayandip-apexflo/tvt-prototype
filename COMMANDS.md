@@ -392,8 +392,9 @@ acceptance matrix and failure handling.
 
 ## TVT edge hardware-driver commands
 
-These commands install and verify the Intel 285H hardware-driver stack used by
-TVT. The installer follows the `k3s-prototype` resolve-once policy: its first
+These commands install and verify the Intel 285H and Axelera Metis
+hardware-driver stack used by TVT. The installer follows the `k3s-prototype`
+resolve-once policy: its first
 run selects the current versions of the same driver packages, saves their exact
 versions and hashes, and reuses that lock on later runs.
 
@@ -425,11 +426,15 @@ The command:
 - enables the Intel graphics PPA used by `k3s-prototype`;
 - resolves and installs the matching Intel GPU, media, Level Zero, OpenCL,
   oneVPL, VA-API, and NPU packages from the Internet;
+- installs `metis-dkms` 1.4.17 with the active kernel headers and verifies its
+  DKMS build, matching the Voyager 1.6.1 compatibility line;
+- installs the pinned Voyager 1.6.1 runtime in
+  `/opt/apexfabric/voyager-1.6.1`;
 - installs `openvino` and `openvino-genai` in
   `/opt/apexfabric/openvino-env`;
 - writes the exact resolved recipe to
   `/var/lib/tvt/hardware-driver-recipe.json`; and
-- caches the locked NPU archive and Python wheel closure under
+- caches the locked NPU archive and OpenVINO/Voyager wheel closures under
   `/var/cache/tvt/hardware-drivers` for repeatable retries.
 
 If an audited Intel host is compatible but its CPU model string is not exactly
@@ -453,9 +458,9 @@ deleting it authorizes the selection of newer versions.
 sudo python3 -m json.tool /var/lib/tvt/hardware-driver-recipe.json
 ```
 
-This prints the exact APT versions, OpenVINO versions, wheel hashes, Intel NPU
-release URL and digest, OS, architecture, and kernel tuple selected during the
-first resolution.
+This prints the exact APT versions, OpenVINO and Voyager versions and wheel
+hashes, the Metis compatibility pins, Intel NPU release URL and digest, OS,
+architecture, and kernel tuple selected during the first resolution.
 
 ### 4. Reboot the edge device
 
@@ -471,11 +476,13 @@ matched runtime. Wait for the device to return before continuing.
 ```bash
 test -e /dev/dri/renderD128
 test -e /dev/accel/accel0
-lsmod | grep -E '^(i915|xe|intel_vpu)\b'
+test -d /sys/class/metis
+compgen -G '/dev/metis-*'
+lsmod | grep -E '^(i915|xe|intel_vpu|metis)\b'
 ```
 
 These commands confirm that the GPU render node, NPU accelerator node, Intel
-graphics module, and Intel NPU module are present after reboot. A non-zero exit
+graphics module, Intel NPU module, and Axelera Metis devices are present after reboot. A non-zero exit
 status means hardware qualification has not succeeded.
 
 ### 6. Verify the media and compute runtimes
@@ -500,6 +507,20 @@ print("OpenVINO devices:", sorted(devices))
 missing = {"CPU", "GPU", "NPU"} - devices
 if missing:
     raise SystemExit("missing OpenVINO devices: " + ", ".join(sorted(missing)))
+PY
+```
+
+Verify the isolated Voyager runtime:
+
+```bash
+/opt/apexfabric/voyager-1.6.1/bin/python - <<'PY'
+import importlib.metadata
+import axelera.runtime
+
+version = importlib.metadata.version("axelera-rt")
+print("Voyager runtime:", version)
+if version != "1.6.1":
+    raise SystemExit(f"expected Voyager runtime 1.6.1, found {version}")
 PY
 ```
 

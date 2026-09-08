@@ -131,6 +131,11 @@ verify_post_reboot() {
   [[ -e /dev/accel/accel0 ]] || tvt_fail "/dev/accel/accel0 is missing"
   if ! grep -Eq '^(i915|xe) ' /proc/modules; then tvt_fail "neither i915 nor xe is loaded"; fi
   grep -Eq '^intel_vpu ' /proc/modules || tvt_fail "intel_vpu is not loaded"
+  grep -Eq '^metis ' /proc/modules || tvt_fail "Metis PCIe module is not loaded"
+  [[ -d /sys/class/metis ]] || tvt_fail "/sys/class/metis is missing"
+  compgen -G '/dev/metis-*' >/dev/null || tvt_fail "Metis device nodes are missing"
+  [[ $(dpkg-query -W -f='${Version}' metis-dkms 2>/dev/null || true) == 1.4.17 ]] || \
+    tvt_fail "metis-dkms 1.4.17 is not installed"
   timeout 30s vainfo >/dev/null 2>&1 || tvt_fail "vainfo verification failed"
   timeout 30s clinfo -l >/dev/null 2>&1 || tvt_fail "clinfo platform listing failed"
   local openvino_python="${TVT_OPENVINO_PYTHON:-/opt/apexfabric/openvino-env/bin/python}"
@@ -141,6 +146,15 @@ devices = {name.split(".", 1)[0] for name in openvino.Core().available_devices}
 missing = {"CPU", "GPU", "NPU"} - devices
 if missing:
     raise SystemExit("OpenVINO devices missing: " + ", ".join(sorted(missing)))
+PY
+  local voyager_python="${TVT_VOYAGER_PYTHON:-/opt/apexfabric/voyager-1.6.1/bin/python}"
+  [[ -x ${voyager_python} ]] || tvt_fail "Voyager 1.6.1 runtime environment is missing"
+  "${voyager_python}" - <<'PY'
+import importlib.metadata
+import axelera.runtime
+version = importlib.metadata.version("axelera-rt")
+if version != "1.6.1":
+    raise SystemExit(f"axelera-rt is {version}; expected 1.6.1")
 PY
   systemctl is-active --quiet docker.service || tvt_fail "Docker is not active"
   docker info >/dev/null 2>&1 || tvt_fail "Docker is not healthy"

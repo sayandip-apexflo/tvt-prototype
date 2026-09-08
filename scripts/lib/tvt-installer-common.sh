@@ -145,6 +145,8 @@ for relative in ("hardware/driver-recipe.json", "hardware/linux-npu-driver.tar.g
     if not (root / relative).is_file(): raise SystemExit(f"required release resource is missing: {relative}")
 if not any((root / "hardware/wheels").glob("*.whl")):
     raise SystemExit("release contains no OpenVINO wheels")
+if not any((root / "hardware/voyager-wheels").glob("*.whl")):
+    raise SystemExit("release contains no Voyager runtime wheels")
 
 listed: dict[str, str] = {}
 for number, line in enumerate(checksums_path.read_text(encoding="utf-8").splitlines(), 1):

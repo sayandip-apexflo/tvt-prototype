@@ -30,8 +30,8 @@ if ${FULL_STACK}; then
 FULL-STACK PURGE: this ignores the pre-install baseline and permanently removes
 all TVT files/accounts, every K3s/Kubernetes role and cluster state, every
 Docker/containerd container/image/volume and runtime directory, every
-PostgreSQL cluster/database, the Intel graphics PPA, and installed Intel
-userspace GPU/NPU/media packages selected by the TVT driver recipe. Components
+PostgreSQL cluster/database, the Intel graphics PPA, Axelera APT source,
+Voyager runtime, and installed Intel/Metis packages selected by the TVT driver recipe. Components
 are removed even if they existed before TVT. Transferred files under /home and
 the Ubuntu kernel (including its built-in i915, xe, and intel_vpu modules) are
 preserved. A reboot is mandatory afterward.
@@ -70,7 +70,7 @@ cd /
 remove_tree() {
   local target="$1"
   case "${target}" in
-    /etc/tvt|/var/lib/tvt|/var/lib/tvt-alert|/var/cache/tvt|/opt/apexfabric/openvino-env|/opt/tvt|/opt/tvt/venv|/opt/tvt/scripts|/opt/tvt/config|/opt/tvt/solution-packs|/var/lib/tvt/qualification|/var/lib/tvt/pipeline|/var/lib/tvt/registry|/var/lib/tvt-online-test-install|/opt/tvt/tvt-edge-online-test-kit-*|/var/lib/rancher|/var/lib/rancher/k3s|/etc/rancher|/etc/rancher/k3s|/etc/kubernetes|/var/lib/kubelet|/etc/cni/net.d|/var/lib/cni|/run/k3s|/run/flannel|/var/lib/docker|/var/lib/containerd|/etc/docker|/etc/containerd|/etc/postgresql|/var/lib/postgresql|/var/lib/postgresql/16/main|/var/log/postgresql|/etc/systemd/system/k3s.service.d|/etc/systemd/system/k3s-agent.service.d) ;;
+    /etc/tvt|/var/lib/tvt|/var/lib/tvt-alert|/var/cache/tvt|/opt/apexfabric/openvino-env|/opt/apexfabric/voyager-1.6.1|/opt/tvt|/opt/tvt/venv|/opt/tvt/scripts|/opt/tvt/config|/opt/tvt/solution-packs|/var/lib/tvt/qualification|/var/lib/tvt/pipeline|/var/lib/tvt/registry|/var/lib/tvt-online-test-install|/opt/tvt/tvt-edge-online-test-kit-*|/var/lib/rancher|/var/lib/rancher/k3s|/etc/rancher|/etc/rancher/k3s|/etc/kubernetes|/var/lib/kubelet|/etc/cni/net.d|/var/lib/cni|/run/k3s|/run/flannel|/var/lib/docker|/var/lib/containerd|/etc/docker|/etc/containerd|/etc/postgresql|/var/lib/postgresql|/var/lib/postgresql/16/main|/var/log/postgresql|/etc/systemd/system/k3s.service.d|/etc/systemd/system/k3s-agent.service.d) ;;
     *) fail "refusing unsafe recursive removal target: ${target}" ;;
   esac
   [[ ! -e ${target} && ! -L ${target} ]] || rm -rf -- "${target}"
@@ -80,7 +80,7 @@ list_full_stack_packages() {
   dpkg-query -W -f='${binary:Package}\t${db:Status-Status}\n' 2>/dev/null | awk -F '\t' '
     $2 == "installed" {
       package=$1; bare=package; sub(/:.*/, "", bare)
-      if (bare ~ /^(docker.*|containerd.*|runc|k3s|kubeadm|kubectl|kubelet|kubernetes-cni|cri-tools|postgresql.*|libpq.*|libze.*|intel-(opencl|gsc|media|driver-compiler|fw-npu|level-zero|npu).*|libmfx.*|libvpl.*|libva.*|va-driver-all|vainfo|clinfo|libtbb.*|libigdgmm.*|ocl-icd-.*|mesa-va-drivers|git-lfs|jq)$/) print package
+      if (bare ~ /^(docker.*|containerd.*|runc|k3s|kubeadm|kubectl|kubelet|kubernetes-cni|cri-tools|postgresql.*|libpq.*|libze.*|intel-(opencl|gsc|media|driver-compiler|fw-npu|level-zero|npu).*|libmfx.*|libvpl.*|libva.*|va-driver-all|vainfo|clinfo|libtbb.*|libigdgmm.*|ocl-icd-.*|mesa-va-drivers|metis-dkms|dkms|git-lfs|jq)$/) print package
     }' | sort -u
 }
 
@@ -134,6 +134,7 @@ if ${FULL_STACK}; then
   remove_tree /var/cache/tvt
   remove_tree /opt/tvt
   remove_tree /opt/apexfabric/openvino-env
+  remove_tree /opt/apexfabric/voyager-1.6.1
   remove_tree /var/lib/docker
   remove_tree /var/lib/containerd
   remove_tree /etc/docker
@@ -159,6 +160,8 @@ if ${FULL_STACK}; then
   if grep -RqsE 'ppa\.launchpadcontent\.net/kobuk-team/intel-graphics|kobuk-team/ubuntu.*intel-graphics' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
     fail "Intel graphics PPA remains configured; remove it before package purge"
   fi
+  rm -f -- /etc/apt/sources.list.d/axelera.list /etc/apt/keyrings/axelera.gpg
+  rm -f -- /etc/apt/preferences.d/tvt-metis
   apt-get update
 
   mapfile -t purge_packages < <(list_full_stack_packages)
@@ -194,7 +197,7 @@ if ${FULL_STACK}; then
 fi
 
 [[ -d ${STATE_DIR} && ! -L ${STATE_DIR} ]] || fail "paired installer baseline is missing"
-for required in baseline-packages.tsv baseline-manual.txt baseline-docker-tags.txt baseline-unit-enabled.tsv baseline-unit-active.tsv baseline-paths.tsv baseline-k3s-state intel-ppa-preexisting kit-root new-packages.txt changed-packages.tsv removed-packages.tsv newly-manual.txt new-docker-tags.txt; do
+for required in baseline-packages.tsv baseline-manual.txt baseline-docker-tags.txt baseline-unit-enabled.tsv baseline-unit-active.tsv baseline-paths.tsv baseline-k3s-state intel-ppa-preexisting axelera-apt-preexisting kit-root new-packages.txt changed-packages.tsv removed-packages.tsv newly-manual.txt new-docker-tags.txt; do
   [[ -f ${STATE_DIR}/${required} && ! -L ${STATE_DIR}/${required} ]] || fail "baseline file is missing or unsafe: ${required}"
 done
 
@@ -256,7 +259,8 @@ for unit in "${units[@]}"; do
   rm -f -- "/etc/systemd/system/${unit}"
 done
 rm -f -- /etc/systemd/system/k3s.service.d/20-tvt-local-registry.conf
-rm -f -- /etc/postgresql/16/main/conf.d/tvt.conf
+  rm -f -- /etc/postgresql/16/main/conf.d/tvt.conf
+  rm -f -- /etc/apt/preferences.d/tvt-metis
 rmdir /etc/systemd/system/k3s.service.d >/dev/null 2>&1 || true
 systemctl daemon-reload
 
@@ -265,7 +269,8 @@ remove_tree /etc/tvt
 remove_tree /var/lib/tvt
 remove_tree /var/lib/tvt-alert
 remove_tree /var/cache/tvt
-remove_tree /opt/apexfabric/openvino-env
+  remove_tree /opt/apexfabric/openvino-env
+  remove_tree /opt/apexfabric/voyager-1.6.1
 remove_tree /opt/tvt/venv
 remove_tree /opt/tvt/scripts
 remove_tree /opt/tvt/config
@@ -281,6 +286,10 @@ if [[ $(<"${STATE_DIR}/intel-ppa-preexisting") == false ]]; then
   if command -v add-apt-repository >/dev/null 2>&1; then
     add-apt-repository -y --remove ppa:kobuk-team/intel-graphics
   fi
+fi
+if [[ $(<"${STATE_DIR}/axelera-apt-preexisting") == false ]]; then
+  log "removing the Axelera APT source introduced by the installer"
+  rm -f -- /etc/apt/sources.list.d/axelera.list /etc/apt/keyrings/axelera.gpg
 fi
 apt-get update
 
