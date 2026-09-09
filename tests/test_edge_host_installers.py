@@ -14,6 +14,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class EdgeHostInstallerTests(unittest.TestCase):
+    def test_host_package_list_excludes_redundant_tools(self) -> None:
+        prepare = (ROOT / "prepare-tvt-edge-host.sh").read_text(encoding="utf-8")
+        package_install = prepare.split("install_host_packages()", 1)[1].split(
+            "enable_host_services()", 1
+        )[0]
+        for package in (
+            "coreutils",
+            "git-lfs",
+            "git",
+            "jq",
+            "tar",
+            "util-linux",
+        ):
+            self.assertNotIn(package, package_install)
+
     def test_all_installer_shell_is_syntactically_valid(self) -> None:
         scripts = [
             ROOT / "prepare-tvt-edge-host.sh",

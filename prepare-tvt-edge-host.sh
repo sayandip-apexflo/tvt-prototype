@@ -149,10 +149,10 @@ install_host_packages() {
   export DEBIAN_FRONTEND=noninteractive
   local -a packages=(
     ca-certificates curl gnupg python3 python3-venv docker.io postgresql-16
-    jq openssl util-linux coreutils tar
+    openssl
   )
   if [[ ${MODE} == online ]]; then
-    packages+=(git git-lfs software-properties-common)
+    packages+=(software-properties-common)
     apt-get update
     apt-get install -y --no-install-recommends "${packages[@]}"
   else
@@ -164,7 +164,7 @@ install_host_packages() {
     (( ${#debs[@]} > 0 )) || tvt_fail "offline APT package directory contains no .deb files"
     apt-get install -y --no-install-recommends "${debs[@]}"
   fi
-  for command_name in curl docker jq openssl python3 psql systemctl; do
+  for command_name in curl docker openssl python3 psql systemctl; do
     command -v "${command_name}" >/dev/null 2>&1 || tvt_fail "host package installation did not provide ${command_name}"
   done
 }
