@@ -39,6 +39,20 @@ class EdgeHostInstallerTests(unittest.TestCase):
         ]
         subprocess.run(["bash", "-n", *map(str, scripts)], check=True)
 
+    def test_application_resources_and_node_readiness_are_portable(self) -> None:
+        installer = (ROOT / "install-tvt-edge-host.sh").read_text(encoding="utf-8")
+        application = installer.split("install_application()", 1)[1].split(
+            "install_registry()", 1
+        )[0]
+        verification = installer.split("final_verification()", 1)[1].split(
+            "write_install_evidence()", 1
+        )[0]
+
+        self.assertIn("solution-packs images k3s tvt_edge", application)
+        self.assertIn("k3s kubectl get nodes -o name", verification)
+        self.assertIn("kubectl wait --for=condition=Ready", verification)
+        self.assertNotIn(".status.conditions[?(", verification)
+
     def test_release_front_door_builds_missing_inputs(self) -> None:
         front_door = (ROOT / "scripts/make-tvt-edge-release.sh").read_text(
             encoding="utf-8"

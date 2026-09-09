@@ -131,7 +131,8 @@ install_application() {
   fi
   install -d -o root -g root -m 0755 "${RESOURCE_DIRECTORY}"
   local item
-  for item in manifest.json checksums.sha256 alembic.ini config deploy scripts solution-packs images k3s; do
+  for item in manifest.json checksums.sha256 alembic.ini config deploy scripts \
+    solution-packs images k3s tvt_edge; do
     cp -a "${BUNDLE}/${item}" "${RESOURCE_DIRECTORY}/"
   done
   python3 -m venv --clear "${VENV_DIRECTORY}"
@@ -279,6 +280,7 @@ install_qualification() {
 final_verification() {
   export TVT_RESOURCE_ROOT="${RESOURCE_DIRECTORY}"
   local unit
+  local -a nodes
   for unit in docker.service postgresql.service tvt-local-registry.service k3s.service \
     tvt-edge.service tvt-camera-sync.service tvt-retention.timer \
     tvt-k3s-watchdog.timer tvt-pipeline-image-sync.timer; do
@@ -286,9 +288,11 @@ final_verification() {
   done
   docker info >/dev/null
   curl --fail --silent --show-error --max-time 5 http://127.0.0.1:5000/v2/ >/dev/null
-  mapfile -t ready_nodes < <(k3s kubectl get nodes \
-    -o jsonpath='{range .items[?(@.status.conditions[?(@.type=="Ready")].status=="True")]}{.metadata.name}{"\n"}{end}')
-  [[ ${#ready_nodes[@]} -eq 1 && -n ${ready_nodes[0]} ]] || tvt_fail "K3s does not have exactly one Ready node"
+  mapfile -t nodes < <(k3s kubectl get nodes -o name)
+  [[ ${#nodes[@]} -eq 1 && -n ${nodes[0]} ]] || \
+    tvt_fail "K3s does not have exactly one registered node"
+  k3s kubectl wait --for=condition=Ready --timeout=60s "${nodes[0]}" >/dev/null || \
+    tvt_fail "K3s node did not become Ready"
   "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" verify-k3s-plane
   pg_isready --quiet
   runuser -u tvt-edge -- env TVT_RESOURCE_ROOT="${RESOURCE_DIRECTORY}" \
