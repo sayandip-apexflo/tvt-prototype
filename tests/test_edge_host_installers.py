@@ -62,6 +62,18 @@ class EdgeHostInstallerTests(unittest.TestCase):
         ):
             self.assertIn(required_stage, operations)
 
+    def test_npu_dependency_fields_are_queried_without_dpkg_labels(self) -> None:
+        operations = (ROOT / "scripts/tvt-edge-operations.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn(
+            'dpkg-deb -f "${package_file}" Depends Pre-Depends', operations
+        )
+        self.assertIn("for field in Depends Pre-Depends; do", operations)
+        self.assertIn(
+            'dpkg-deb -f "${package_file}" "${field}"', operations
+        )
+
     def test_operational_helpers_are_consolidated(self) -> None:
         operations = ROOT / "scripts/tvt-edge-operations.sh"
         result = subprocess.run(

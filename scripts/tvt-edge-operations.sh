@@ -267,9 +267,15 @@ npu_dependencies=()
 while IFS= read -r -d '' package_file; do
   while IFS= read -r dependency; do
     [[ -n ${dependency} ]] && npu_dependencies+=("${dependency}")
-  done < <(dpkg-deb -f "${package_file}" Depends Pre-Depends 2>/dev/null \
-    | tr ',' '\n' \
-    | sed -E 's/^ *([^ |(]+).*/\1/; /^[[:space:]]*$/d')
+  done < <(
+    # A multi-field dpkg-deb query prefixes values with labels such as
+    # "Depends:", which apt would then mistake for a package name.
+    for field in Depends Pre-Depends; do
+      dpkg-deb -f "${package_file}" "${field}" 2>/dev/null || true
+    done \
+      | tr ',' '\n' \
+      | sed -E 's/^ *([^ |(]+).*/\1/; /^[[:space:]]*$/d'
+  )
 done < <(find "${npu_extract}" -type f -name '*.deb' -print0)
 rm -rf -- "${npu_extract}"
 
