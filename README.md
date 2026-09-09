@@ -4,6 +4,11 @@ Single box deployment, reusing apexfabric.
 
 ## Production edge installation
 
+The workstation transport artifact is a gzip-compressed tar archive named
+`tvt-edge-release-<version>.tar.gz`, accompanied by a
+`.tar.gz.sha256` checksum file. Extracting it produces one checksum-complete
+release-bundle directory.
+
 The supported production entry points are the two release-bundle scripts. Do
 not run the component installers individually on a new edge host.
 
@@ -13,20 +18,21 @@ release bundle and run:
 ```bash
 sudo ./prepare-tvt-edge-host.sh --bundle /media/tvt/release --mode offline
 sudo reboot
-sudo ./prepare-tvt-edge-host.sh --bundle /media/tvt/release --mode offline
 sudo ./install-tvt-edge-host.sh \
   --bundle /media/tvt/release \
-  --site-config /media/tvt/site.yaml
+  --site-config /media/tvt/site.yaml \
+  --prepare-mode offline
 ```
 
 The first preparation pass installs host packages and the pinned Intel driver
 closure. If PCI detection finds Axelera vendor ID `0x1f9d`, it also installs
 Metis 1.4.17 and Voyager 1.6.1. It records
-`/var/lib/tvt/install/prepare-state.json`, and stops without rebooting. The
-second pass proves that the reboot occurred and verifies GPU, NPU, VA-API,
+`/var/lib/tvt/install/prepare-state.json`, and stops without rebooting. After
+the reboot, the application installer automatically runs the second preparation
+pass. It proves that the reboot occurred and verifies GPU, NPU, VA-API,
 OpenCL, OpenVINO, Docker, and PostgreSQL, plus Metis/Voyager when detected,
-before clearing the driver reboot marker. The application installer will not
-run before that state is `prepared`.
+before clearing the driver reboot marker and continuing the installation. The
+application stages will not run before that state is `prepared`.
 
 A site file contains identifiers only; never put credentials in it:
 

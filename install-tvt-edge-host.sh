@@ -9,8 +9,10 @@ source "${SCRIPT_DIR}/scripts/lib/tvt-installer-common.sh"
 BUNDLE=""
 SITE_CONFIG=""
 K3S_MODE=bundled
+PREPARE_MODE=offline
 PIPELINE_CREDENTIALS_FILE=""
 SKIP_QUALIFICATION_TOOLS=false
+ALLOW_UNVERIFIED_HARDWARE=false
 VERIFY_ONLY=false
 RESUME=false
 readonly PREPARE_STATE="${TVT_INSTALL_STATE_ROOT}/prepare-state.json"
@@ -25,6 +27,8 @@ usage: sudo ./install-tvt-edge-host.sh --bundle PATH --site-config PATH [options
 
 options:
   --k3s-mode bundled|download
+  --prepare-mode online|offline    mode used for automatic post-reboot verification
+  --allow-unverified-hardware      permit an audited Intel equivalent to the 285H
   --pipeline-credentials-file PATH  root-readable environment file; never pass secrets as values
   --skip-qualification-tools
   --verify-only                    run final verification without changing the host
@@ -94,6 +98,8 @@ while (($#)); do
     --bundle) tvt_require_value "$1" "${2:-}"; BUNDLE="$2"; shift 2 ;;
     --site-config) tvt_require_value "$1" "${2:-}"; SITE_CONFIG="$2"; shift 2 ;;
     --k3s-mode) tvt_require_value "$1" "${2:-}"; K3S_MODE="$2"; shift 2 ;;
+    --prepare-mode) tvt_require_value "$1" "${2:-}"; PREPARE_MODE="$2"; shift 2 ;;
+    --allow-unverified-hardware) ALLOW_UNVERIFIED_HARDWARE=true; shift ;;
     --pipeline-credentials-file) tvt_require_value "$1" "${2:-}"; PIPELINE_CREDENTIALS_FILE="$2"; shift 2 ;;
     --skip-qualification-tools) SKIP_QUALIFICATION_TOOLS=true; shift ;;
     --verify-only) VERIFY_ONLY=true; shift ;;
@@ -105,6 +111,8 @@ done
 [[ -n ${BUNDLE} ]] || { usage; exit 2; }
 if ! ${VERIFY_ONLY}; then [[ -n ${SITE_CONFIG} ]] || { usage; exit 2; }; fi
 [[ ${K3S_MODE} == bundled || ${K3S_MODE} == download ]] || tvt_fail "--k3s-mode must be bundled or download"
+[[ ${PREPARE_MODE} == online || ${PREPARE_MODE} == offline ]] || \
+  tvt_fail "--prepare-mode must be online or offline"
 
 tvt_require_root
 command -v flock >/dev/null 2>&1 || tvt_fail "flock is required"
@@ -121,7 +129,6 @@ if [[ -n ${PIPELINE_CREDENTIALS_FILE} ]]; then
     tvt_fail "pipeline credentials file is larger than 64 KiB"
   PIPELINE_CREDENTIALS_FILE="$(cd "$(dirname "${PIPELINE_CREDENTIALS_FILE}")" && pwd -P)/$(basename "${PIPELINE_CREDENTIALS_FILE}")"
 fi
-tvt_acquire_lock
 tvt_verify_bundle "${BUNDLE}"
 readonly RELEASE_VERSION="$(tvt_manifest_value "${BUNDLE}" release_version)"
 readonly RELEASE_DIRECTORY="${OPT_TVT}/releases/${RELEASE_VERSION}"
@@ -129,10 +136,37 @@ readonly RESOURCE_DIRECTORY="${RELEASE_DIRECTORY}/resources"
 readonly VENV_DIRECTORY="${RELEASE_DIRECTORY}/venv"
 readonly TRAFFIC_CATALOG_DIRECTORY="${RESOURCE_DIRECTORY}/solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
 
+complete_post_reboot_preparation() {
+  local preparation_status
+  preparation_status="$(tvt_json_get "${PREPARE_STATE}" status 2>/dev/null || true)"
+  case "${preparation_status}" in
+    prepared)
+      return 0
+      ;;
+    reboot_required)
+      local -a arguments=(--bundle "${BUNDLE}" --mode "${PREPARE_MODE}")
+      if ${ALLOW_UNVERIFIED_HARDWARE}; then arguments+=(--allow-unverified-hardware); fi
+      tvt_log "completing post-reboot host verification before installation"
+      # Run before taking the shared installation lock: the preparation entry
+      # point acquires that lock itself.
+      /bin/bash "${BUNDLE}/prepare-tvt-edge-host.sh" "${arguments[@]}"
+      ;;
+    *)
+      tvt_fail "host preparation stage 1 has not completed; run prepare-tvt-edge-host.sh and reboot first"
+      ;;
+  esac
+}
+
+if ! ${VERIFY_ONLY}; then
+  complete_post_reboot_preparation
+fi
+tvt_acquire_lock
+
 preflight_install() {
   [[ "$(tvt_json_get "${PREPARE_STATE}" status 2>/dev/null || true)" == prepared ]] || \
     tvt_fail "host preparation has not completed successfully"
-  [[ ! -e ${REBOOT_MARKER} ]] || tvt_fail "reboot-required marker exists; rerun host preparation after reboot"
+  [[ ! -e ${REBOOT_MARKER} ]] || \
+    tvt_fail "reboot-required marker exists; automatic post-reboot verification did not complete"
   [[ $(dpkg --print-architecture) == amd64 ]] || tvt_fail "release architecture is amd64"
   if command -v k3s >/dev/null 2>&1; then
     installed_version="$(k3s --version | awk 'NR == 1 {print $3}')"

@@ -331,6 +331,12 @@ tvt-edge-release-0.1.0.tar.gz.sha256        archive checksum
 tvt-edge-release-0.1.0.release-report.json  non-secret build evidence
 ```
 
+The transport file is a GNU/POSIX tar stream compressed with deterministic
+gzip (`gzip -n`). Its members are name-sorted, use numeric root ownership, and
+share the selected source commit timestamp so identical inputs produce
+identical archive bytes. It contains one top-level
+`tvt-edge-release-<version>/` directory.
+
 The output directory contains the installers, manifest, input lock, all
 offline artifacts, runtime resources, Python wheels, and
 `checksums.sha256`. Use `--create-input-lock` only when intentionally accepting
@@ -409,13 +415,14 @@ binary artifacts to the normal Git history.
 ### 9. Rehearse on a clean host
 
 Extract the archive on a clean supported Intel edge box and follow the normal
-three-command procedure:
+two-command procedure around the required reboot. The installer performs the
+post-reboot preparation verification before it starts application installation:
 
 ```bash
 sudo ./prepare-tvt-edge-host.sh --bundle "$PWD" --mode offline
 sudo reboot
-sudo ./prepare-tvt-edge-host.sh --bundle "$PWD" --mode offline
-sudo ./install-tvt-edge-host.sh --bundle "$PWD" --site-config /secure/site.yaml
+sudo ./install-tvt-edge-host.sh --bundle "$PWD" \
+  --site-config /secure/site.yaml --prepare-mode offline
 ```
 
 Preserve `/var/lib/tvt/install/installation-report.json` as release evidence.

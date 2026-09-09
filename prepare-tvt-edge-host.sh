@@ -283,5 +283,5 @@ tvt_write_state "${PREPARE_STATE}" reboot_required "${RELEASE_VERSION}" drivers_
 cat <<'EOF'
 Host preparation stage 1 completed.
 Reboot required.
-After reboot, rerun the same prepare command.
+After reboot, run install-tvt-edge-host.sh; it will verify preparation before installing.
 EOF

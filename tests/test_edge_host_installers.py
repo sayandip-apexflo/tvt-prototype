@@ -225,8 +225,13 @@ tvt_run_stage {state} 0.1.0 sample worker
             self.assertIn(option, prepare)
         self.assertIn("driver_install_boot_id", prepare)
         self.assertIn("reboot_required", prepare)
-        for option in ("--site-config", "--k3s-mode", "--resume", "--verify-only"):
+        for option in (
+            "--site-config", "--k3s-mode", "--prepare-mode",
+            "--allow-unverified-hardware", "--resume", "--verify-only",
+        ):
             self.assertIn(option, install)
+        self.assertIn("complete_post_reboot_preparation", install)
+        self.assertIn('"${BUNDLE}/prepare-tvt-edge-host.sh"', install)
         self.assertIn("installation-report.json", install)
 
     def test_hardware_installer_pins_metis_and_voyager_compatibility_line(self) -> None:
