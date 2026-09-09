@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts/import-pipeline-traffic-image.sh"
+SCRIPT = ROOT / "scripts/tvt-edge-operations.sh"
 MANIFEST = b'{"schemaVersion":2}'
 DIGEST = "sha256:" + hashlib.sha256(MANIFEST).hexdigest()
 
@@ -16,6 +16,12 @@ DIGEST = "sha256:" + hashlib.sha256(MANIFEST).hexdigest()
 class PipelineImportTests(unittest.TestCase):
     def text(self, path):
         return (ROOT / path).read_text(encoding="utf-8")
+
+    def operation(self, source):
+        operations = self.text("scripts/tvt-edge-operations.sh")
+        return operations.split(f"# Source: scripts/{source}\n", 1)[1].split(
+            "\n)\n\ntvt_op_", 1
+        )[0]
 
     def pipeline_values(self):
         values = {}
@@ -134,7 +140,7 @@ class PipelineImportTests(unittest.TestCase):
         self.assertNotIn("latest", self.text("config/pipeline.env").lower())
 
     def test_import_fetches_commit_and_archive_without_tracking_branch_head(self):
-        script = self.text("scripts/import-pipeline-traffic-image.sh")
+        script = self.operation("import-pipeline-traffic-image.sh")
         self.assertIn('fetch --no-tags origin "${PIPELINE_REVISION}"', script)
         self.assertIn('lfs pull --include="${archive_relative}"', script)
         self.assertIn('origin "${PIPELINE_REVISION}"', script)
@@ -142,8 +148,8 @@ class PipelineImportTests(unittest.TestCase):
         self.assertNotIn("release-tag fetch", script)
 
     def test_import_rejects_invalid_archive_and_image_contract(self):
-        script = self.text("scripts/import-pipeline-traffic-image.sh")
-        combined = script
+        script = self.operation("import-pipeline-traffic-image.sh")
+        combined = script + self.operation("verify-pipeline-image-inspect.py")
         for required in (
             "PIPELINE_TRAFFIC_ARCHIVE_SIZE",
             "sha256sum --check --status",
@@ -165,7 +171,7 @@ class PipelineImportTests(unittest.TestCase):
         self.assertIn('docker create "${source_image}"', script)
 
     def test_source_build_is_distinct_qualification_mode(self):
-        script = self.text("scripts/import-pipeline-traffic-image.sh")
+        script = self.operation("import-pipeline-traffic-image.sh")
         self.assertIn("qualification mode", script)
         self.assertIn("PIPELINE_UBUNTU_BASE_IMAGE", script)
         self.assertIn("docker build", script)
@@ -186,6 +192,7 @@ class PipelineImportTests(unittest.TestCase):
                 [
                     "bash",
                     str(SCRIPT),
+                    "import-pipeline-traffic-image",
                     "--work-dir",
                     str(work_dir),
                     "--lock-output",
@@ -210,6 +217,7 @@ class PipelineImportTests(unittest.TestCase):
                 [
                     "bash",
                     str(SCRIPT),
+                    "import-pipeline-traffic-image",
                     "--work-dir",
                     str(temporary_path / "work"),
                     "--lock-output",
@@ -224,7 +232,7 @@ class PipelineImportTests(unittest.TestCase):
             self.assertEqual(lock_path.read_bytes(), original)
 
     def test_lock_is_atomic_private_and_contains_phase3_fields(self):
-        script = self.text("scripts/import-pipeline-traffic-image.sh")
+        script = self.operation("import-pipeline-traffic-image.sh")
         self.assertIn('chmod 0600 "${temporary_lock}"', script)
         self.assertIn('mv -f "${temporary_lock}" "${LOCK_OUTPUT}"', script)
         for field in (

@@ -62,7 +62,8 @@ metrics schema, analytics-event schema, and safe event example. Catalog
 loading rejects any checksum, schema, example, or contract disagreement.
 
 The production catalog is the existing TVT PostgreSQL database, not a second
-SQLite database. `scripts/bootstrap-postgresql.sh` applies Alembic and
+SQLite database. The `bootstrap-postgresql` operation in
+`scripts/tvt-edge-operations.sh` applies Alembic and
 idempotently seeds catalog ID `traffic-edge-runtime:2026.08.21-v4`, retargeted
 to `127.0.0.1:5000`. `POST /api/v1/solutions/refresh` performs an OCI
 Distribution manifest `GET`, hashes the returned bytes, compares that value to

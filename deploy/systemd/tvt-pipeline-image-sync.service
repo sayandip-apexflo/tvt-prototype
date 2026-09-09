@@ -12,7 +12,7 @@ Group=root
 Environment=TVT_PIPELINE_STATE_DIR=/var/lib/tvt/pipeline
 EnvironmentFile=-/etc/tvt/pipeline-bundle.env
 EnvironmentFile=-/etc/tvt/pipeline-image-sync.env
-ExecStart=/opt/tvt/scripts/import-pipeline-traffic-image.sh --mode archive --work-dir /var/lib/tvt/pipeline/work --lock-output /var/lib/tvt/pipeline/traffic-image.lock.json --concurrency-lock /var/lib/tvt/pipeline/import.lock
+ExecStart=/opt/tvt/scripts/tvt-edge-operations.sh import-pipeline-traffic-image --mode archive --work-dir /var/lib/tvt/pipeline/work --lock-output /var/lib/tvt/pipeline/traffic-image.lock.json --concurrency-lock /var/lib/tvt/pipeline/import.lock
 StateDirectory=tvt/pipeline
 StateDirectoryMode=0700
 TimeoutStartSec=75min

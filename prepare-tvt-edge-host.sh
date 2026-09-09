@@ -26,63 +26,6 @@ options:
 EOF
 }
 
-tvt_run_embedded_script() {
-  local target_script="$1"
-  shift
-  [[ -n ${target_script:-} && -f ${target_script} ]] || {
-    echo "embedded script missing: ${target_script}" >&2
-    exit 1
-  }
-
-  local runner
-  runner="$(mktemp)"
-  cat >"${runner}" <<'WRAPPER'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-tvt_run_embedded_script() {
-  local helper_path="$1"
-  shift
-  if [[ -z ${helper_path:-} || ! -f ${helper_path} ]]; then
-    echo "embedded script missing: ${helper_path}" >&2
-    exit 1
-  fi
-
-  local helper_dir helper_root temp_script
-  helper_dir="$(cd "$(dirname "${helper_path}")" && pwd)"
-  helper_root="$(cd "${helper_dir}/.." && pwd)"
-  temp_script="$(mktemp)"
-
-  {
-    cat <<'EMBEDDING'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-bash() {
-  if (( $# > 0 )) && [[ $1 == -* ]]; then
-    command bash "$@"
-  else
-    tvt_run_embedded_script "$@"
-  fi
-}
-EMBEDDING
-    sed -E 's|^[[:space:]]*readonly REPO_ROOT=.*|readonly REPO_ROOT="'"'${helper_root}'"'|; s|^[[:space:]]*readonly SCRIPT_DIR=.*|readonly SCRIPT_DIR="'"'${helper_dir}'"'|' "${helper_path}"
-  } >"${temp_script}"
-
-  /bin/bash "${temp_script}" "$@"
-  local child_rc=$?
-  rm -f -- "${temp_script}"
-  return "${child_rc}"
-}
-
-tvt_run_embedded_script "$@"
-WRAPPER
-  chmod +x "${runner}"
-  /bin/bash "${runner}" "${target_script}" "$@"
-  local rc=$?
-  rm -f -- "${runner}"
-  return "${rc}"
-}
-
 while (($#)); do
   case "$1" in
     --bundle) tvt_require_value "$1" "${2:-}"; BUNDLE="$2"; shift 2 ;;
@@ -179,7 +122,7 @@ install_hardware() {
   local -a arguments=(--mode "${MODE}")
   if [[ ${MODE} == offline ]]; then arguments+=(--bundle "${BUNDLE}"); fi
   if ${ALLOW_UNVERIFIED_HARDWARE}; then arguments+=(--allow-unverified-hardware); fi
-  tvt_run_embedded_script "${BUNDLE}/scripts/install-tvt-hardware-drivers.sh" "${arguments[@]}"
+  "${BUNDLE}/scripts/tvt-edge-operations.sh" install-tvt-hardware-drivers "${arguments[@]}"
   [[ -f ${REBOOT_MARKER} ]] || tvt_fail "hardware installer did not create its reboot marker"
 }
 

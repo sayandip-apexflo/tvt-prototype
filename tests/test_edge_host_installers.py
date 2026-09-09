@@ -33,12 +33,61 @@ class EdgeHostInstallerTests(unittest.TestCase):
         scripts = [
             ROOT / "prepare-tvt-edge-host.sh",
             ROOT / "install-tvt-edge-host.sh",
-            ROOT / "scripts/build-tvt-edge-release.sh",
+            ROOT / "scripts/tvt-edge-operations.sh",
             ROOT / "scripts/make-tvt-edge-release.sh",
-            ROOT / "scripts/verify-tvt-edge-release.sh",
             ROOT / "scripts/lib/tvt-installer-common.sh",
         ]
         subprocess.run(["bash", "-n", *map(str, scripts)], check=True)
+
+    def test_release_front_door_builds_missing_inputs(self) -> None:
+        front_door = (ROOT / "scripts/make-tvt-edge-release.sh").read_text(
+            encoding="utf-8"
+        )
+        operations = (ROOT / "scripts/tvt-edge-operations.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('scripts/tvt-edge-operations.sh" build-release-inputs', front_door)
+        self.assertIn('--cache-directory "${CACHE_DIRECTORY}"', front_door)
+        for required_stage in (
+            "save_registry_image",
+            "build_control_image node-reporter reporter",
+            "build_control_image node-status-controller status_controller",
+            "acquire_k3s",
+            "acquire_traffic",
+            "acquire_npu_archive",
+            "resolve_python_wheels",
+            "build_apt_closure",
+            "write_hardware_recipe",
+            "tvt-release-inputs.py create",
+        ):
+            self.assertIn(required_stage, operations)
+
+    def test_operational_helpers_are_consolidated(self) -> None:
+        operations = ROOT / "scripts/tvt-edge-operations.sh"
+        result = subprocess.run(
+            [str(operations), "--help"], capture_output=True, text=True, check=True
+        )
+        for operation in (
+            "build-release-inputs",
+            "build-release",
+            "verify-release",
+            "install-tvt-hardware-drivers",
+            "install-local-registry",
+            "install-k3s-single-node",
+            "import-pipeline-traffic-image",
+            "bootstrap-postgresql",
+        ):
+            self.assertIn(operation, result.stderr)
+        retired = (
+            "build-tvt-release-inputs.sh",
+            "build-tvt-edge-release.sh",
+            "verify-tvt-edge-release.sh",
+            "install-tvt-hardware-drivers.sh",
+            "install-local-registry.sh",
+            "import-pipeline-traffic-image.sh",
+        )
+        for filename in retired:
+            self.assertFalse((ROOT / "scripts" / filename).exists(), filename)
 
     def make_bundle(self, root: Path) -> None:
         manifest = json.loads(
@@ -51,14 +100,7 @@ class EdgeHostInstallerTests(unittest.TestCase):
         required = {
             "prepare-tvt-edge-host.sh", "install-tvt-edge-host.sh", "alembic.ini",
             "config/platform.env", "config/pipeline.env",
-            "scripts/lib/tvt-installer-common.sh",
-            "scripts/install-tvt-hardware-drivers.sh", "scripts/install-local-registry.sh",
-            "scripts/install-k3s-single-node.sh", "scripts/publish-control-images.sh",
-            "scripts/install-k3s-plane.sh", "scripts/verify-k3s-plane.sh",
-            "scripts/import-pipeline-traffic-image.sh",
-            "scripts/verify-pipeline-image-sync.sh", "scripts/install-pipeline-image-sync.sh",
-            "scripts/bootstrap-postgresql.sh", "scripts/install-tvt-kubeconfig.sh",
-            "scripts/install-traffic-qualification.sh",
+            "scripts/lib/tvt-installer-common.sh", "scripts/tvt-edge-operations.sh",
             "deploy/k8s/apexfabric-foundation.yaml", "deploy/k8s/apexfabric-node-management.yaml",
             "deploy/host/tvt-edge.env.example", "deploy/host/postgresql-tvt.conf",
             "deploy/systemd/tvt-edge.service", "deploy/systemd/tvt-camera-sync.service",
@@ -167,7 +209,10 @@ class EdgeHostInstallerTests(unittest.TestCase):
             )
             self.write_checksums(bundle)
             result = subprocess.run(
-                [str(ROOT / "scripts/verify-tvt-edge-release.sh"), "--bundle", str(bundle)],
+                [
+                    str(ROOT / "scripts/tvt-edge-operations.sh"),
+                    "verify-release", "--bundle", str(bundle),
+                ],
                 capture_output=True,
                 text=True,
             )
@@ -235,7 +280,7 @@ tvt_run_stage {state} 0.1.0 sample worker
         self.assertIn("installation-report.json", install)
 
     def test_hardware_installer_pins_metis_and_voyager_compatibility_line(self) -> None:
-        installer = (ROOT / "scripts/install-tvt-hardware-drivers.sh").read_text(
+        installer = (ROOT / "scripts/tvt-edge-operations.sh").read_text(
             encoding="utf-8"
         )
         for required in (

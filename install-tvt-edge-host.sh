@@ -36,63 +36,6 @@ options:
 EOF
 }
 
-tvt_run_embedded_script() {
-  local target_script="$1"
-  shift
-  [[ -n ${target_script:-} && -f ${target_script} ]] || {
-    echo "embedded script missing: ${target_script}" >&2
-    exit 1
-  }
-
-  local runner
-  runner="$(mktemp)"
-  cat >"${runner}" <<'WRAPPER'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-tvt_run_embedded_script() {
-  local helper_path="$1"
-  shift
-  if [[ -z ${helper_path:-} || ! -f ${helper_path} ]]; then
-    echo "embedded script missing: ${helper_path}" >&2
-    exit 1
-  fi
-
-  local helper_dir helper_root temp_script
-  helper_dir="$(cd "$(dirname "${helper_path}")" && pwd)"
-  helper_root="$(cd "${helper_dir}/.." && pwd)"
-  temp_script="$(mktemp)"
-
-  {
-    cat <<'EMBEDDING'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-bash() {
-  if (( $# > 0 )) && [[ $1 == -* ]]; then
-    command bash "$@"
-  else
-    tvt_run_embedded_script "$@"
-  fi
-}
-EMBEDDING
-    sed -E 's|^[[:space:]]*readonly REPO_ROOT=.*|readonly REPO_ROOT="'"'${helper_root}'"'|; s|^[[:space:]]*readonly SCRIPT_DIR=.*|readonly SCRIPT_DIR="'"'${helper_dir}'"'|' "${helper_path}"
-  } >"${temp_script}"
-
-  /bin/bash "${temp_script}" "$@"
-  local child_rc=$?
-  rm -f -- "${temp_script}"
-  return "${child_rc}"
-}
-
-tvt_run_embedded_script "$@"
-WRAPPER
-  chmod +x "${runner}"
-  /bin/bash "${runner}" "${target_script}" "$@"
-  local rc=$?
-  rm -f -- "${runner}"
-  return "${rc}"
-}
-
 while (($#)); do
   case "$1" in
     --bundle) tvt_require_value "$1" "${2:-}"; BUNDLE="$2"; shift 2 ;;
@@ -211,7 +154,7 @@ install_application() {
 }
 
 install_registry() {
-  tvt_run_embedded_script "${RESOURCE_DIRECTORY}/scripts/install-local-registry.sh" \
+  "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" install-local-registry \
     --image-archive "${RESOURCE_DIRECTORY}/images/registry.tar"
   ss -H -ltn 'sport = :5000' | awk '{print $4}' | grep -qx '127.0.0.1:5000' || \
     tvt_fail "local registry is not bound exclusively to 127.0.0.1:5000"
@@ -224,16 +167,16 @@ install_k3s() {
   else
     arguments=(--download-installer)
   fi
-  tvt_run_embedded_script "${RESOURCE_DIRECTORY}/scripts/install-k3s-single-node.sh" "${arguments[@]}"
+  "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" install-k3s-single-node "${arguments[@]}"
 }
 
 install_node_management() {
   export PATH="${VENV_DIRECTORY}/bin:${PATH}"
   local lock="${TVT_INSTALL_STATE_ROOT}/node-management-images.lock.json"
-  tvt_run_embedded_script "${RESOURCE_DIRECTORY}/scripts/publish-control-images.sh" \
+  "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" publish-control-images \
     --registry 127.0.0.1:5000 --scheme http \
     --archive-dir "${RESOURCE_DIRECTORY}/images" --lock-output "${lock}"
-  tvt_run_embedded_script "${RESOURCE_DIRECTORY}/scripts/install-k3s-plane.sh" --image-lock "${lock}"
+  "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" install-k3s-plane --image-lock "${lock}"
 }
 
 install_pipeline_image() {
@@ -249,14 +192,14 @@ install_pipeline_image() {
       install -o root -g root -m 0600 "${PIPELINE_CREDENTIALS_FILE}" /etc/tvt/pipeline-image-sync.env
     fi
   fi
-  tvt_run_embedded_script "${RESOURCE_DIRECTORY}/scripts/import-pipeline-traffic-image.sh" \
+  "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" import-pipeline-traffic-image \
     --mode archive \
     --archive-file "${RESOURCE_DIRECTORY}/images/traffic-edge-runtime-v4.tar" \
     --metadata-directory "${TRAFFIC_CATALOG_DIRECTORY}" \
     --work-dir /var/lib/tvt/pipeline/work \
     --lock-output /var/lib/tvt/pipeline/traffic-image.lock.json \
     --concurrency-lock /var/lib/tvt/pipeline/import.lock
-  tvt_run_embedded_script "${RESOURCE_DIRECTORY}/scripts/install-pipeline-image-sync.sh" \
+  "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" install-pipeline-image-sync \
     --archive-file "${RESOURCE_DIRECTORY}/images/traffic-edge-runtime-v4.tar" \
     --metadata-directory "${TRAFFIC_CATALOG_DIRECTORY}"
   systemctl start tvt-pipeline-image-sync.service
@@ -265,8 +208,8 @@ install_pipeline_image() {
 provision_services() {
   export PATH="${VENV_DIRECTORY}/bin:${PATH}"
   export TVT_RESOURCE_ROOT="${RESOURCE_DIRECTORY}"
-  tvt_run_embedded_script "${RESOURCE_DIRECTORY}/scripts/bootstrap-postgresql.sh" --venv "${VENV_DIRECTORY}"
-  tvt_run_embedded_script "${RESOURCE_DIRECTORY}/scripts/install-tvt-kubeconfig.sh"
+  "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" bootstrap-postgresql --venv "${VENV_DIRECTORY}"
+  "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" install-tvt-kubeconfig
 }
 
 initialize_site() {
@@ -330,7 +273,7 @@ refresh_catalog() {
 }
 
 install_qualification() {
-  tvt_run_embedded_script "${RESOURCE_DIRECTORY}/scripts/install-traffic-qualification.sh"
+  "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" install-traffic-qualification
 }
 
 final_verification() {
@@ -346,7 +289,7 @@ final_verification() {
   mapfile -t ready_nodes < <(k3s kubectl get nodes \
     -o jsonpath='{range .items[?(@.status.conditions[?(@.type=="Ready")].status=="True")]}{.metadata.name}{"\n"}{end}')
   [[ ${#ready_nodes[@]} -eq 1 && -n ${ready_nodes[0]} ]] || tvt_fail "K3s does not have exactly one Ready node"
-  tvt_run_embedded_script "${RESOURCE_DIRECTORY}/scripts/verify-k3s-plane.sh"
+  "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" verify-k3s-plane
   pg_isready --quiet
   runuser -u tvt-edge -- env TVT_RESOURCE_ROOT="${RESOURCE_DIRECTORY}" \
     TVT_DATABASE_URL=postgresql+psycopg:///tvt \
@@ -369,7 +312,7 @@ import json, sys
 health = json.loads(sys.argv[1])
 if health.get("status") != "healthy": raise SystemExit("TVT API is not healthy")
 PY
-  tvt_run_embedded_script "${RESOURCE_DIRECTORY}/scripts/verify-pipeline-image-sync.sh"
+  "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" verify-pipeline-image-sync
   available="$(runuser -u postgres -- psql -d tvt -Atc "SELECT count(*) FROM solution_catalog_entries WHERE status='available'")"
   [[ ${available} -ge 1 ]] || tvt_fail "Traffic catalog entry is not available"
   deployment_count="$(runuser -u postgres -- psql -d tvt -Atc 'SELECT count(*) FROM solution_deployments')"

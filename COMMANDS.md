@@ -77,7 +77,7 @@ loopback endpoint, persistent storage path, and systemd container arguments.
 ### 3. Install or reconcile the local registry
 
 ```bash
-sudo bash scripts/install-local-registry.sh
+sudo ./scripts/tvt-edge-operations.sh install-local-registry
 ```
 
 This pulls the pinned Linux `amd64` registry image, creates
@@ -92,7 +92,7 @@ Ready.
 For an edge device with Internet access:
 
 ```bash
-sudo bash scripts/install-k3s-single-node.sh --download-installer
+sudo ./scripts/tvt-edge-operations.sh install-k3s-single-node --download-installer
 ```
 
 This downloads the official installer only after the explicit flag, requests
@@ -103,7 +103,7 @@ until the local registry is healthy.
 For a reviewed offline installer and K3s binary:
 
 ```bash
-sudo bash scripts/install-k3s-single-node.sh \
+sudo ./scripts/tvt-edge-operations.sh install-k3s-single-node \
   --installer /media/tvt/k3s/install.sh \
   --k3s-binary /media/tvt/k3s/k3s
 ```
@@ -159,7 +159,7 @@ free disk for the 1.93 GB archive, Docker's loaded layers, and registry copy.
 ### 3. Install automated synchronization
 
 ```bash
-sudo bash scripts/install-pipeline-image-sync.sh
+sudo ./scripts/tvt-edge-operations.sh install-pipeline-image-sync
 ```
 
 This installs the importer and immutable configuration under `/opt/tvt`,
@@ -187,7 +187,7 @@ digest agree.
 ### 5. Verify the immutable result
 
 ```bash
-sudo bash scripts/verify-pipeline-image-sync.sh
+sudo ./scripts/tvt-edge-operations.sh verify-pipeline-image-sync
 sudo python3 -m json.tool /var/lib/tvt/pipeline/traffic-image.lock.json
 sudo docker image inspect \
   127.0.0.1:5000/apexfabric/traffic-edge-runtime:intel-285h-2026.08.21-v4
@@ -204,7 +204,7 @@ The PostgreSQL bootstrap applies the catalog migration and idempotently seeds
 the vendored v4 entry:
 
 ```bash
-sudo bash scripts/bootstrap-postgresql.sh
+sudo ./scripts/tvt-edge-operations.sh bootstrap-postgresql
 curl --fail --silent --show-error \
   -X POST http://127.0.0.1:8088/api/v1/solutions/refresh
 curl --fail --silent --show-error \
@@ -228,7 +228,7 @@ sudo -u tvt-edge env TVT_DATABASE_URL=postgresql+psycopg:///tvt \
 ### 7. Repository-local manual import or qualification build
 
 ```bash
-sudo bash scripts/import-pipeline-traffic-image.sh
+sudo ./scripts/tvt-edge-operations.sh import-pipeline-traffic-image
 sudo python3 -m json.tool build/pipeline/traffic-image.lock.json
 ```
 
@@ -236,7 +236,7 @@ These commands use the gitignored repository-local development state path.
 Production services use `/var/lib/tvt/pipeline` instead.
 
 ```bash
-sudo bash scripts/import-pipeline-traffic-image.sh --mode build \
+sudo ./scripts/tvt-edge-operations.sh import-pipeline-traffic-image --mode build \
   --lock-output build/pipeline/traffic-source-build.lock.json
 ```
 
@@ -308,7 +308,7 @@ Install the current package in `/opt/tvt/venv` using the normal application
 deployment procedure, then install the manual runner and exact v4 contracts:
 
 ```bash
-sudo bash scripts/install-traffic-qualification.sh
+sudo ./scripts/tvt-edge-operations.sh install-traffic-qualification
 ```
 
 This command installs files only. It does not deploy, roll back, restart, or
@@ -383,7 +383,7 @@ NVIDIA BSP image.
 ### 1. Review the installer
 
 ```bash
-less scripts/install-tvt-hardware-drivers.sh
+less scripts/tvt-edge-operations.sh
 ```
 
 This displays the script before granting it root access. Confirm the target OS,
@@ -394,7 +394,7 @@ hardware checks, package list, download sources, state paths, and cache paths.
 Run this command from the repository root on the TVT edge device:
 
 ```bash
-sudo ./scripts/install-tvt-hardware-drivers.sh
+sudo ./scripts/tvt-edge-operations.sh install-tvt-hardware-drivers
 ```
 
 The command:
@@ -423,7 +423,7 @@ If an audited Intel host is compatible but its CPU model string is not exactly
 
 ```bash
 sudo env TVT_ALLOW_UNVERIFIED_HARDWARE=true \
-  ./scripts/install-tvt-hardware-drivers.sh
+  ./scripts/tvt-edge-operations.sh install-tvt-hardware-drivers
 ```
 
 This bypasses only the CPU-model-name check. OS, architecture, kernel-module,

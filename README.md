@@ -50,15 +50,21 @@ installer writes non-secret evidence to
 `/var/lib/tvt/install/installation-report.json` and never creates a Traffic
 deployment; camera onboarding and deployment remain explicit UI actions.
 
-Create a release with `scripts/make-tvt-edge-release.sh`. Its required input
-library contains reviewed K3s files, the full offline APT/driver closure, and
-prebuilt amd64 archives for Distribution, both node-management images, and
-Traffic v4. The script locks those inputs, runs the source gates, compiles the
-React UI, builds the application and dependency wheels, constructs and
-independently verifies the immutable release directory, and writes a
-reproducible transport archive, checksum, and release report. The complete
-input, build, verification, publication, and new-commit rebuild procedure is in
+Create a release with the single `scripts/make-tvt-edge-release.sh` command.
+For a new input path it automatically builds or downloads the pinned K3s files,
+the complete offline APT/driver and Python-wheel closures, and the amd64
+archives for Distribution, both node-management images, and Traffic v4. It
+then locks those generated inputs, runs the source gates, compiles the React
+UI, builds the application and dependency wheels, constructs and independently
+verifies the immutable release directory, and writes a reproducible transport
+archive, checksum, and release report. Downloads are retained in a sibling
+cache so later builds do not fetch large immutable payloads again. The complete
+build, verification, publication, and new-commit rebuild procedure is in
 [TVT edge release build runbook](docs/EDGE-RELEASE-BUILD.md).
+
+All build-time and target-side component operations are consolidated as
+subcommands in `scripts/tvt-edge-operations.sh`; the release bundle does not
+carry separate component helper scripts.
 
 The project includes five cameras. We have instructed the customer to install them at the appropriate locations:
 
@@ -167,7 +173,7 @@ only when K3s is already active:
 ```bash
 sudo apt-get update
 sudo apt-get install -y docker.io curl
-sudo bash scripts/install-local-registry.sh
+sudo ./scripts/tvt-edge-operations.sh install-local-registry
 ```
 
 The registry intentionally has no TLS or authentication because it is reachable
@@ -190,7 +196,7 @@ Import it after the local registry is running:
 
 ```bash
 sudo apt-get install -y git git-lfs
-sudo bash scripts/import-pipeline-traffic-image.sh
+sudo ./scripts/tvt-edge-operations.sh import-pipeline-traffic-image
 ```
 
 The archive path verifies the 1.93 GB Git LFS artifact before loading it. The
@@ -211,9 +217,9 @@ For an installed edge, install the root oneshot and persistent timer, run the
 first import, and verify the known-good lock and registry bytes:
 
 ```bash
-sudo bash scripts/install-pipeline-image-sync.sh
+sudo ./scripts/tvt-edge-operations.sh install-pipeline-image-sync
 sudo systemctl start tvt-pipeline-image-sync.service
-sudo bash scripts/verify-pipeline-image-sync.sh
+sudo ./scripts/tvt-edge-operations.sh verify-pipeline-image-sync
 ```
 
 Installed synchronization stores operational state under
@@ -226,7 +232,7 @@ Install the frozen K3s version and configure its registry mirror. Online
 installation must be requested explicitly:
 
 ```bash
-sudo bash scripts/install-k3s-single-node.sh \
+sudo ./scripts/tvt-edge-operations.sh install-k3s-single-node \
   --download-installer
 ```
 
@@ -234,7 +240,7 @@ For an offline installation, provide the reviewed installer and pinned K3s
 binary instead:
 
 ```bash
-sudo bash scripts/install-k3s-single-node.sh \
+sudo ./scripts/tvt-edge-operations.sh install-k3s-single-node \
   --installer /media/tvt/k3s/install.sh \
   --k3s-binary /media/tvt/k3s/k3s
 ```
@@ -243,13 +249,13 @@ Build and publish the two initial control images. This also resolves the
 registry manifests and writes an immutable digest lock:
 
 ```bash
-bash scripts/publish-control-images.sh --registry 127.0.0.1:5000
+./scripts/tvt-edge-operations.sh publish-control-images --registry 127.0.0.1:5000
 ```
 
 Apply and verify the node-management plane using that lock:
 
 ```bash
-sudo bash scripts/install-k3s-plane.sh \
+sudo ./scripts/tvt-edge-operations.sh install-k3s-plane \
   --image-lock build/node-management-images.lock.json
 ```
 
@@ -265,8 +271,8 @@ neither PostgreSQL nor its data directory is placed in K3s. Bootstrap it and
 install the service units after reviewing the example environment file:
 
 ```bash
-sudo bash scripts/bootstrap-postgresql.sh
-sudo bash scripts/install-tvt-kubeconfig.sh
+sudo ./scripts/tvt-edge-operations.sh bootstrap-postgresql
+sudo ./scripts/tvt-edge-operations.sh install-tvt-kubeconfig
 sudo systemctl enable --now tvt-edge.service tvt-camera-sync.service \
   tvt-retention.timer tvt-k3s-watchdog.timer
 ```

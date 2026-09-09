@@ -7,7 +7,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class BootstrapScriptTests(unittest.TestCase):
     def text(self, name):
-        return (ROOT / "scripts" / name).read_text(encoding="utf-8")
+        self.assertTrue(name.endswith((".sh", ".py")))
+        return (ROOT / "scripts/tvt-edge-operations.sh").read_text(encoding="utf-8")
 
     def test_single_node_installer_uses_frozen_version_and_refuses_multi_node(self):
         installer = self.text("install-k3s-single-node.sh")

@@ -66,7 +66,7 @@ First complete Phases 1–4 and hardware verification. Install the current TVT
 package in `/opt/tvt/venv`, then install the runner and pinned contracts:
 
 ```bash
-sudo bash scripts/install-traffic-qualification.sh
+sudo ./scripts/tvt-edge-operations.sh install-traffic-qualification
 sudo /opt/tvt/venv/bin/tvt-traffic-qualify traffic-v4 \
   --strict-events \
   --output /var/lib/tvt/qualification/traffic-v4-steady.json

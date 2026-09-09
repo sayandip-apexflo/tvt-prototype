@@ -21,11 +21,7 @@ class LocalRegistryTests(unittest.TestCase):
         return match.group(1)
 
     def test_phase_one_shell_scripts_have_valid_syntax(self):
-        scripts = [
-            ROOT / "scripts/install-local-registry.sh",
-            ROOT / "scripts/configure-k3s-registry.sh",
-            ROOT / "scripts/install-k3s-single-node.sh",
-        ]
+        scripts = [ROOT / "scripts/tvt-edge-operations.sh"]
         subprocess.run(["bash", "-n", *map(str, scripts)], check=True)
 
     def test_registry_and_smoke_images_are_digest_pinned_for_amd64(self):
@@ -35,7 +31,7 @@ class LocalRegistryTests(unittest.TestCase):
             self.platform_value("LOCAL_REGISTRY_SMOKE_IMAGE"), image_pattern
         )
         self.assertIn(
-            "--platform linux/amd64", self.text("scripts/install-local-registry.sh")
+            "--platform linux/amd64", self.text("scripts/tvt-edge-operations.sh")
         )
 
     def test_registry_is_loopback_only_and_persistent(self):
@@ -51,7 +47,7 @@ class LocalRegistryTests(unittest.TestCase):
     def test_systemd_owns_registry_lifecycle_and_orders_k3s(self):
         service = self.text("deploy/systemd/tvt-local-registry.service.in")
         drop_in = self.text("deploy/systemd/k3s-tvt-local-registry.conf")
-        installer = self.text("scripts/install-local-registry.sh")
+        installer = self.text("scripts/tvt-edge-operations.sh")
         self.assertIn("Requires=docker.service", service)
         self.assertIn("After=docker.service", service)
         self.assertIn("Before=k3s.service", service)
@@ -64,8 +60,8 @@ class LocalRegistryTests(unittest.TestCase):
 
     def test_k3s_defaults_to_the_http_loopback_registry(self):
         environment = self.text("config/platform.env")
-        configuration = self.text("scripts/configure-k3s-registry.sh")
-        k3s_installer = self.text("scripts/install-k3s-single-node.sh")
+        configuration = self.text("scripts/tvt-edge-operations.sh")
+        k3s_installer = configuration
         template = self.text("deploy/config/registries.yaml.in")
         self.assertIn("LOCAL_REGISTRY_ADDRESS=127.0.0.1:5000", environment)
         self.assertIn('REGISTRY="${LOCAL_REGISTRY_ADDRESS}"', configuration)
@@ -77,7 +73,8 @@ class LocalRegistryTests(unittest.TestCase):
         result = subprocess.run(
             [
                 "bash",
-                str(ROOT / "scripts/configure-k3s-registry.sh"),
+                str(ROOT / "scripts/tvt-edge-operations.sh"),
+                "configure-k3s-registry",
                 "--registry",
                 "127.0.0.1:5000|unsafe",
             ],
@@ -91,7 +88,7 @@ class LocalRegistryTests(unittest.TestCase):
     def test_operator_documentation_uses_scripts_instead_of_embedded_installers(self):
         commands = self.text("COMMANDS.md")
         readme = self.text("README.md")
-        self.assertIn("scripts/install-local-registry.sh", commands)
+        self.assertIn("tvt-edge-operations.sh install-local-registry", commands)
         self.assertIn("127.0.0.1:5000", readme)
 
 

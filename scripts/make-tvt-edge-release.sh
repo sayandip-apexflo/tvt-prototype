@@ -6,6 +6,7 @@ readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INPUT_DIRECTORY=""
 OUTPUT_DIRECTORY=""
 ARCHIVE_DIRECTORY=""
+CACHE_DIRECTORY=""
 RELEASE_VERSION=""
 SOURCE_COMMIT=""
 CREATE_INPUT_LOCK=false
@@ -21,67 +22,11 @@ options:
   --version VERSION          must equal the canonical TVT version
   --source-commit SHA        defaults to the checked-out commit
   --archive-directory DIR    defaults to the output directory's parent
-  --create-input-lock        create/replace release-inputs.lock.json explicitly
+  --cache-directory DIR      reusable download cache (default: INPUT_PARENT/cache)
+  --create-input-lock        accept and lock an existing manually populated input tree
   --skip-tests               skip source test gates (recorded in the report)
   --allow-dirty-source       development only; production builds must be clean
 EOF
-}
-
-tvt_run_embedded_script() {
-  local target_script="$1"
-  shift
-  [[ -n ${target_script:-} && -f ${target_script} ]] || {
-    echo "embedded script missing: ${target_script}" >&2
-    exit 1
-  }
-
-  local runner
-  runner="$(mktemp)"
-  cat >"${runner}" <<'WRAPPER'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-tvt_run_embedded_script() {
-  local helper_path="$1"
-  shift
-  if [[ -z ${helper_path:-} || ! -f ${helper_path} ]]; then
-    echo "embedded script missing: ${helper_path}" >&2
-    exit 1
-  fi
-
-  local helper_dir helper_root temp_script
-  helper_dir="$(cd "$(dirname "${helper_path}")" && pwd)"
-  helper_root="$(cd "${helper_dir}/.." && pwd)"
-  temp_script="$(mktemp)"
-
-  {
-    cat <<'EMBEDDING'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-bash() {
-  if (( $# > 0 )) && [[ $1 == -* ]]; then
-    command bash "$@"
-  else
-    tvt_run_embedded_script "$@"
-  fi
-}
-EMBEDDING
-    sed -E 's|^[[:space:]]*readonly REPO_ROOT=.*|readonly REPO_ROOT="'"'${helper_root}'"'|; s|^[[:space:]]*readonly SCRIPT_DIR=.*|readonly SCRIPT_DIR="'"'${helper_dir}'"'|' "${helper_path}"
-  } >"${temp_script}"
-
-  /bin/bash "${temp_script}" "$@"
-  local child_rc=$?
-  rm -f -- "${temp_script}"
-  return "${child_rc}"
-}
-
-tvt_run_embedded_script "$@"
-WRAPPER
-  chmod +x "${runner}"
-  /bin/bash "${runner}" "${target_script}" "$@"
-  local rc=$?
-  rm -f -- "${runner}"
-  return "${rc}"
 }
 
 while (($#)); do
@@ -89,6 +34,7 @@ while (($#)); do
     --input-directory) INPUT_DIRECTORY="${2:-}"; shift 2 ;;
     --output-directory) OUTPUT_DIRECTORY="${2:-}"; shift 2 ;;
     --archive-directory) ARCHIVE_DIRECTORY="${2:-}"; shift 2 ;;
+    --cache-directory) CACHE_DIRECTORY="${2:-}"; shift 2 ;;
     --version) RELEASE_VERSION="${2:-}"; shift 2 ;;
     --source-commit) SOURCE_COMMIT="${2:-}"; shift 2 ;;
     --create-input-lock) CREATE_INPUT_LOCK=true; shift ;;
@@ -99,13 +45,34 @@ while (($#)); do
   esac
 done
 [[ -n ${INPUT_DIRECTORY} && -n ${OUTPUT_DIRECTORY} ]] || { usage; exit 2; }
-[[ -d ${INPUT_DIRECTORY} && ! -L ${INPUT_DIRECTORY} ]] || { echo "input directory is missing or symlinked" >&2; exit 1; }
-INPUT_DIRECTORY="$(cd "${INPUT_DIRECTORY}" && pwd -P)"
-mkdir -p "$(dirname "${OUTPUT_DIRECTORY}")"
+
+create_owned_directory() {
+  local directory="$1"
+  if mkdir -p "${directory}" 2>/dev/null; then return 0; fi
+  command -v sudo >/dev/null 2>&1 || {
+    echo "cannot create ${directory}; sudo is unavailable" >&2
+    exit 1
+  }
+  echo "Creating release workspace ${directory} with sudo." >&2
+  sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0750 "${directory}"
+}
+
+input_parent="$(dirname "${INPUT_DIRECTORY}")"
+create_owned_directory "${input_parent}"
+input_parent="$(cd "${input_parent}" && pwd -P)"
+INPUT_DIRECTORY="${input_parent}/$(basename "${INPUT_DIRECTORY}")"
+[[ ! -L ${INPUT_DIRECTORY} ]] || { echo "input directory is symlinked" >&2; exit 1; }
+create_owned_directory "$(dirname "${OUTPUT_DIRECTORY}")"
 OUTPUT_DIRECTORY="$(cd "$(dirname "${OUTPUT_DIRECTORY}")" && pwd -P)/$(basename "${OUTPUT_DIRECTORY}")"
 [[ -n ${ARCHIVE_DIRECTORY} ]] || ARCHIVE_DIRECTORY="$(dirname "${OUTPUT_DIRECTORY}")"
-mkdir -p "${ARCHIVE_DIRECTORY}"
+create_owned_directory "${ARCHIVE_DIRECTORY}"
 ARCHIVE_DIRECTORY="$(cd "${ARCHIVE_DIRECTORY}" && pwd -P)"
+if [[ -n ${CACHE_DIRECTORY} ]]; then
+  create_owned_directory "${CACHE_DIRECTORY}"
+  CACHE_DIRECTORY="$(cd "${CACHE_DIRECTORY}" && pwd -P)"
+else
+  CACHE_DIRECTORY="${input_parent}/cache"
+fi
 
 path_is_within() {
   case "${1}/" in
@@ -115,8 +82,9 @@ path_is_within() {
 }
 if path_is_within "${INPUT_DIRECTORY}" "${REPO_ROOT}" \
   || path_is_within "${OUTPUT_DIRECTORY}" "${REPO_ROOT}" \
-  || path_is_within "${ARCHIVE_DIRECTORY}" "${REPO_ROOT}"; then
-  echo "release inputs and outputs must be outside the Git checkout" >&2
+  || path_is_within "${ARCHIVE_DIRECTORY}" "${REPO_ROOT}" \
+  || path_is_within "${CACHE_DIRECTORY}" "${REPO_ROOT}"; then
+  echo "release inputs, cache, and outputs must be outside the Git checkout" >&2
   exit 1
 fi
 if path_is_within "${OUTPUT_DIRECTORY}" "${INPUT_DIRECTORY}" \
@@ -154,14 +122,25 @@ for path in "${archive}" "${archive_checksum}" "${report}"; do
 done
 
 input_lock="${INPUT_DIRECTORY}/release-inputs.lock.json"
-if ${CREATE_INPUT_LOCK}; then
+if [[ ! -f ${input_lock} ]]; then
+  if [[ ! -d ${INPUT_DIRECTORY} ]] \
+    || [[ -z $(find "${INPUT_DIRECTORY}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) ]]; then
+    "${REPO_ROOT}/scripts/tvt-edge-operations.sh" build-release-inputs \
+      --input-directory "${INPUT_DIRECTORY}" --cache-directory "${CACHE_DIRECTORY}" \
+      --version "${RELEASE_VERSION}" --source-commit "${SOURCE_COMMIT}"
+  elif ! ${CREATE_INPUT_LOCK}; then
+    echo "unlocked input directory is not empty; use --create-input-lock only to accept a reviewed manual input tree" >&2
+    exit 1
+  fi
+fi
+if ${CREATE_INPUT_LOCK} && [[ ! -f ${input_lock} ]]; then
   python3 scripts/tvt-release-inputs.py create \
     --input-directory "${INPUT_DIRECTORY}" --output "${input_lock}" \
     --release-version "${RELEASE_VERSION}" --source-commit "${SOURCE_COMMIT}" \
     --platform-config config/platform.env --pipeline-config config/pipeline.env
 fi
 [[ -f ${input_lock} ]] || {
-  echo "missing ${input_lock}; review inputs and rerun with --create-input-lock" >&2
+  echo "release input builder did not create ${input_lock}" >&2
   exit 1
 }
 python3 scripts/tvt-release-inputs.py verify \
@@ -181,7 +160,7 @@ fi
 
 dirty_argument=()
 if ${ALLOW_DIRTY_SOURCE}; then dirty_argument=(--allow-dirty-source); fi
-tvt_run_embedded_script "${REPO_ROOT}/scripts/build-tvt-edge-release.sh" \
+"${REPO_ROOT}/scripts/tvt-edge-operations.sh" build-release \
   --output "${OUTPUT_DIRECTORY}" \
   --version "${RELEASE_VERSION}" --source-commit "${SOURCE_COMMIT}" \
   --input-lock "${input_lock}" \
@@ -194,7 +173,7 @@ tvt_run_embedded_script "${REPO_ROOT}/scripts/build-tvt-edge-release.sh" \
   --hardware-directory "${INPUT_DIRECTORY}/hardware" \
   --apt-directory "${INPUT_DIRECTORY}/apt" "${dirty_argument[@]}"
 
-tvt_run_embedded_script "${REPO_ROOT}/scripts/verify-tvt-edge-release.sh" --bundle "${OUTPUT_DIRECTORY}"
+"${REPO_ROOT}/scripts/tvt-edge-operations.sh" verify-release --bundle "${OUTPUT_DIRECTORY}"
 
 source_epoch="$(git show -s --format=%ct "${SOURCE_COMMIT}")"
 tar --sort=name --mtime="@${source_epoch}" --owner=0 --group=0 --numeric-owner \
