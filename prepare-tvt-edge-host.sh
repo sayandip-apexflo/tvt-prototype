@@ -94,6 +94,19 @@ install_host_packages() {
     ca-certificates curl gnupg python3 python3-venv docker.io postgresql-16
     openssl
   )
+
+  # docker.io may replace docker.socket while an older instance is still
+  # active.  systemd cannot hand dockerd the old socket after that transition,
+  # and dockerd exits because its -H fd:// listener has no file descriptor.
+  # Stop the old socket before APT changes the unit files; the service setup
+  # below reloads systemd and recreates it from the installed definition.
+  if systemctl cat docker.socket >/dev/null 2>&1; then
+    systemctl stop docker.service docker.socket >/dev/null 2>&1 || true
+    systemctl is-active --quiet docker.socket && \
+      tvt_fail "could not stop the existing Docker socket before package installation"
+    rm -f -- /run/docker.sock
+  fi
+
   if [[ ${MODE} == online ]]; then
     packages+=(software-properties-common)
     apt-get update
@@ -113,8 +126,23 @@ install_host_packages() {
 }
 
 enable_host_services() {
-  systemctl enable --now docker.service postgresql.service
+  # Package installation can replace unit files.  Rebuild Docker's socket
+  # activation state explicitly instead of relying on a possibly stale socket
+  # retained by systemd across that replacement.
+  systemctl daemon-reload
+  systemctl stop docker.service docker.socket >/dev/null 2>&1 || true
+  systemctl reset-failed docker.service docker.socket >/dev/null 2>&1 || true
+  systemctl is-active --quiet docker.socket && \
+    tvt_fail "could not stop Docker's stale socket activation state"
+  rm -f -- /run/docker.sock
+
+  systemctl enable docker.socket docker.service postgresql.service
+  systemctl start docker.socket
+  systemctl start docker.service
+  systemctl start postgresql.service
+  systemctl is-active --quiet docker.socket
   systemctl is-active --quiet docker.service
+  docker info >/dev/null 2>&1 || tvt_fail "Docker is active but not healthy"
   systemctl is-active --quiet postgresql.service
 }
 

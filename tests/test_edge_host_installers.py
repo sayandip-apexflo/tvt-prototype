@@ -29,15 +29,65 @@ class EdgeHostInstallerTests(unittest.TestCase):
         ):
             self.assertNotIn(package, package_install)
 
+    def test_docker_socket_is_refreshed_across_package_installation(self) -> None:
+        prepare = (ROOT / "prepare-tvt-edge-host.sh").read_text(encoding="utf-8")
+        package_install = prepare.split("install_host_packages()", 1)[1].split(
+            "enable_host_services()", 1
+        )[0]
+        service_setup = prepare.split("enable_host_services()", 1)[1].split(
+            "install_hardware()", 1
+        )[0]
+
+        self.assertIn("systemctl stop docker.service docker.socket", package_install)
+        self.assertIn("rm -f -- /run/docker.sock", package_install)
+        self.assertIn("systemctl daemon-reload", service_setup)
+        self.assertIn("systemctl reset-failed docker.service docker.socket", service_setup)
+        self.assertLess(
+            service_setup.index("systemctl start docker.socket"),
+            service_setup.index("systemctl start docker.service"),
+        )
+        self.assertIn('tvt_fail "Docker is active but not healthy"', service_setup)
+
     def test_all_installer_shell_is_syntactically_valid(self) -> None:
         scripts = [
             ROOT / "prepare-tvt-edge-host.sh",
             ROOT / "install-tvt-edge-host.sh",
+            ROOT / "scripts/check-tvt-edge-package-absence.sh",
+            ROOT / "scripts/verify-tvt-edge-deployment.sh",
             ROOT / "scripts/tvt-edge-operations.sh",
             ROOT / "scripts/make-tvt-edge-release.sh",
             ROOT / "scripts/lib/tvt-installer-common.sh",
         ]
         subprocess.run(["bash", "-n", *map(str, scripts)], check=True)
+
+    def test_post_install_audit_covers_packages_hardware_and_services(self) -> None:
+        audit = (ROOT / "scripts/verify-tvt-edge-deployment.sh").read_text(
+            encoding="utf-8"
+        )
+        for expected in (
+            "PACKAGE AND DRIVER VERSIONS",
+            "HARDWARE AND ACCELERATOR CHECKS",
+            "SERVICES AND PLATFORM HEALTH",
+            "KUBERNETES PODS",
+            "dpkg-query",
+            "OpenVINO devices",
+            "tvt-local-registry.service",
+            'container_image} == "${registry_digest}',
+            "verify-k3s-plane",
+            "verify-pipeline-image-sync",
+            "OVERALL: PASS",
+        ):
+            self.assertIn(expected, audit)
+
+    def test_edge_package_absence_audit_handles_dpkg_status_abbreviations(self) -> None:
+        audit = (
+            ROOT / "scripts/check-tvt-edge-package-absence.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn('ii*)', audit)
+        self.assertIn('un*)', audit)
+        self.assertIn('edge_state=PRESENT-EXACT', audit)
+        self.assertIn('edge_state=ABSENT', audit)
+        self.assertIn('application_wheels=("${BUNDLE}"/wheels/*.whl)', audit)
 
     def test_application_resources_and_node_readiness_are_portable(self) -> None:
         installer = (ROOT / "install-tvt-edge-host.sh").read_text(encoding="utf-8")
