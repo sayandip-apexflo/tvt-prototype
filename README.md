@@ -85,6 +85,9 @@ The required features are:
 
 The secure tunnel should be for last-resort shell access. The bulk of debugging should happen off metrics/logs/traces/snapshots that are already flowing to a central dashboard, so 90% of issues are diagnosable without ever opening a session to the box.
 
+The native MeshCentral workstation server and Intel edge Mesh Agent installers
+are documented in [docs/MESHCENTRAL-NATIVE-INSTALL.md](docs/MESHCENTRAL-NATIVE-INSTALL.md).
+
 ## Current implementation
 
 The first five slices are implemented from the approved
