@@ -112,6 +112,10 @@ class EdgeHostInstallerTests(unittest.TestCase):
         )
         self.assertIn('scripts/tvt-edge-operations.sh" build-release-inputs', front_door)
         self.assertIn('--cache-directory "${CACHE_DIRECTORY}"', front_door)
+        self.assertIn('--edge-inventory "${EDGE_INVENTORY}"', front_door)
+        self.assertNotIn("detect_voyager", operations)
+        self.assertIn("log_edge_profile", operations)
+        self.assertIn("never from the workstation", operations)
         for required_stage in (
             "save_registry_image",
             "build_control_image node-reporter reporter",
@@ -147,6 +151,7 @@ class EdgeHostInstallerTests(unittest.TestCase):
             "build-release-inputs",
             "build-release",
             "verify-release",
+            "probe-edge-hardware",
             "install-tvt-hardware-drivers",
             "install-local-registry",
             "install-k3s-single-node",
@@ -175,8 +180,9 @@ class EdgeHostInstallerTests(unittest.TestCase):
             path.write_bytes(relative.encode())
         required = {
             "prepare-tvt-edge-host.sh", "install-tvt-edge-host.sh", "alembic.ini",
-            "config/platform.env", "config/pipeline.env",
+            "config/platform.env", "config/pipeline.env", "config/hardware-matrix.env",
             "scripts/lib/tvt-installer-common.sh", "scripts/tvt-edge-operations.sh",
+            "scripts/tvt-hardware-inventory.py",
             "deploy/k8s/apexfabric-foundation.yaml", "deploy/k8s/apexfabric-node-management.yaml",
             "deploy/host/tvt-edge.env.example", "deploy/host/postgresql-tvt.conf",
             "deploy/systemd/tvt-edge.service", "deploy/systemd/tvt-camera-sync.service",
@@ -185,6 +191,7 @@ class EdgeHostInstallerTests(unittest.TestCase):
             "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4/image-contract.yaml",
             "tvt_edge/db/migrations/env.py", "packages/apt/runtime.deb",
             "hardware/driver-recipe.json", "hardware/linux-npu-driver.tar.gz",
+            "hardware/edge-inventory.json",
             "hardware/wheels/openvino.whl",
             "hardware/voyager-wheels/axelera_rt.whl",
         }
@@ -192,11 +199,43 @@ class EdgeHostInstallerTests(unittest.TestCase):
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(relative.encode())
-        (root / "hardware/driver-recipe.json").write_text(
-            json.dumps({"voyager": {"enabled": True}}), encoding="utf-8"
-        )
+        manifest["axelera_variant"] = "metis"
+        inventory = {
+            "schema_version": 1,
+            "os_id": "ubuntu",
+            "os_version_id": "24.04",
+            "architecture": "amd64",
+            "cpu_model": "Intel(R) Core(TM) Ultra 9 285H",
+            "kernel_version": manifest["kernel_target"],
+            "axelera_present": True,
+            "axelera_pci_address": "0000:01:00.0",
+            "gpu_render_node": True,
+            "npu_node": True,
+            "memory_mib": 32768,
+            "disk_free_mib": 100000,
+            "secure_boot": "unknown",
+            "pci_devices": [],
+            "modules": {"i915": False, "xe": True, "intel_vpu": True, "metis": True},
+        }
+        inventory_path = root / "hardware/edge-inventory.json"
+        inventory_path.write_text(json.dumps(inventory, sort_keys=True) + "\n", encoding="utf-8")
+        manifest["edge_inventory_sha256"] = hashlib.sha256(inventory_path.read_bytes()).hexdigest()
         (root / "manifest.json").write_text(
             json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+        )
+        (root / "hardware/driver-recipe.json").write_text(
+            json.dumps({
+                "schema_version": 3,
+                "policy": "edge-inventory-driven",
+                "hardware_profile": "intel-285h",
+                "os_id": "ubuntu",
+                "os_version_id": "24.04",
+                "architecture": "amd64",
+                "kernel_target": manifest["kernel_target"],
+                "inventory_sha256": manifest["edge_inventory_sha256"],
+                "voyager": {"enabled": True},
+            }),
+            encoding="utf-8",
         )
         self.write_checksums(root)
 
@@ -267,7 +306,7 @@ class EdgeHostInstallerTests(unittest.TestCase):
                     "size": bundled.stat().st_size,
                 }
             lock = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "release_version": manifest["release_version"],
                 "source_commit": manifest["source_commit"],
                 "configuration": {
@@ -277,6 +316,14 @@ class EdgeHostInstallerTests(unittest.TestCase):
                     "pipeline_sha256": hashlib.sha256(
                         (bundle / "config/pipeline.env").read_bytes()
                     ).hexdigest(),
+                    "hardware_matrix_sha256": hashlib.sha256(
+                        (bundle / "config/hardware-matrix.env").read_bytes()
+                    ).hexdigest(),
+                },
+                "edge_inventory": {
+                    "sha256": manifest["edge_inventory_sha256"],
+                    "kernel_target": manifest["kernel_target"],
+                    "axelera_present": True,
                 },
                 "files": lock_files,
             }
@@ -415,13 +462,41 @@ tvt_run_stage {state} 0.1.0 sample worker
                 path.write_bytes(content)
             (root / "k3s/install.sh").chmod(0o755)
             (root / "k3s/k3s").chmod(0o755)
+            inventory = {
+                "schema_version": 1,
+                "collected_at": "2026-09-15T00:00:00+00:00",
+                "os_id": "ubuntu",
+                "os_version_id": "24.04",
+                "architecture": "amd64",
+                "cpu_model": "Intel(R) Core(TM) Ultra 9 285H",
+                "kernel_version": "6.8.0-test",
+                "axelera_present": True,
+                "axelera_pci_address": "0000:01:00.0",
+                "gpu_render_node": True,
+                "npu_node": True,
+                "memory_mib": 32768,
+                "disk_free_mib": 100000,
+                "secure_boot": "unknown",
+                "pci_devices": [],
+                "modules": {"i915": False, "xe": True, "intel_vpu": True, "metis": False},
+            }
+            inventory_path = temporary / "edge-inventory.json"
+            inventory_text = json.dumps(inventory, indent=2, sort_keys=True) + "\n"
+            inventory_path.write_text(inventory_text, encoding="utf-8")
+            inventory_sha = hashlib.sha256(inventory_text.encode()).hexdigest()
+            (inventory_path.parent / f"{inventory_path.name}.sha256").write_text(
+                f"{inventory_sha}  {inventory_path.name}\n", encoding="utf-8"
+            )
+            (root / "hardware/edge-inventory.json").write_bytes(inventory_path.read_bytes())
             recipe = {
-                "schema_version": 2,
+                "schema_version": 3,
+                "policy": "edge-inventory-driven",
                 "hardware_profile": "intel-285h",
                 "os_id": "ubuntu",
                 "os_version_id": "24.04",
                 "architecture": "amd64",
-                "kernel_version": "6.8.0-test",
+                "kernel_target": "6.8.0-test",
+                "inventory_sha256": inventory_sha,
                 "npu": {"sha256": hashlib.sha256(npu).hexdigest()},
                 "apt": {"metis-dkms": "1.4.17"},
                 "wheels": {"openvino.whl": hashlib.sha256(wheel).hexdigest()},
@@ -461,13 +536,16 @@ tvt_run_stage {state} 0.1.0 sample worker
                 "python3", str(ROOT / "scripts/tvt-release-inputs.py"),
                 "--input-directory", str(root),
             ]
+            matrix = str(ROOT / "config/hardware-matrix.env")
             create = base[:2] + ["create", *base[2:], "--output", str(lock),
                 "--release-version", "0.1.0", "--source-commit", "a" * 40,
-                "--platform-config", str(platform), "--pipeline-config", str(pipeline)]
+                "--platform-config", str(platform), "--pipeline-config", str(pipeline),
+                "--hardware-matrix", matrix, "--edge-inventory", str(inventory_path)]
             subprocess.run(create, check=True)
             verify = base[:2] + ["verify", *base[2:], "--lock", str(lock),
                 "--release-version", "0.1.0", "--source-commit", "a" * 40,
-                "--platform-config", str(platform), "--pipeline-config", str(pipeline)]
+                "--platform-config", str(platform), "--pipeline-config", str(pipeline),
+                "--hardware-matrix", matrix, "--edge-inventory", str(inventory_path)]
             subprocess.run(verify, check=True)
             (root / "notes.txt").write_text("not a release input", encoding="utf-8")
             unexpected = subprocess.run(verify, capture_output=True, text=True)
@@ -482,6 +560,17 @@ tvt_run_stage {state} 0.1.0 sample worker
             # An Intel-only closure is valid without Metis or Voyager artifacts.
             (root / "images/registry.tar").write_bytes(b"registry")
             (root / "hardware/voyager-wheels/axelera_rt.whl").unlink()
+            inventory["axelera_present"] = False
+            inventory["axelera_pci_address"] = None
+            inventory_text = json.dumps(inventory, indent=2, sort_keys=True) + "\n"
+            inventory_path.write_text(inventory_text, encoding="utf-8")
+            inventory_sha = hashlib.sha256(inventory_text.encode()).hexdigest()
+            (inventory_path.parent / f"{inventory_path.name}.sha256").write_text(
+                f"{inventory_sha}  {inventory_path.name}\n", encoding="utf-8"
+            )
+            (root / "hardware/edge-inventory.json").write_bytes(inventory_path.read_bytes())
+            recipe["kernel_target"] = "6.8.0-test"
+            recipe["inventory_sha256"] = inventory_sha
             recipe["apt"] = {}
             recipe["voyager"] = {
                 "enabled": False,

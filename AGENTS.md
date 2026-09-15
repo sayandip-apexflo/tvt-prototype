@@ -25,12 +25,14 @@ plane (`tvt_edge/`), reused K3s/Solution Pack runtime (`apexfabric/`,
   `test_management_plane.py`, `test_alerting.py` encode the hardest invariants.
 - `scripts/tvt-edge-operations.sh` — **only** entry point for component
   host operations (subcommands). `scripts/make-tvt-edge-release.sh` — sole
-  release builder. `prepare-tvt-edge-host.sh` / `install-tvt-edge-host.sh` —
+  release builder. `scripts/tvt-edge-fleet.sh` — workstation-side fleet
+  orchestrator. `prepare-tvt-edge-host.sh` / `install-tvt-edge-host.sh` —
   sole production host entry points. `config/*.env` — pinned digests/versions.
 - `deploy/` — systemd units, K3s manifests, monitoring profile.
   `solution-packs/catalog/` — vendored Traffic v4 pack. `examples/` — docs-only
   inputs. `docs/` — runbooks (`EDGE-RELEASE-BUILD.md`,
-  `TRAFFIC-EDGE-QUALIFICATION.md`, `PIPELINE-TRAFFIC-IMAGE.md`).
+  `TRAFFIC-EDGE-QUALIFICATION.md`, `PIPELINE-TRAFFIC-IMAGE.md`,
+  `EDGE-FLEET-DEPLOYMENT.md`).
 
 ## 2. Environment, build, test
 
@@ -198,9 +200,17 @@ touch:
 
 Production hosts use **only** the release-bundle entry points (see
 `COMMANDS.md` + `docs/EDGE-RELEASE-BUILD.md`); do not run component installers
-individually on a clean host:
+individually on a clean host. Probe the edge over SSH first (read-only, writes
+the inventory + `.sha256` sidecar), then build one bundle per edge profile:
 
 ```bash
+./scripts/tvt-edge-operations.sh probe-edge-hardware \
+  --ssh tvt-edge-01 --output /srv/tvt-release/edge-hardware-inventory.json
+./scripts/make-tvt-edge-release.sh \
+  --input-directory /srv/tvt-release/inputs-metis \
+  --output-directory /srv/tvt-release/output/tvt-edge-release-0.1.0-intel-285h-metis \
+  --edge-inventory /srv/tvt-release/edge-hardware-inventory.json \
+  --version 0.1.0 --source-commit "$(git rev-parse HEAD)"
 sudo ./prepare-tvt-edge-host.sh --bundle /media/tvt/release --mode offline
 sudo reboot
 sudo ./install-tvt-edge-host.sh --bundle /media/tvt/release \

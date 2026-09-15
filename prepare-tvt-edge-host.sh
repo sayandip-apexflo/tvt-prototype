@@ -51,6 +51,9 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 tvt_acquire_lock
 tvt_verify_bundle "${BUNDLE}"
 readonly RELEASE_VERSION="$(tvt_manifest_value "${BUNDLE}" release_version)"
+if [[ ${MODE} == online ]]; then
+  tvt_fail "target-specific release bundles must be prepared in offline mode; resolve drivers on the workstation and use --mode offline"
+fi
 
 preflight_host() {
   local os_release="${TVT_OS_RELEASE_FILE:-/etc/os-release}"
@@ -168,6 +171,55 @@ axelera_hardware_present() {
   return 1
 }
 
+check_bundle_profile() {
+  # The bundle is built for one probed edge profile. Fail before mutating
+  # the host when the live edge does not match it.
+  local live_axelera=false bundle_variant bundle_kernel live_kernel
+  if axelera_hardware_present; then live_axelera=true; fi
+  bundle_variant="$(tvt_manifest_value "${BUNDLE}" axelera_variant)"
+  if ${live_axelera}; then
+    [[ ${bundle_variant} == metis ]] || tvt_fail \
+      "bundle axelera_variant is '${bundle_variant}' but Axelera PCI hardware is present; rebuild with this edge's probe inventory"
+  else
+    [[ ${bundle_variant} == intel-only ]] || tvt_fail \
+      "bundle axelera_variant is '${bundle_variant}' but no Axelera PCI hardware is present; rebuild with this edge's probe inventory"
+  fi
+  bundle_kernel="$(tvt_manifest_value "${BUNDLE}" kernel_target)"
+  live_kernel="$(uname -r)"
+  [[ ${live_kernel} == "${bundle_kernel}" ]] || tvt_fail \
+    "live kernel ${live_kernel} does not match bundle kernel target ${bundle_kernel}; rebuild with this edge's probe inventory"
+  local bundled_inventory live_inventory
+  bundled_inventory="${BUNDLE}/hardware/edge-inventory.json"
+  [[ -f ${bundled_inventory} ]] || tvt_fail "bundle edge inventory is missing"
+  [[ $(sha256sum "${bundled_inventory}" | awk '{print $1}') == \
+    "$(tvt_manifest_value "${BUNDLE}" edge_inventory_sha256)" ]] || \
+    tvt_fail "bundle edge inventory checksum does not match the manifest"
+  live_inventory="$(mktemp "${TMPDIR:-/tmp}/tvt-edge-live-inventory.XXXXXX.json")"
+  python3 "${BUNDLE}/scripts/tvt-hardware-inventory.py" probe --output "${live_inventory}" >/dev/null || \
+    tvt_fail "could not collect live hardware inventory for bundle matching"
+  python3 - "${bundled_inventory}" "${live_inventory}" <<'PY' || \
+    tvt_fail "live hardware inventory does not match the bundle inventory; rebuild for this edge"
+import json
+import pathlib
+import sys
+
+expected = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+actual = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+for key in ("os_id", "os_version_id", "architecture", "cpu_model", "kernel_version", "axelera_present", "secure_boot"):
+    if expected.get(key) != actual.get(key):
+        raise SystemExit(f"{key} differs")
+def pci_signature(document):
+    return sorted(
+        (item.get("vendor_id"), item.get("device_id"), item.get("class"))
+        for item in document.get("pci_devices", [])
+    )
+if pci_signature(expected) != pci_signature(actual):
+    raise SystemExit("PCI device inventory differs")
+PY
+  rm -f -- "${live_inventory}" "${live_inventory}.sha256"
+  tvt_log "bundle profile matches live edge (${bundle_variant}, ${bundle_kernel})"
+}
+
 verify_post_reboot() {
   local axelera_present=false
   if axelera_hardware_present; then axelera_present=true; fi
@@ -176,6 +228,7 @@ verify_post_reboot() {
   locked_axelera="$(tvt_json_get "${hardware_recipe}" voyager.enabled 2>/dev/null || true)"
   [[ ${locked_axelera} == "${axelera_present}" ]] || tvt_fail \
     "current Axelera PCI hardware presence does not match the installed driver recipe"
+  check_bundle_profile
   [[ -e /dev/dri/renderD128 ]] || tvt_fail "/dev/dri/renderD128 is missing"
   [[ -e /dev/accel/accel0 ]] || tvt_fail "/dev/accel/accel0 is missing"
   if ! grep -Eq '^(i915|xe) ' /proc/modules; then tvt_fail "neither i915 nor xe is loaded"; fi
@@ -217,6 +270,7 @@ PY
 }
 
 preflight_host
+check_bundle_profile
 if ${VERIFY_ONLY}; then
   [[ "$(tvt_json_get "${PREPARE_STATE}" status 2>/dev/null || true)" == prepared ]] || \
     tvt_fail "host preparation state is not prepared"

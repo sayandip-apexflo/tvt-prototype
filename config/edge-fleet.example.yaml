@@ -1,0 +1,10 @@
+# Workstation-side fleet inventory. Keep credentials out of this file; SSH
+# keys, aliases, bastions, and host-key policy belong in ~/.ssh/config.
+edges:
+  - id: plant-01
+    host: edge-01.example.invalid
+    user: tvt-admin
+    site_config: /srv/tvt/sites/plant-01.yaml
+  - id: plant-02
+    ssh_target: tvt-admin@edge-02.example.invalid
+    site_config: /srv/tvt/sites/plant-02.yaml

@@ -28,6 +28,7 @@ REQUIRED_FILES = {
     "k3s/k3s",
     "hardware/driver-recipe.json",
     "hardware/linux-npu-driver.tar.gz",
+    "hardware/edge-inventory.json",
 }
 PIN_KEYS = (
     "K3S_VERSION",
@@ -122,7 +123,8 @@ def validate_hardware(root: pathlib.Path, files: dict[str, pathlib.Path]) -> dic
     except (OSError, json.JSONDecodeError) as error:
         raise InputError(f"invalid hardware driver recipe: {error}") from error
     expected = {
-        "schema_version": 2,
+        "schema_version": 3,
+        "policy": "edge-inventory-driven",
         "hardware_profile": "intel-285h",
         "os_id": "ubuntu",
         "os_version_id": "24.04",
@@ -131,14 +133,22 @@ def validate_hardware(root: pathlib.Path, files: dict[str, pathlib.Path]) -> dic
     for key, value in expected.items():
         if recipe.get(key) != value:
             raise InputError(f"hardware recipe {key} does not equal {value!r}")
-    kernel = recipe.get("kernel_version")
+    kernel = recipe.get("kernel_target")
     if not isinstance(kernel, str) or not kernel:
-        raise InputError("hardware recipe has no kernel version")
+        raise InputError("hardware recipe has no kernel target")
+    inventory_sha = recipe.get("inventory_sha256")
+    if not isinstance(inventory_sha, str) or not DIGEST.fullmatch(inventory_sha):
+        raise InputError("hardware recipe has no valid inventory digest")
     npu_digest = recipe.get("npu", {}).get("sha256")
     if not isinstance(npu_digest, str) or not DIGEST.fullmatch(npu_digest):
         raise InputError("hardware recipe has no valid NPU digest")
     if sha256(root / "hardware/linux-npu-driver.tar.gz") != npu_digest:
         raise InputError("hardware NPU archive does not match the driver recipe")
+    inventory = _load_inventory(root / "hardware/edge-inventory.json")
+    if sha256(root / "hardware/edge-inventory.json") != inventory_sha:
+        raise InputError("edge inventory does not match the driver recipe")
+    if inventory["kernel_version"] != kernel:
+        raise InputError("edge inventory kernel does not match the hardware recipe")
     wheel_pins = recipe.get("wheels")
     if not isinstance(wheel_pins, dict) or not wheel_pins:
         raise InputError("hardware recipe has no wheel closure")
@@ -203,7 +213,30 @@ def validate_hardware(root: pathlib.Path, files: dict[str, pathlib.Path]) -> dic
             )
         ):
             raise InputError("Intel-only hardware recipe contains a Voyager/Metis closure")
-    return {"kernel_version": kernel, "recipe_sha256": sha256(root / "hardware/driver-recipe.json")}
+    return {"kernel_target": kernel, "recipe_sha256": sha256(root / "hardware/driver-recipe.json"),
+            "inventory_sha256": inventory_sha}
+
+
+def _load_inventory(path: pathlib.Path) -> dict[str, Any]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise InputError(f"invalid edge inventory: {error}") from error
+    if not isinstance(document, dict):
+        raise InputError("edge inventory must be a JSON object")
+    if document.get("schema_version") != 1:
+        raise InputError("unsupported edge inventory schema")
+    if not isinstance(document.get("kernel_version"), str) or not document["kernel_version"]:
+        raise InputError("edge inventory has no kernel version")
+    if document.get("os_id") != "ubuntu" or document.get("os_version_id") != "24.04":
+        raise InputError("edge inventory OS must be Ubuntu 24.04")
+    if document.get("architecture") != "amd64":
+        raise InputError("edge inventory architecture must be amd64")
+    if not re.search(r"Intel.*285H", str(document.get("cpu_model", "")), re.IGNORECASE):
+        raise InputError("edge inventory CPU must be an Intel Core Ultra 285H")
+    if not isinstance(document.get("axelera_present"), bool):
+        raise InputError("edge inventory has no Axelera presence flag")
+    return document
 
 
 def create_lock(args: argparse.Namespace) -> dict[str, Any]:
@@ -213,6 +246,11 @@ def create_lock(args: argparse.Namespace) -> dict[str, Any]:
     files = input_files(root, output)
     platform = load_env(args.platform_config)
     pipeline = load_env(args.pipeline_config)
+    matrix = load_env(args.hardware_matrix)
+    if matrix.get("HARDWARE_PROFILE") != "intel-285h":
+        raise InputError("hardware matrix must pin HARDWARE_PROFILE=intel-285h")
+    inventory = _load_inventory(args.edge_inventory.resolve())
+    inventory_sha = sha256(args.edge_inventory.resolve())
     pins = {key: (platform | pipeline).get(key) for key in PIN_KEYS}
     missing_pins = [key for key, value in pins.items() if not value]
     if missing_pins:
@@ -223,15 +261,30 @@ def create_lock(args: argparse.Namespace) -> dict[str, Any]:
     if traffic.stat().st_size != int(pins["PIPELINE_TRAFFIC_ARCHIVE_SIZE"]):
         raise InputError("Traffic archive size does not match config/pipeline.env")
     hardware = validate_hardware(root, files)
+    if hardware["kernel_target"] != inventory["kernel_version"]:
+        raise InputError("hardware recipe kernel target does not match the edge inventory")
+    if hardware["inventory_sha256"] != inventory_sha:
+        raise InputError("hardware recipe inventory digest does not match the edge inventory file")
+    recipe_axelera = json.loads(
+        (root / "hardware/driver-recipe.json").read_text(encoding="utf-8")
+    )["voyager"]["enabled"]
+    if recipe_axelera != inventory["axelera_present"]:
+        raise InputError("hardware recipe Voyager flag does not match the edge inventory")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "release_version": args.release_version,
         "source_commit": args.source_commit,
         "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "configuration": {
             "platform_sha256": sha256(args.platform_config),
             "pipeline_sha256": sha256(args.pipeline_config),
+            "hardware_matrix_sha256": sha256(args.hardware_matrix),
             "pins": pins,
+        },
+        "edge_inventory": {
+            "sha256": inventory_sha,
+            "kernel_target": inventory["kernel_version"],
+            "axelera_present": inventory["axelera_present"],
         },
         "hardware": hardware,
         "files": {
@@ -263,13 +316,24 @@ def verify_lock(args: argparse.Namespace) -> None:
         lock = json.loads(args.lock.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise InputError(f"invalid release input lock: {error}") from error
-    if lock.get("schema_version") != 1:
+    if lock.get("schema_version") != 2:
         raise InputError("unsupported release input lock schema")
     validate_identity(str(lock.get("release_version", "")), str(lock.get("source_commit", "")))
     if args.release_version and lock["release_version"] != args.release_version:
         raise InputError("input lock release version does not match the requested release")
     if args.source_commit and lock["source_commit"] != args.source_commit:
         raise InputError("input lock source commit does not match the requested release")
+    if args.edge_inventory is not None:
+        inventory = _load_inventory(args.edge_inventory.resolve())
+        locked_inventory = lock.get("edge_inventory", {})
+        if not isinstance(locked_inventory, dict):
+            raise InputError("input lock has an invalid edge inventory record")
+        if locked_inventory.get("kernel_target") != inventory["kernel_version"]:
+            raise InputError("edge inventory kernel does not match the input lock")
+        if locked_inventory.get("axelera_present") != inventory["axelera_present"]:
+            raise InputError("edge inventory Axelera flag does not match the input lock")
+        if locked_inventory.get("sha256") != sha256(args.edge_inventory.resolve()):
+            raise InputError("edge inventory does not match the input lock")
     files = input_files(root, args.lock.resolve())
     locked_files = lock.get("files")
     if not isinstance(locked_files, dict) or set(locked_files) != set(files):
@@ -287,7 +351,12 @@ def verify_lock(args: argparse.Namespace) -> None:
         raise InputError("platform configuration changed after the input lock was created")
     if args.pipeline_config and configuration.get("pipeline_sha256") != sha256(args.pipeline_config):
         raise InputError("pipeline configuration changed after the input lock was created")
-    validate_hardware(root, files)
+    if args.hardware_matrix and configuration.get("hardware_matrix_sha256") != sha256(args.hardware_matrix):
+        raise InputError("hardware matrix changed after the input lock was created")
+    hardware_record = validate_hardware(root, files)
+    locked_hardware = lock.get("hardware", {})
+    if hardware_record != locked_hardware:
+        raise InputError("hardware recipe does not match the input lock")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -300,6 +369,8 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--source-commit", required=True)
     create.add_argument("--platform-config", required=True, type=pathlib.Path)
     create.add_argument("--pipeline-config", required=True, type=pathlib.Path)
+    create.add_argument("--hardware-matrix", required=True, type=pathlib.Path)
+    create.add_argument("--edge-inventory", required=True, type=pathlib.Path)
     verify = commands.add_parser("verify", help="verify artifacts against an existing lock")
     verify.add_argument("--input-directory", required=True, type=pathlib.Path)
     verify.add_argument("--lock", required=True, type=pathlib.Path)
@@ -307,6 +378,8 @@ def parser() -> argparse.ArgumentParser:
     verify.add_argument("--source-commit")
     verify.add_argument("--platform-config", type=pathlib.Path)
     verify.add_argument("--pipeline-config", type=pathlib.Path)
+    verify.add_argument("--hardware-matrix", type=pathlib.Path)
+    verify.add_argument("--edge-inventory", type=pathlib.Path)
     return root
 
 

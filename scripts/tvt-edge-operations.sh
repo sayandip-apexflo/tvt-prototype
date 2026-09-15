@@ -405,9 +405,21 @@ if lock.get("release_version") != sys.argv[2]:
     raise SystemExit("release input lock version does not match the requested release")
 if lock.get("source_commit") != sys.argv[3]:
     raise SystemExit("release input lock commit does not match the checked-out source")
+if lock.get("schema_version") != 2:
+    raise SystemExit("release input lock schema is not version 2 (edge-inventory-driven)")
+inventory = lock.get("edge_inventory", {})
+if not isinstance(inventory, dict) or not inventory.get("kernel_target") \
+        or not isinstance(inventory.get("axelera_present"), bool):
+    raise SystemExit("release input lock has no valid edge inventory record")
 PY
-[[ "$(basename "${OUTPUT}")" == "tvt-edge-release-${RELEASE_VERSION}" ]] || {
-  echo "output directory must be named tvt-edge-release-${RELEASE_VERSION}" >&2
+EDGE_AXELERA="$(python3 - "${INPUT_LOCK}" <<'PY'
+import json, pathlib, sys
+lock = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+print("metis" if lock["edge_inventory"]["axelera_present"] else "intel-only")
+PY
+)"
+[[ "$(basename "${OUTPUT}")" == "tvt-edge-release-${RELEASE_VERSION}-intel-285h-${EDGE_AXELERA}" ]] || {
+  echo "output directory must be named tvt-edge-release-${RELEASE_VERSION}-intel-285h-${EDGE_AXELERA}" >&2
   exit 1
 }
 
@@ -444,13 +456,18 @@ application_wheel="$(find "${OUTPUT}/wheels" -maxdepth 1 -type f -name 'tvt_runt
   exit 1
 }
 python3 - "${OUTPUT}/manifest.json" "wheels/${application_wheel}" \
-  "${RELEASE_VERSION}" "${SOURCE_COMMIT}" <<'PY'
+  "${RELEASE_VERSION}" "${SOURCE_COMMIT}" "${INPUT_LOCK}" <<'PY'
 import json, pathlib, sys
 path = pathlib.Path(sys.argv[1])
+lock = json.loads(pathlib.Path(sys.argv[4]).read_text(encoding="utf-8"))
 manifest = json.loads(path.read_text(encoding="utf-8"))
 manifest["artifacts"]["application_wheel"] = sys.argv[2]
 manifest["release_version"] = sys.argv[3]
-manifest["source_commit"] = sys.argv[4]
+manifest["source_commit"] = lock["source_commit"]
+manifest["hardware_profile"] = "intel-285h"
+manifest["axelera_variant"] = "metis" if lock["edge_inventory"]["axelera_present"] else "intel-only"
+manifest["kernel_target"] = lock["edge_inventory"]["kernel_target"]
+manifest["edge_inventory_sha256"] = lock["edge_inventory"]["sha256"]
 path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 (cd "${OUTPUT}" && find . -type f ! -name checksums.sha256 -printf '%P\0' \
@@ -469,15 +486,19 @@ INPUT_DIRECTORY=""
 CACHE_DIRECTORY=""
 RELEASE_VERSION=""
 SOURCE_COMMIT=""
+EDGE_INVENTORY=""
 
 usage() {
   cat >&2 <<'EOF'
-usage: scripts/tvt-edge-operations.sh build-release-inputs --input-directory DIR [options]
+usage: scripts/tvt-edge-operations.sh build-release-inputs --input-directory DIR --edge-inventory FILE [options]
 
 Build every external input needed by make-tvt-edge-release.sh. The builder
 requires Ubuntu 24.04 amd64, Docker, Git LFS, Python 3.12, and network access.
+Hardware variants (Axelera presence, target kernel) come from the edge probe
+file, never from the workstation's own PCI devices or kernel.
 
 options:
+  --edge-inventory FILE  edge probe JSON from probe-edge-hardware (required)
   --cache-directory DIR  reusable download cache (default: INPUT_PARENT/cache)
   --version VERSION      release version (default: canonical repository version)
   --source-commit SHA    source revision (default: checked-out commit)
@@ -491,6 +512,7 @@ require_value() { [[ -n ${2:-} ]] || fail "$1 requires a value"; }
 while (($#)); do
   case "$1" in
     --input-directory) require_value "$1" "${2:-}"; INPUT_DIRECTORY="$2"; shift 2 ;;
+    --edge-inventory) require_value "$1" "${2:-}"; EDGE_INVENTORY="$2"; shift 2 ;;
     --cache-directory) require_value "$1" "${2:-}"; CACHE_DIRECTORY="$2"; shift 2 ;;
     --version) require_value "$1" "${2:-}"; RELEASE_VERSION="$2"; shift 2 ;;
     --source-commit) require_value "$1" "${2:-}"; SOURCE_COMMIT="$2"; shift 2 ;;
@@ -499,6 +521,9 @@ while (($#)); do
   esac
 done
 [[ -n ${INPUT_DIRECTORY} ]] || { usage; exit 2; }
+[[ -n ${EDGE_INVENTORY} ]] || { usage; fail "--edge-inventory FILE is required"; }
+[[ -f ${EDGE_INVENTORY} && ! -L ${EDGE_INVENTORY} ]] || \
+  fail "edge inventory is missing or symlinked: ${EDGE_INVENTORY}"
 
 for command_name in awk curl df docker dpkg flock git grep npm python3 sed sha256sum stat; do
   command -v "${command_name}" >/dev/null 2>&1 || fail "required command is missing: ${command_name}"
@@ -535,12 +560,46 @@ cd "${REPO_ROOT}"
 source config/platform.env
 # shellcheck source=config/pipeline.env
 source config/pipeline.env
+# shellcheck source=config/hardware-matrix.env
+source config/hardware-matrix.env
 [[ -n ${RELEASE_VERSION} ]] || RELEASE_VERSION="$(python3 scripts/tvt-version.py --check)"
 [[ ${RELEASE_VERSION} == "$(python3 scripts/tvt-version.py --check)" ]] || \
   fail "requested release does not equal the canonical version"
 [[ -n ${SOURCE_COMMIT} ]] || SOURCE_COMMIT="$(git rev-parse HEAD)"
 [[ ${SOURCE_COMMIT} =~ ^[0-9a-f]{40}$ && ${SOURCE_COMMIT} == "$(git rev-parse HEAD)" ]] || \
   fail "--source-commit must equal the full checked-out Git commit"
+
+# Hardware variants come from the edge probe file, never from the
+# workstation's own PCI devices or kernel. Verify the inventory, check the
+# checksum sidecar when present, and derive the target kernel + Voyager flag.
+EDGE_INVENTORY="$(cd "$(dirname "${EDGE_INVENTORY}")" && pwd -P)/$(basename "${EDGE_INVENTORY}")"
+python3 scripts/tvt-hardware-inventory.py verify --inventory "${EDGE_INVENTORY}" \
+  || fail "edge inventory failed validation"
+sidecar="${EDGE_INVENTORY}.sha256"
+if [[ -L ${sidecar} ]]; then
+  fail "edge inventory checksum sidecar is symlinked"
+elif [[ -f ${sidecar} ]]; then
+  (cd "$(dirname "${EDGE_INVENTORY}")" && sha256sum --check --status "$(basename "${sidecar}")") || \
+    fail "edge inventory checksum sidecar does not match"
+else
+  log "warning: edge inventory has no .sha256 sidecar; continuing with the validated file"
+fi
+EDGE_KERNEL="$(python3 - "${EDGE_INVENTORY}" <<'PY'
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["kernel_version"])
+PY
+)"
+EDGE_AXELERA="$(python3 - "${EDGE_INVENTORY}" <<'PY'
+import json, pathlib, sys
+document = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+print("true" if document["axelera_present"] else "false")
+PY
+)"
+INVENTORY_SHA256="$(sha256sum "${EDGE_INVENTORY}" | awk '{print $1}')"
+dpkg --compare-versions "${EDGE_KERNEL}" ge "${MINIMUM_KERNEL}" || \
+  fail "edge kernel ${EDGE_KERNEL} is below qualified minimum ${MINIMUM_KERNEL}"
+INCLUDE_VOYAGER="${EDGE_AXELERA}"
+log "edge profile ${HARDWARE_PROFILE}: axelera=${EDGE_AXELERA} kernel-target=${EDGE_KERNEL}"
 
 available_mib="$(df -Pm "${input_parent}" | awk 'NR == 2 {print $4}')"
 (( available_mib >= 20480 )) || \
@@ -566,6 +625,7 @@ fi
 temporary_root="$(mktemp -d "${input_parent}/.tvt-inputs.build.XXXXXX")"
 staging="${temporary_root}/inputs"
 mkdir -p "${staging}"/{images,k3s,hardware/wheels,apt}
+cp -f -- "${EDGE_INVENTORY}" "${staging}/hardware/edge-inventory.json"
 cleanup() {
   if [[ -n ${temporary_root:-} && -d ${temporary_root} ]]; then
     case "${temporary_root}" in
@@ -678,17 +738,10 @@ acquire_traffic() {
     "${staging}/images/traffic-edge-runtime-v4.tar"
 }
 
-detect_voyager() {
-  local vendor_file vendor
-  INCLUDE_VOYAGER=false
-  shopt -s nullglob
-  local vendor_files=(/sys/bus/pci/devices/*/vendor)
-  shopt -u nullglob
-  for vendor_file in "${vendor_files[@]}"; do
-    read -r vendor <"${vendor_file}" || continue
-    if [[ ${vendor,,} == 0x1f9d ]]; then INCLUDE_VOYAGER=true; break; fi
-  done
-  log "Axelera Voyager closure enabled: ${INCLUDE_VOYAGER}"
+log_edge_profile() {
+  # INCLUDE_VOYAGER and EDGE_KERNEL come from the edge inventory loaded above;
+  # the workstation's own PCI devices and kernel must never influence the bundle.
+  log "Axelera Voyager closure enabled: ${INCLUDE_VOYAGER} (edge kernel ${EDGE_KERNEL})"
 }
 
 acquire_npu_archive() {
@@ -767,7 +820,7 @@ build_apt_closure() {
     -v "${staging}/apt:/output" \
     "${PIPELINE_UBUNTU_BASE_IMAGE}" \
     /usr/local/bin/tvt-edge-operations build-apt-closure \
-      /output /input/linux-npu-driver.tar.gz "$(uname -r)" "${INCLUDE_VOYAGER}" \
+      /output /input/linux-npu-driver.tar.gz "${EDGE_KERNEL}" "${INCLUDE_VOYAGER}" \
       "$(id -u)" "$(id -g)"
   [[ -f ${staging}/apt/.hardware-pins ]] || fail "APT resolver did not emit hardware pins"
   mv "${staging}/apt/.hardware-pins" "${temporary_root}/hardware-pins.txt"
@@ -776,7 +829,7 @@ build_apt_closure() {
 write_hardware_recipe() {
   python3 - "${staging}/hardware" "${temporary_root}/hardware-pins.txt" \
     "${NPU_METADATA[0]}" "${NPU_METADATA[1]}" "${NPU_METADATA[2]}" "${NPU_SHA256}" \
-    "$(uname -r)" "${INCLUDE_VOYAGER}" <<'PY'
+    "${EDGE_KERNEL}" "${INCLUDE_VOYAGER}" "${INVENTORY_SHA256}" <<'PY'
 import email
 import hashlib
 import json
@@ -787,7 +840,7 @@ import zipfile
 
 root = pathlib.Path(sys.argv[1])
 apt = dict(line.split("=", 1) for line in pathlib.Path(sys.argv[2]).read_text().splitlines())
-tag, asset, url, npu_sha, kernel, include_voyager = sys.argv[3:]
+tag, asset, url, npu_sha, kernel, include_voyager, inventory_sha = sys.argv[3:]
 
 def sha256(path):
     digest = hashlib.sha256()
@@ -822,13 +875,14 @@ if voyager_enabled and voyager_versions.get("axelera-rt") != "1.6.1":
     raise SystemExit("Voyager wheel closure does not contain axelera-rt 1.6.1")
 
 recipe = {
-    "schema_version": 2,
-    "policy": "automated-release-input-build",
+    "schema_version": 3,
+    "policy": "edge-inventory-driven",
     "hardware_profile": "intel-285h",
     "os_id": "ubuntu",
     "os_version_id": "24.04",
     "architecture": "amd64",
-    "kernel_version": kernel,
+    "kernel_target": kernel,
+    "inventory_sha256": inventory_sha,
     "apt": apt,
     "python": {name: versions[name] for name in ("openvino", "openvino-genai")},
     "wheels": wheels,
@@ -854,7 +908,7 @@ build_control_image node-reporter reporter
 build_control_image node-status-controller status_controller
 acquire_k3s
 acquire_traffic
-detect_voyager
+log_edge_profile
 acquire_npu_archive
 resolve_python_wheels
 build_apt_closure
@@ -864,11 +918,13 @@ chmod 0755 "${staging}/k3s/install.sh" "${staging}/k3s/k3s"
 python3 scripts/tvt-release-inputs.py create \
   --input-directory "${staging}" --output "${staging}/release-inputs.lock.json" \
   --release-version "${RELEASE_VERSION}" --source-commit "${SOURCE_COMMIT}" \
-  --platform-config config/platform.env --pipeline-config config/pipeline.env
+  --platform-config config/platform.env --pipeline-config config/pipeline.env \
+  --hardware-matrix config/hardware-matrix.env --edge-inventory "${EDGE_INVENTORY}"
 python3 scripts/tvt-release-inputs.py verify \
   --input-directory "${staging}" --lock "${staging}/release-inputs.lock.json" \
   --release-version "${RELEASE_VERSION}" --source-commit "${SOURCE_COMMIT}" \
-  --platform-config config/platform.env --pipeline-config config/pipeline.env
+  --platform-config config/platform.env --pipeline-config config/pipeline.env \
+  --hardware-matrix config/hardware-matrix.env --edge-inventory "${EDGE_INVENTORY}"
 
 if [[ -d ${INPUT_DIRECTORY} ]]; then rmdir "${INPUT_DIRECTORY}"; fi
 mv "${staging}" "${INPUT_DIRECTORY}"
@@ -2342,13 +2398,17 @@ lock_path, cache_path, kernel = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv
 axelera_detected = sys.argv[4] == "true"
 recipe = json.loads(lock_path.read_text(encoding="utf-8"))
 expected = {
-    "schema_version": 2,
     "hardware_profile": "intel-285h",
     "os_id": "ubuntu",
     "os_version_id": "24.04",
     "architecture": "amd64",
-    "kernel_version": kernel,
+    "kernel_target": kernel,
 }
+if recipe.get("schema_version") not in (2, 3):
+    raise SystemExit(f"locked schema_version is {recipe.get('schema_version')!r}; expected 2 or 3")
+if recipe.get("schema_version") == 2 and "kernel_version" in recipe:
+    # Legacy edge-resolved lock: kernel_version carries the target kernel.
+    recipe = {**recipe, "kernel_target": recipe["kernel_version"]}
 for name, value in expected.items():
     if recipe.get(name) != value:
         raise SystemExit(f"locked {name} is {recipe.get(name)!r}; expected {value!r}")
@@ -3079,6 +3139,22 @@ if sha256(root / "config/platform.env") != configuration.get("platform_sha256"):
     raise SystemExit("bundled platform config differs from the input lock")
 if sha256(root / "config/pipeline.env") != configuration.get("pipeline_sha256"):
     raise SystemExit("bundled pipeline config differs from the input lock")
+if sha256(root / "config/hardware-matrix.env") != configuration.get("hardware_matrix_sha256"):
+    raise SystemExit("bundled hardware matrix differs from the input lock")
+if lock.get("schema_version") != 2:
+    raise SystemExit("external-input lock schema is not version 2 (edge-inventory-driven)")
+inventory = lock.get("edge_inventory", {})
+if not isinstance(inventory, dict) or not inventory.get("kernel_target") \
+        or not isinstance(inventory.get("axelera_present"), bool) \
+        or not inventory.get("sha256"):
+    raise SystemExit("external-input lock has no valid edge inventory record")
+if manifest.get("kernel_target") != inventory.get("kernel_target"):
+    raise SystemExit("manifest kernel target does not match the input lock")
+expected_variant = "metis" if inventory.get("axelera_present") else "intel-only"
+if manifest.get("axelera_variant") != expected_variant:
+    raise SystemExit("manifest Axelera variant does not match the input lock")
+if manifest.get("edge_inventory_sha256") != inventory.get("sha256"):
+    raise SystemExit("manifest inventory digest does not match the input lock")
 print(f"Verified TVT edge release {version} from {commit}")
 PY
 
@@ -3413,6 +3489,53 @@ if __name__ == "__main__":
 TVT_VERIFY_TRAFFIC_QUALIFICATION_PY
 )
 
+tvt_op_probe_edge_hardware() (
+# Source: scripts/tvt-hardware-inventory.py (probe/verify)
+set -Eeuo pipefail
+umask 022
+
+readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OUTPUT=""
+SSH_TARGET=""
+
+usage() {
+  echo "usage: scripts/tvt-edge-operations.sh probe-edge-hardware --output FILE [--ssh TARGET]" >&2
+  echo "  Read-only edge probe. With --ssh, requires key access and sudo -n on TARGET." >&2
+}
+
+while (($#)); do
+  case "$1" in
+    --output) OUTPUT="${2:-}"; shift 2 ;;
+    --ssh) SSH_TARGET="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage; exit 2 ;;
+  esac
+done
+[[ -n ${OUTPUT} ]] || { usage; exit 2; }
+[[ ! -L ${OUTPUT} && ! -L ${OUTPUT}.sha256 ]] || {
+  echo "refusing symlinked probe output" >&2
+  exit 1
+}
+mkdir -p "$(dirname "${OUTPUT}")"
+if [[ -n ${SSH_TARGET} ]]; then
+  command -v ssh >/dev/null 2>&1 || { echo "ssh is required for --ssh" >&2; exit 1; }
+  temporary="$(mktemp)"
+  cleanup() { rm -f -- "${temporary}"; }
+  trap cleanup EXIT
+  ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 \
+    -o ServerAliveCountMax=3 "${SSH_TARGET}" 'sudo -n python3 - probe --output -' \
+    <"${REPO_ROOT}/scripts/tvt-hardware-inventory.py" >"${temporary}"
+  python3 "${REPO_ROOT}/scripts/tvt-hardware-inventory.py" \
+    verify --inventory "${temporary}" >/dev/null
+  install -m 0644 "${temporary}" "${OUTPUT}"
+  digest="$(sha256sum "${OUTPUT}" | awk '{print $1}')"
+  printf '%s  %s\n' "${digest}" "$(basename "${OUTPUT}")" >"${OUTPUT}.sha256"
+  chmod 0644 "${OUTPUT}.sha256"
+else
+  python3 "${REPO_ROOT}/scripts/tvt-hardware-inventory.py" probe --output "${OUTPUT}"
+fi
+)
+
 tvt_operations_usage() {
   cat >&2 <<'EOF'
 usage: scripts/tvt-edge-operations.sh OPERATION [arguments]
@@ -3432,6 +3555,7 @@ operations:
   install-traffic-qualification
   install-tvt-hardware-drivers
   install-tvt-kubeconfig
+  probe-edge-hardware
   publish-control-images
   qualify-traffic-edge
   verify-k3s-plane
@@ -3462,6 +3586,7 @@ case "${operation}" in
   install-traffic-qualification) tvt_op_install_traffic_qualification "$@" ;;
   install-tvt-hardware-drivers) tvt_op_install_tvt_hardware_drivers "$@" ;;
   install-tvt-kubeconfig) tvt_op_install_tvt_kubeconfig "$@" ;;
+  probe-edge-hardware) tvt_op_probe_edge_hardware "$@" ;;
   publish-control-images) tvt_op_publish_control_images "$@" ;;
   qualify-traffic-edge) tvt_op_qualify_traffic_edge "$@" ;;
   verify-k3s-plane) tvt_op_verify_k3s_plane "$@" ;;

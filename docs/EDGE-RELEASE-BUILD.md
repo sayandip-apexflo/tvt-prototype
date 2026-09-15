@@ -56,6 +56,7 @@ inputs/
 │   └── k3s
 ├── hardware/
 │   ├── driver-recipe.json
+│   ├── edge-inventory.json
 │   ├── linux-npu-driver.tar.gz
 │   ├── wheels/
 │   └── voyager-wheels/        # only when recipe voyager.enabled is true
@@ -65,9 +66,35 @@ inputs/
 
 The `apt/` directory contains the complete Ubuntu 24.04 `amd64` dependency
 closure, not merely the top-level packages. The hardware recipe records the
-build host's qualified kernel and whether an Axelera device was detected. The
-K3s installer/binary, Registry image, Traffic image, Intel NPU release, and
-Ubuntu build container are selected from the pins under `config/`.
+edge probe's target kernel and Axelera presence — never the workstation's own
+PCI devices or kernel. The K3s installer/binary, Registry image, Traffic
+image, Intel NPU release, and Ubuntu build container are selected from the
+pins under `config/`.
+
+Do not add files manually to an automatically generated input tree. The input
+lock binds every artifact byte, configuration pin, version, source commit,
+and the edge inventory digest.
+
+## Probe the edge before building
+
+The workstation runs the read-only probe over SSH. SSH key access and
+non-interactive `sudo -n` on the edge are required; the probe makes no host
+mutations and collects no secrets:
+
+```bash
+./scripts/tvt-edge-operations.sh probe-edge-hardware \
+  --ssh tvt-edge-01 \
+  --output /srv/tvt-release/edge-hardware-inventory.json
+```
+
+This writes the inventory plus a checksum sidecar
+(`edge-hardware-inventory.json.sha256`). The builder verifies the inventory
+schema, checks the sidecar when present, derives the Axelera closure flag and
+exact `linux-headers` target from the probe, and records the inventory digest
+in the input lock, driver recipe, manifest, bundle, and release report. One
+bundle is built per edge profile (`tvt-edge-release-<version>-intel-285h-<intel-only|metis>`);
+a bundle refuses to install on an edge whose live hardware identity or kernel
+does not match it.
 
 Do not add files manually to an automatically generated input tree. The input
 lock binds every artifact byte, configuration pin, version, and source commit.
@@ -84,10 +111,13 @@ does not exist or is empty, it automatically:
    checksum, and image tag;
 5. downloads the configured Intel NPU release and the Python 3.12 OpenVINO
    wheel closure;
-6. detects Axelera PCI hardware and, when present, includes the pinned Metis
-   1.4.17 and Voyager 1.6.1 closures; and
+6. enables the pinned Metis 1.4.17 and Voyager 1.6.1 closures exactly when
+   the edge inventory reports Axelera PCI hardware; and
 7. resolves the complete Ubuntu 24.04 amd64 Debian dependency closure inside
-   the digest-pinned Ubuntu build container.
+   the digest-pinned Ubuntu build container against the edge's probed kernel
+   (`linux-headers-<edge-kernel>`). Any kernel at or above the qualified
+   minimum is accepted, provided matching headers and DKMS dependencies are
+   available from the configured repositories.
 
 Artifacts are first written to a temporary sibling directory, validated, and
 locked. The complete input tree is published atomically only after validation
@@ -182,15 +212,17 @@ Resolve every failure before producing a release candidate.
 ### 4. Generate the complete installation package
 
 Choose a new, empty input path and output path. Never overwrite an earlier
-release. This is the only release-build command:
+release. This is the only release-build command (the output name must carry
+the edge profile derived from the inventory):
 
 ```bash
 cd /srv/tvt-release/source/tvt-prototype
 
 ./scripts/make-tvt-edge-release.sh \
-  --input-directory /srv/tvt-release/inputs \
-  --output-directory /srv/tvt-release/output/tvt-edge-release-0.1.0 \
+  --input-directory /srv/tvt-release/inputs-metis \
+  --output-directory /srv/tvt-release/output/tvt-edge-release-0.1.0-intel-285h-metis \
   --archive-directory /srv/tvt-release/output \
+  --edge-inventory /srv/tvt-release/edge-hardware-inventory.json \
   --version 0.1.0 \
   --source-commit "$(git rev-parse HEAD)"
 ```
@@ -203,10 +235,10 @@ version or commit, changed locked inputs, wrong output name, non-empty output
 directory, or an existing archive/report. It creates:
 
 ```text
-tvt-edge-release-0.1.0/                     verified release directory
-tvt-edge-release-0.1.0.tar.gz               reproducible transport archive
-tvt-edge-release-0.1.0.tar.gz.sha256        archive checksum
-tvt-edge-release-0.1.0.release-report.json  non-secret build evidence
+tvt-edge-release-0.1.0-intel-285h-metis/                     verified release directory
+tvt-edge-release-0.1.0-intel-285h-metis.tar.gz               reproducible transport archive
+tvt-edge-release-0.1.0-intel-285h-metis.tar.gz.sha256        archive checksum
+tvt-edge-release-0.1.0-intel-285h-metis.release-report.json  non-secret build evidence
 ```
 
 The transport file is a GNU/POSIX tar stream compressed with deterministic
@@ -225,13 +257,13 @@ outputs must not be published as production releases.
 ### 5. Verify the assembled directory independently
 
 ```bash
-release_dir=/srv/tvt-release/output/tvt-edge-release-0.1.0
+release_dir=/srv/tvt-release/output/tvt-edge-release-0.1.0-intel-285h-metis
 
 ./scripts/tvt-edge-operations.sh verify-release --bundle "${release_dir}"
 
 python3 -m json.tool "${release_dir}/manifest.json"
 python3 -m json.tool \
-  /srv/tvt-release/output/tvt-edge-release-0.1.0.release-report.json
+  /srv/tvt-release/output/tvt-edge-release-0.1.0-intel-285h-metis.release-report.json
 ```
 
 The verifier checks all bundle checksums, structure and permissions, manifest
@@ -254,7 +286,7 @@ transport file before publication:
 
 ```bash
 cd /srv/tvt-release/output
-sha256sum --check tvt-edge-release-0.1.0.tar.gz.sha256
+sha256sum --check tvt-edge-release-0.1.0-intel-285h-metis.tar.gz.sha256
 ```
 
 Sign the archive or its checksum using the organization's approved signing

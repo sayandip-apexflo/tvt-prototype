@@ -90,6 +90,16 @@ for key, value in expected.items():
 version = manifest.get("release_version")
 if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?", version):
     raise SystemExit("manifest release_version is invalid")
+if manifest.get("hardware_profile") != "intel-285h":
+    raise SystemExit("manifest hardware_profile must be 'intel-285h'")
+if manifest.get("axelera_variant") not in {"intel-only", "metis"}:
+    raise SystemExit("manifest axelera_variant must be 'intel-only' or 'metis'")
+kernel_target = manifest.get("kernel_target")
+if not isinstance(kernel_target, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+_~-]*", kernel_target):
+    raise SystemExit("manifest kernel_target is invalid")
+inventory_sha = manifest.get("edge_inventory_sha256")
+if not isinstance(inventory_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", inventory_sha):
+    raise SystemExit("manifest edge_inventory_sha256 must be a sha256 digest")
 source_commit = manifest.get("source_commit")
 if not isinstance(source_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", source_commit):
     raise SystemExit("manifest source_commit must be a full Git SHA")
@@ -115,9 +125,10 @@ for raw in artifacts.values():
         raise SystemExit(f"manifest artifact is missing or unsafe: {raw}")
 required_resources = {
     "prepare-tvt-edge-host.sh", "install-tvt-edge-host.sh", "alembic.ini",
-    "config/platform.env", "config/pipeline.env",
+    "config/platform.env", "config/pipeline.env", "config/hardware-matrix.env",
     "scripts/lib/tvt-installer-common.sh",
     "scripts/tvt-edge-operations.sh",
+    "scripts/tvt-hardware-inventory.py",
     "deploy/k8s/apexfabric-foundation.yaml", "deploy/k8s/apexfabric-node-management.yaml",
     "deploy/host/tvt-edge.env.example", "deploy/host/postgresql-tvt.conf",
     "deploy/systemd/tvt-edge.service", "deploy/systemd/tvt-camera-sync.service",
@@ -132,7 +143,7 @@ for relative in sorted(required_resources):
         raise SystemExit(f"required release resource is missing or unsafe: {relative}")
 if not any((root / "packages/apt").glob("*.deb")):
     raise SystemExit("release contains no offline APT packages")
-for relative in ("hardware/driver-recipe.json", "hardware/linux-npu-driver.tar.gz"):
+for relative in ("hardware/driver-recipe.json", "hardware/linux-npu-driver.tar.gz", "hardware/edge-inventory.json"):
     if not (root / relative).is_file(): raise SystemExit(f"required release resource is missing: {relative}")
 if not any((root / "hardware/wheels").glob("*.whl")):
     raise SystemExit("release contains no OpenVINO wheels")
@@ -140,6 +151,31 @@ try:
     driver_recipe = json.loads((root / "hardware/driver-recipe.json").read_text(encoding="utf-8"))
 except (OSError, json.JSONDecodeError) as error:
     raise SystemExit(f"invalid hardware driver recipe: {error}")
+if driver_recipe.get("schema_version") != 3:
+    raise SystemExit("hardware driver recipe schema is not version 3 (edge-inventory-driven)")
+if driver_recipe.get("policy") != "edge-inventory-driven":
+    raise SystemExit("hardware driver recipe policy must be 'edge-inventory-driven'")
+if driver_recipe.get("kernel_target") != manifest.get("kernel_target"):
+    raise SystemExit("hardware driver recipe kernel target does not match the manifest")
+if driver_recipe.get("inventory_sha256") != manifest.get("edge_inventory_sha256"):
+    raise SystemExit("hardware driver recipe inventory digest does not match the manifest")
+inventory_path = root / "hardware/edge-inventory.json"
+if hashlib.sha256(inventory_path.read_bytes()).hexdigest() != manifest.get("edge_inventory_sha256"):
+    raise SystemExit("bundled edge inventory does not match the manifest")
+try:
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"invalid bundled edge inventory: {error}")
+if inventory.get("kernel_version") != manifest.get("kernel_target"):
+    raise SystemExit("bundled edge inventory kernel does not match the manifest")
+if inventory.get("axelera_present") != (manifest.get("axelera_variant") == "metis"):
+    raise SystemExit("bundled edge inventory Axelera state does not match the manifest")
+if manifest.get("axelera_variant") == "metis":
+    if driver_recipe.get("voyager", {}).get("enabled") is not True:
+        raise SystemExit("metis bundle must enable the Voyager runtime closure")
+else:
+    if driver_recipe.get("voyager", {}).get("enabled") is not False:
+        raise SystemExit("intel-only bundle must not enable the Voyager runtime closure")
 voyager_enabled = driver_recipe.get("voyager", {}).get("enabled")
 if not isinstance(voyager_enabled, bool):
     raise SystemExit("hardware driver recipe has no valid Voyager enabled flag")

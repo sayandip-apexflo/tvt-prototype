@@ -1,6 +1,6 @@
 # TVT prototype
 
-Single box deployment, reusing apexfabric.
+Single-box and fleet deployment, reusing apexfabric.
 
 ## Production edge installation
 
@@ -61,6 +61,13 @@ archive, checksum, and release report. Downloads are retained in a sibling
 cache so later builds do not fetch large immutable payloads again. The complete
 build, verification, publication, and new-commit rebuild procedure is in
 [TVT edge release build runbook](docs/EDGE-RELEASE-BUILD.md).
+
+For deployments to tens of boxes, use the workstation-side fleet controller:
+`scripts/tvt-edge-fleet.sh install --fleet config/edge-fleet.yaml --version
+0.1.0 --output-directory /srv/tvt/releases/0.1.0`. It probes each edge over
+SSH, shares one bundle across compatible profiles, continues past individual
+failures, and writes the outcome to `fleet-report.json`. See the [fleet
+deployment runbook](docs/EDGE-FLEET-DEPLOYMENT.md).
 
 All build-time and target-side component operations are consolidated as
 subcommands in `scripts/tvt-edge-operations.sh`; the release bundle does not

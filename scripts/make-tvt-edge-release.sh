@@ -7,6 +7,7 @@ INPUT_DIRECTORY=""
 OUTPUT_DIRECTORY=""
 ARCHIVE_DIRECTORY=""
 CACHE_DIRECTORY=""
+EDGE_INVENTORY=""
 RELEASE_VERSION=""
 SOURCE_COMMIT=""
 CREATE_INPUT_LOCK=false
@@ -16,9 +17,10 @@ ALLOW_DIRTY_SOURCE=false
 usage() {
   cat >&2 <<'EOF'
 usage: scripts/make-tvt-edge-release.sh \
-  --input-directory DIR --output-directory DIR [options]
+  --input-directory DIR --output-directory DIR --edge-inventory FILE [options]
 
 options:
+  --edge-inventory FILE    edge probe JSON from probe-edge-hardware (required)
   --version VERSION          must equal the canonical TVT version
   --source-commit SHA        defaults to the checked-out commit
   --archive-directory DIR    defaults to the output directory's parent
@@ -26,6 +28,9 @@ options:
   --create-input-lock        accept and lock an existing manually populated input tree
   --skip-tests               skip source test gates (recorded in the report)
   --allow-dirty-source       development only; production builds must be clean
+
+One bundle per edge profile: the output directory must be named
+tvt-edge-release-<version>-<intel-285h>-<intel-only|metis>.
 EOF
 }
 
@@ -33,6 +38,7 @@ while (($#)); do
   case "$1" in
     --input-directory) INPUT_DIRECTORY="${2:-}"; shift 2 ;;
     --output-directory) OUTPUT_DIRECTORY="${2:-}"; shift 2 ;;
+    --edge-inventory) EDGE_INVENTORY="${2:-}"; shift 2 ;;
     --archive-directory) ARCHIVE_DIRECTORY="${2:-}"; shift 2 ;;
     --cache-directory) CACHE_DIRECTORY="${2:-}"; shift 2 ;;
     --version) RELEASE_VERSION="${2:-}"; shift 2 ;;
@@ -44,7 +50,25 @@ while (($#)); do
     *) usage; exit 2 ;;
   esac
 done
-[[ -n ${INPUT_DIRECTORY} && -n ${OUTPUT_DIRECTORY} ]] || { usage; exit 2; }
+[[ -n ${INPUT_DIRECTORY} && -n ${OUTPUT_DIRECTORY} && -n ${EDGE_INVENTORY} ]] || { usage; exit 2; }
+[[ -f ${EDGE_INVENTORY} && ! -L ${EDGE_INVENTORY} ]] || {
+  echo "edge inventory is missing or symlinked: ${EDGE_INVENTORY}" >&2
+  exit 2
+}
+python3 scripts/tvt-hardware-inventory.py verify --inventory "${EDGE_INVENTORY}" || exit 2
+[[ -f ${EDGE_INVENTORY}.sha256 && ! -L ${EDGE_INVENTORY}.sha256 ]] || {
+  echo "edge inventory checksum sidecar is required: ${EDGE_INVENTORY}.sha256" >&2
+  exit 2
+}
+(cd "$(dirname "${EDGE_INVENTORY}")" && sha256sum --check --status "$(basename "${EDGE_INVENTORY}.sha256")") || {
+  echo "edge inventory checksum sidecar does not match" >&2
+  exit 2
+}
+EDGE_AXELERA="$(python3 - "${EDGE_INVENTORY}" <<'PY'
+import json, pathlib, sys
+print("metis" if json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["axelera_present"] else "intel-only")
+PY
+)"
 
 create_owned_directory() {
   local directory="$1"
@@ -109,7 +133,7 @@ if ! ${ALLOW_DIRTY_SOURCE} && [[ -n $(git status --porcelain) ]]; then
   echo "release generation requires a clean worktree" >&2
   exit 1
 fi
-expected_name="tvt-edge-release-${RELEASE_VERSION}"
+expected_name="tvt-edge-release-${RELEASE_VERSION}-intel-285h-${EDGE_AXELERA}"
 [[ $(basename "${OUTPUT_DIRECTORY}") == "${expected_name}" ]] || {
   echo "output directory must be named ${expected_name}" >&2
   exit 1
@@ -127,6 +151,7 @@ if [[ ! -f ${input_lock} ]]; then
     || [[ -z $(find "${INPUT_DIRECTORY}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) ]]; then
     "${REPO_ROOT}/scripts/tvt-edge-operations.sh" build-release-inputs \
       --input-directory "${INPUT_DIRECTORY}" --cache-directory "${CACHE_DIRECTORY}" \
+      --edge-inventory "${EDGE_INVENTORY}" \
       --version "${RELEASE_VERSION}" --source-commit "${SOURCE_COMMIT}"
   elif ! ${CREATE_INPUT_LOCK}; then
     echo "unlocked input directory is not empty; use --create-input-lock only to accept a reviewed manual input tree" >&2
@@ -137,7 +162,8 @@ if ${CREATE_INPUT_LOCK} && [[ ! -f ${input_lock} ]]; then
   python3 scripts/tvt-release-inputs.py create \
     --input-directory "${INPUT_DIRECTORY}" --output "${input_lock}" \
     --release-version "${RELEASE_VERSION}" --source-commit "${SOURCE_COMMIT}" \
-    --platform-config config/platform.env --pipeline-config config/pipeline.env
+    --platform-config config/platform.env --pipeline-config config/pipeline.env \
+    --hardware-matrix config/hardware-matrix.env --edge-inventory "${EDGE_INVENTORY}"
 fi
 [[ -f ${input_lock} ]] || {
   echo "release input builder did not create ${input_lock}" >&2
@@ -146,7 +172,8 @@ fi
 python3 scripts/tvt-release-inputs.py verify \
   --input-directory "${INPUT_DIRECTORY}" --lock "${input_lock}" \
   --release-version "${RELEASE_VERSION}" --source-commit "${SOURCE_COMMIT}" \
-  --platform-config config/platform.env --pipeline-config config/pipeline.env
+  --platform-config config/platform.env --pipeline-config config/pipeline.env \
+  --hardware-matrix config/hardware-matrix.env --edge-inventory "${EDGE_INVENTORY}"
 
 tests_status=skipped
 if ! ${SKIP_TESTS}; then
@@ -182,12 +209,13 @@ archive_digest="$(sha256sum "${archive}" | awk '{print $1}')"
 printf '%s  %s\n' "${archive_digest}" "$(basename "${archive}")" >"${archive_checksum}"
 bundle_checksums_digest="$(sha256sum "${OUTPUT_DIRECTORY}/checksums.sha256" | awk '{print $1}')"
 input_lock_digest="$(sha256sum "${input_lock}" | awk '{print $1}')"
+inventory_digest="$(sha256sum "${EDGE_INVENTORY}" | awk '{print $1}')"
 python3 - "${report}" "${RELEASE_VERSION}" "${SOURCE_COMMIT}" "${tests_status}" \
   "${ALLOW_DIRTY_SOURCE}" \
   "$(basename "${archive}")" "${archive_digest}" "${bundle_checksums_digest}" \
-  "${input_lock_digest}" <<'PY'
+  "${input_lock_digest}" "${inventory_digest}" "${EDGE_AXELERA}" <<'PY'
 import datetime, json, pathlib, sys
-output, version, commit, tests, dirty_allowed, archive, archive_sha, checksums_sha, input_sha = sys.argv[1:]
+output, version, commit, tests, dirty_allowed, archive, archive_sha, checksums_sha, input_sha, inventory_sha, axelera = sys.argv[1:]
 document = {
     "schema_version": 1,
     "release_version": version,
@@ -198,6 +226,9 @@ document = {
     "archive": {"filename": archive, "sha256": archive_sha},
     "bundle_checksums_sha256": checksums_sha,
     "release_inputs_lock_sha256": input_sha,
+    "edge_inventory_sha256": inventory_sha,
+    "hardware_profile": "intel-285h",
+    "axelera_variant": axelera,
     "qualified_on_clean_host": False,
     "credentials_included": False,
 }
