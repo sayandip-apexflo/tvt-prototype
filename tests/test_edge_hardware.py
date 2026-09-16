@@ -200,6 +200,7 @@ class EdgeInventoryLockTests(unittest.TestCase):
             "images/node-reporter.tar": b"reporter",
             "images/node-status-controller.tar": b"controller",
             "images/traffic-edge-runtime-v4.tar": traffic,
+            "images/ui.tar": b"ui",
             "k3s/install.sh": b"#!/bin/sh\n",
             "k3s/k3s": b"#!/bin/sh\n",
             "hardware/linux-npu-driver.tar.gz": npu,
@@ -261,6 +262,7 @@ class EdgeInventoryLockTests(unittest.TestCase):
         platform.write_text(
             "K3S_VERSION=v1.2.3+k3s1\n"
             "NODE_MANAGEMENT_IMAGE_VERSION=0.1.0\n"
+            "UI_IMAGE_VERSION=alerts-v2\n"
             "LOCAL_REGISTRY_IMAGE=registry:1@sha256:" + "1" * 64 + "\n",
             encoding="utf-8",
         )

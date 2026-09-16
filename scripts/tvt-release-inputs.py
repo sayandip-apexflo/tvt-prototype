@@ -24,6 +24,7 @@ REQUIRED_FILES = {
     "images/node-reporter.tar",
     "images/node-status-controller.tar",
     "images/traffic-edge-runtime-v4.tar",
+    "images/ui.tar",
     "k3s/install.sh",
     "k3s/k3s",
     "hardware/driver-recipe.json",
@@ -33,6 +34,7 @@ REQUIRED_FILES = {
 PIN_KEYS = (
     "K3S_VERSION",
     "NODE_MANAGEMENT_IMAGE_VERSION",
+    "UI_IMAGE_VERSION",
     "LOCAL_REGISTRY_IMAGE",
     "PIPELINE_REVISION",
     "PIPELINE_TRAFFIC_VERSION",

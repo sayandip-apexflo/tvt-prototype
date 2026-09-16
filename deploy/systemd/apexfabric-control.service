@@ -1,14 +1,17 @@
 [Unit]
 Description=ApexFabric local site control service
-After=k3s.service apexfabric-node-provision.service
-Wants=k3s.service apexfabric-node-provision.service
+After=network-online.target k3s.service postgresql.service
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=__REPO_ROOT__
+User=tvt-edge
+Group=tvt-edge
+Environment=PATH=/opt/tvt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONPATH=/opt/tvt/current/resources
+Environment=KUBECONFIG=/etc/tvt/kubeconfig
 Environment=APEXFABRIC_STATE_DIR=/var/lib/apexfabric/control
-Environment=APEXFABRIC_REGISTRY_ADDRESS=__APEXFABRIC_REGISTRY__
+Environment=APEXFABRIC_REGISTRY_ADDRESS=127.0.0.1:5000
 Environment=APEXFABRIC_TELEMETRY_MAX_BYTES=41943040
 Environment=APEXFABRIC_TELEMETRY_HIGH_WATERMARK=0.90
 Environment=APEXFABRIC_TELEMETRY_LOW_WATERMARK=0.80
@@ -18,12 +21,34 @@ Environment=APEXFABRIC_TELEMETRY_MAX_SNAPSHOT_BYTES=20971520
 Environment=APEXFABRIC_TELEMETRY_MAX_EVENT_BYTES=1048576
 Environment=APEXFABRIC_TELEMETRY_MAX_SNAPSHOTS_PER_EVENT=16
 Environment=APEXFABRIC_TELEMETRY_MIN_FREE_BYTES=5368709120
-WorkingDirectory=__REPO_ROOT__
-ExecStart=/usr/bin/python3 -m apexfabric.control_plane.server --host 127.0.0.1 --port 8088 --state-dir /var/lib/apexfabric/control
+WorkingDirectory=/opt/tvt/current/resources
+ExecStart=/opt/tvt/venv/bin/python3 -m apexfabric.control_plane.server --host 127.0.0.1 --port 8088 --state-dir /var/lib/apexfabric/control
 Restart=on-failure
 RestartSec=3
+StateDirectory=apexfabric/control
+StateDirectoryMode=0750
 NoNewPrivileges=true
+PrivateDevices=true
 PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+SystemCallArchitectures=native
+IPAddressDeny=any
+IPAddressAllow=localhost
+UMask=0027
 
 [Install]
 WantedBy=multi-user.target

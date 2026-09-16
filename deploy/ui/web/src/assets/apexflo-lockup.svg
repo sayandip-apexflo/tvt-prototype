@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 140" role="img" aria-labelledby="title desc">
+  <title id="title">apexflo</title>
+  <desc id="desc">ApexFlo lowercase wordmark with merged hill and flow symbol</desc>
+  <g fill="#111718" transform="translate(4 10) scale(.92)">
+    <path d="M8 91c19-7 34-18 48-34L84 20c7-9 14-14 22-14 7 0 14 4 21 11l31 29c7 7 15 10 26 10h68l-7 22h-63c-17 0-31-5-43-16l-32-29-29 35C60 87 38 97 8 99v-8Z"/>
+    <path d="M139 82h101l-7 21h-59l16 14h-31l-35-26c-5-4-2-9 6-9h9Z"/>
+  </g>
+  <text x="255" y="99" fill="#111718" font-family="Inter, Arial, sans-serif" font-size="92" font-weight="500" letter-spacing="-4">apexflo</text>
+</svg>

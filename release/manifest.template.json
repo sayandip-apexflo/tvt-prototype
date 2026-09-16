@@ -22,6 +22,7 @@
     "node_reporter_image": "images/node-reporter.tar",
     "node_status_controller_image": "images/node-status-controller.tar",
     "traffic_image": "images/traffic-edge-runtime-v4.tar",
+    "ui_image": "images/ui.tar",
     "k3s_installer": "k3s/install.sh",
     "k3s_binary": "k3s/k3s"
   }

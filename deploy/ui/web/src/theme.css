@@ -1,0 +1,83 @@
+/* Theme surfaces are scoped to the document so dialogs and drawers share them. */
+:root { color-scheme: light; }
+.theme-toggle { width: 30px; height: 30px; }
+.theme-toggle:hover { background: #f0ebfa; color: #7852ce; }
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --purple: #9970e5;
+  --border: #30303d;
+  --muted: #aaa4b8;
+  --green: #65c7a2;
+  --surface: #1b1b25;
+  --surface-raised: #23232f;
+  --surface-soft: #20202b;
+  --text: #eeeaf5;
+  --text-secondary: #b6aec5;
+  --accent-soft: #30243f;
+  color: var(--text);
+  background: #14141c;
+}
+[data-theme='dark'] :is(.sidebar,.topbar,.panel,.kpi,.deployment-card,.notification-pop,.modal,.drawer,.toast,.event-row,.search-results button,.help-row) {
+  background: var(--surface);
+  border-color: var(--border);
+}
+[data-theme='dark'] :is(.site-switch,.kpi-foot,.topology-footer,.card-link,th,.recommended,.review-summary,.version-change) {
+  background: var(--surface-soft);
+  border-color: var(--border);
+}
+[data-theme='dark'] :is(.button,.site-node,.device-node,.camera-node>span,.search-field,.solution-option, input,select,textarea) {
+  color: var(--text);
+  background: var(--surface-raised);
+  border-color: #414052;
+}
+[data-theme='dark'] .site-switch select { background: transparent; }
+[data-theme='dark'] :is(input,textarea)::placeholder { color: #a79bb7; }
+[data-theme='dark'] :is(.brand strong,h1,h2,h3,.kpi-number,.event-row strong,.table-name strong,.solution-option h3,.search-results strong,.help-row strong) { color: var(--text); }
+[data-theme='dark'] :is(.breadcrumb strong,.device-node strong,.site-node strong,.camera-node strong,.deployment-metrics strong,.stream-stats strong,.user strong) { color: #d6cde4; }
+[data-theme='dark'] :is(.nav-group button,.help,.icon-button,.global-search,.kpi-top,.kpi-top svg,.kpi-number>span,.kpi>p,.page-heading p,.section-heading p,.updated,.legend,.deployment-meta,.deployment-metrics,.event-row>div>span,.event-row time,.camera-node small,.device-node small,.site-node small,.page-footer,.topology-footer,.muted,label,dt,.tabs button,th,td,.technical summary,.modal>p,.drawer>p,.wizard-body>p,.solution-option p,.select-camera small,.upgrade-list,.config-grid p,.health-grid small,.health-grid>div>span,.stream-stats small,.detection-row small,.info-grid small,.event-timeline p,.empty,.user small,.edge-connected small,.brand small,.site-switch small,.nav-group>label,.eyebrow,.table-name small,.user-row p) {
+  color: var(--text-secondary);
+}
+[data-theme='dark'] :is(.text-button,.back-link,.card-link,.table-name,.empty h3,.version-change strong,.progress-list>div.current) { color: #c6a2f6; }
+[data-theme='dark'] :is(.site-icon,.avatar,.site-node>span,.app-icon,.count,.site-label,.demo-tag,.node-deployment,.global-search kbd,.wizard-stepper .active>span) {
+  background: var(--accent-soft);
+  border-color: #49345e;
+  color: #c6a2f6;
+}
+[data-theme='dark'] :is(.nav-group button.active,.nav-group button:hover,.theme-toggle:hover,.solution-option.selected,.select-camera.selected,.update-banner) {
+  background: var(--accent-soft);
+  color: #c6a2f6;
+  border-color: #74529a;
+}
+[data-theme='dark'] .update-banner span { color: #baabc9; }
+[data-theme='dark'] .tabs button.active { color: #c6a2f6; border-bottom-color: #ad80ed; }
+[data-theme='dark'] :is(.button:hover,.event-row:hover,tbody tr:hover,.search-results button:hover,.help-row:hover) { background: #2b2839; }
+[data-theme='dark'] .button.primary { background: #7950bb; border-color: #9970d5; color: #fff; }
+[data-theme='dark'] .button.primary:hover { background: #8b60ce; }
+[data-theme='dark'] :is(.button.danger,.danger-zone) { background: #322129; border-color: #65404c; color: #f0a2aa; }
+[data-theme='dark'] .danger-zone h3 { color: #f0a2aa; }
+[data-theme='dark'] .danger-zone p { color: #c7a4af; }
+[data-theme='dark'] :is(.edge-connected,.status-banner,.badge.green,.event-icon.information) { background: #1c302b; border-color: #314f43; color: #80d1ad; }
+[data-theme='dark'] :is(.status-banner.attention,.health-warning,.badge.amber,.event-icon.warning,.nav-group button b) { background: #342e21; border-color: #57472d; color: #e5bf78; }
+[data-theme='dark'] .status-banner>span:nth-of-type(2) { color: #c5b593; }
+[data-theme='dark'] :is(.green-text,.health-checks span,.recommended p,.progress-list>div.complete) { color: #80d1ad; }
+[data-theme='dark'] :is(.amber-text,.warning-text) { color: #e5bf78; }
+[data-theme='dark'] :is(.badge.red,.event-icon.critical,.offline-node>span) { background: #37232a; border-color: #63404a; color: #ed9e9e; }
+[data-theme='dark'] .badge.gray { color: #c1b7d0; background: #302d3b; border-color: #464051; }
+[data-theme='dark'] .app-2 { background: #22323f; border-color: #364b5b; color: #94bddd; }
+[data-theme='dark'] .app-0 { background: #282d44; border-color: #3c4464; color: #a4b5eb; }
+[data-theme='dark'] .device-node-icon { background: linear-gradient(#32303e,#252430); border-color: #46404f; color: #bcaccb; }
+[data-theme='dark'] .topology-map { background-image: radial-gradient(#3d3548 .65px,transparent .65px); }
+[data-theme='dark'] :is(.site-node:after,.device-node:after,.camera-branches:before,.camera-node:before) { background: #51435f; }
+[data-theme='dark'] .device-branch:before { border-color: #51435f; }
+[data-theme='dark'] .camera-node>span i { box-shadow: 0 0 0 2px var(--surface); }
+[data-theme='dark'] :is(.tabs,.technical,.event-timeline,.modal-actions,.wizard-stepper,.detection-row,.deployment-metrics>span+span,.search-results button,.help-row,td) { border-color: var(--border); }
+[data-theme='dark'] .segmented { background: #171720; border-color: var(--border); }
+[data-theme='dark'] .segmented button { color: var(--text-secondary); }
+[data-theme='dark'] .segmented button.active { color: #c6a2f6; background: #332940; }
+[data-theme='dark'] .meter { background: #373040; }
+[data-theme='dark'] :is(.wizard-stepper>div,.progress-list>div) { color: #aea0be; }
+[data-theme='dark'] :is(.wizard-stepper>div>span,.progress-circle) { border-color: #61516e; }
+[data-theme='dark'] .scrim { background: #08070dc2; }
+[data-theme='dark'] .drawer-scrim { background: #08070d99; }
+[data-theme='dark'] .notification-button i { border-color: var(--surface); }
+[data-theme='dark'] :focus-visible { outline: 2px solid #c6a2f6; outline-offset: 4px; }

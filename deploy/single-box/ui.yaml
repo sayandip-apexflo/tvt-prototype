@@ -21,7 +21,7 @@ spec:
       securityContext: {runAsUser: 101, runAsGroup: 101, fsGroup: 101, runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
       containers:
         - name: ui
-          image: 127.0.0.1:5000/apexfabric/ui:single-box-v1
+          image: __APEXFABRIC_REGISTRY__/apexfabric/ui:alerts-v2
           imagePullPolicy: Always
           command: [nginx, '-g', 'daemon off;']
           ports: [{name: http, containerPort: 18081}]
@@ -34,9 +34,11 @@ spec:
           volumeMounts:
             - {name: temp, mountPath: /tmp}
             - {name: nginx-cache, mountPath: /var/cache/nginx}
+            - {name: admin-auth, mountPath: /etc/nginx/auth, readOnly: true}
       volumes:
         - {name: temp, emptyDir: {sizeLimit: 64Mi}}
         - {name: nginx-cache, emptyDir: {sizeLimit: 64Mi}}
+        - {name: admin-auth, secret: {secretName: apexfabric-ui-admin-auth}}
 ---
 apiVersion: v1
 kind: Service

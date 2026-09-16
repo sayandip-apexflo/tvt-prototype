@@ -131,8 +131,8 @@ install_application() {
   fi
   install -d -o root -g root -m 0755 "${RESOURCE_DIRECTORY}"
   local item
-  for item in manifest.json checksums.sha256 alembic.ini config deploy scripts \
-    solution-packs images k3s tvt_edge; do
+  for item in manifest.json checksums.sha256 alembic.ini apexfabric config deploy examples \
+    scripts solution-packs images k3s tvt_edge; do
     cp -a "${BUNDLE}/${item}" "${RESOURCE_DIRECTORY}/"
   done
   python3 -m venv --clear "${VENV_DIRECTORY}"

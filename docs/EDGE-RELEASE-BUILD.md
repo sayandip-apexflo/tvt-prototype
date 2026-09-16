@@ -338,6 +338,28 @@ sudo ./install-tvt-edge-host.sh --bundle "$PWD" \
 Preserve `/var/lib/tvt/install/installation-report.json` as release evidence.
 Do not publish the release as qualified merely because it built successfully.
 
+### 9. Optional: install the ApexFabric dashboard
+
+The `apexfabric/ui` image, its k3s manifests (`deploy/single-box/ui.yaml`),
+and its control-plane backend (`apexfabric-control.service`) are an opt-in
+add-on, not part of the base install. After `install-k3s-plane` and
+`install-tvt-kubeconfig` have run:
+
+```bash
+sudo scripts/tvt-edge-operations.sh publish-ui-image \
+  --registry 127.0.0.1:5000 --scheme http \
+  --archive-dir "${RESOURCE_DIRECTORY}/images" --lock-output /tmp/ui-image.lock.json
+sudo scripts/tvt-edge-operations.sh install-apexfabric-ui \
+  --image-lock /tmp/ui-image.lock.json
+```
+
+`install-apexfabric-ui` enables `apexfabric-control.service` (see
+"Current limitations" below), auto-generates the `apexfabricdashboard` admin
+password on first run (saved to `/etc/tvt/apexfabric-ui-admin-password`), and
+applies the UI Deployment/Service/Ingress. Reaching `/apexfabricdashboard` and
+`/dashboard` requires Traefik, which `install-k3s-single-node` now enables by
+default (see "Current limitations").
+
 ## Rebuild after a GitHub commit
 
 A push to GitHub is an input event, not a release event. For each desired
@@ -416,3 +438,14 @@ the builder from a clean selected source revision.
 Future release work should add signed publisher provenance and an automated
 clean-host qualification test. CI can later execute these same scripts rather
 than defining a different release process.
+- `install-k3s-single-node` now installs K3s with Traefik and servicelb
+  enabled (both were disabled together; Traefik's own Service needs
+  servicelb to bind host ports 80/443). This is required for the optional
+  ApexFabric dashboard's Ingress; it adds a component the base TVT install
+  did not previously run.
+- The optional ApexFabric dashboard's control plane
+  (`apexfabric-control.service`) runs its own SQLite-backed catalog,
+  telemetry, and alert-rules store, next to and independent of TVT's
+  Postgres-backed management plane. The two do not share identities or
+  alert state. This is a known V1 limitation of enabling the dashboard, not
+  an oversight — see `apexfabric/control_plane/`.

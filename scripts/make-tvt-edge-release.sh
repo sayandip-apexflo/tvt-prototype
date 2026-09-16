@@ -195,6 +195,7 @@ if ${ALLOW_DIRTY_SOURCE}; then dirty_argument=(--allow-dirty-source); fi
   --node-reporter-image "${INPUT_DIRECTORY}/images/node-reporter.tar" \
   --node-status-controller-image "${INPUT_DIRECTORY}/images/node-status-controller.tar" \
   --traffic-image "${INPUT_DIRECTORY}/images/traffic-edge-runtime-v4.tar" \
+  --ui-image "${INPUT_DIRECTORY}/images/ui.tar" \
   --k3s-installer "${INPUT_DIRECTORY}/k3s/install.sh" \
   --k3s-binary "${INPUT_DIRECTORY}/k3s/k3s" \
   --hardware-directory "${INPUT_DIRECTORY}/hardware" \

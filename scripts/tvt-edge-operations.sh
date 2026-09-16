@@ -314,6 +314,7 @@ REGISTRY_IMAGE=""
 NODE_REPORTER_IMAGE=""
 NODE_STATUS_CONTROLLER_IMAGE=""
 TRAFFIC_IMAGE=""
+UI_IMAGE=""
 K3S_INSTALLER=""
 K3S_BINARY=""
 HARDWARE_DIRECTORY=""
@@ -328,6 +329,7 @@ usage() {
 usage: scripts/tvt-edge-operations.sh build-release --output DIR \
   --registry-image FILE --node-reporter-image FILE \
   --node-status-controller-image FILE --traffic-image FILE \
+  --ui-image FILE \
   --k3s-installer FILE --k3s-binary FILE \
   --hardware-directory DIR --apt-directory DIR \
   --input-lock FILE [--version VERSION] [--source-commit SHA]
@@ -344,6 +346,7 @@ while (($#)); do
     --node-reporter-image) NODE_REPORTER_IMAGE="${2:-}"; shift 2 ;;
     --node-status-controller-image) NODE_STATUS_CONTROLLER_IMAGE="${2:-}"; shift 2 ;;
     --traffic-image) TRAFFIC_IMAGE="${2:-}"; shift 2 ;;
+    --ui-image) UI_IMAGE="${2:-}"; shift 2 ;;
     --k3s-installer) K3S_INSTALLER="${2:-}"; shift 2 ;;
     --k3s-binary) K3S_BINARY="${2:-}"; shift 2 ;;
     --hardware-directory) HARDWARE_DIRECTORY="${2:-}"; shift 2 ;;
@@ -357,11 +360,12 @@ while (($#)); do
   esac
 done
 for value in OUTPUT REGISTRY_IMAGE NODE_REPORTER_IMAGE NODE_STATUS_CONTROLLER_IMAGE \
-  TRAFFIC_IMAGE K3S_INSTALLER K3S_BINARY HARDWARE_DIRECTORY APT_DIRECTORY INPUT_LOCK; do
+  TRAFFIC_IMAGE UI_IMAGE K3S_INSTALLER K3S_BINARY HARDWARE_DIRECTORY APT_DIRECTORY INPUT_LOCK; do
   [[ -n ${!value} ]] || { usage; echo "${value} is required" >&2; exit 2; }
 done
 for file in "${REGISTRY_IMAGE}" "${NODE_REPORTER_IMAGE}" \
-  "${NODE_STATUS_CONTROLLER_IMAGE}" "${TRAFFIC_IMAGE}" "${K3S_INSTALLER}" "${K3S_BINARY}" "${INPUT_LOCK}"; do
+  "${NODE_STATUS_CONTROLLER_IMAGE}" "${TRAFFIC_IMAGE}" "${UI_IMAGE}" \
+  "${K3S_INSTALLER}" "${K3S_BINARY}" "${INPUT_LOCK}"; do
   [[ -f ${file} && ! -L ${file} ]] || { echo "artifact is missing or symlinked: ${file}" >&2; exit 1; }
 done
 for directory in "${HARDWARE_DIRECTORY}" "${APT_DIRECTORY}"; do
@@ -433,7 +437,8 @@ mkdir -p "${OUTPUT}"/{wheels,images,k3s,hardware,packages/apt}
 mkdir -p "${OUTPUT}/tvt_edge/db"
 python3 -m pip wheel --wheel-dir "${OUTPUT}/wheels" .
 
-cp -a config deploy docs examples scripts solution-packs "${OUTPUT}/"
+cp -a apexfabric config deploy docs examples scripts solution-packs "${OUTPUT}/"
+find "${OUTPUT}" -name '__pycache__' -type d -prune -exec rm -rf -- {} +
 cp -a alembic.ini "${OUTPUT}/alembic.ini"
 cp -a tvt_edge/db/migrations "${OUTPUT}/tvt_edge/db/"
 cp -a prepare-tvt-edge-host.sh install-tvt-edge-host.sh "${OUTPUT}/"
@@ -443,6 +448,7 @@ cp -a "${REGISTRY_IMAGE}" "${OUTPUT}/images/registry.tar"
 cp -a "${NODE_REPORTER_IMAGE}" "${OUTPUT}/images/node-reporter.tar"
 cp -a "${NODE_STATUS_CONTROLLER_IMAGE}" "${OUTPUT}/images/node-status-controller.tar"
 cp -a "${TRAFFIC_IMAGE}" "${OUTPUT}/images/traffic-edge-runtime-v4.tar"
+cp -a "${UI_IMAGE}" "${OUTPUT}/images/ui.tar"
 cp -a "${K3S_INSTALLER}" "${OUTPUT}/k3s/install.sh"
 cp -a "${K3S_BINARY}" "${OUTPUT}/k3s/k3s"
 cp -a "${HARDWARE_DIRECTORY}/." "${OUTPUT}/hardware/"
@@ -687,6 +693,20 @@ build_control_image() {
   mv -f -- "${temporary_archive}" "${staging}/images/${component}.tar"
 }
 
+build_ui_image() {
+  local image architecture temporary_archive
+  image="apexfabric/ui:${UI_IMAGE_VERSION}"
+  log "building ${image} for linux/amd64"
+  "${docker_command[@]}" build --pull=false --provenance=false --platform linux/amd64 \
+    -f "${REPO_ROOT}/deploy/ui/Dockerfile" \
+    -t "${image}" "${REPO_ROOT}"
+  architecture="$("${docker_command[@]}" image inspect --format '{{.Architecture}}' "${image}")"
+  [[ ${architecture} == amd64 ]] || fail "${image} architecture is ${architecture}, not amd64"
+  temporary_archive="$(mktemp "${staging}/images/.ui.tar.XXXXXX")"
+  "${docker_command[@]}" save --output "${temporary_archive}" "${image}"
+  mv -f -- "${temporary_archive}" "${staging}/images/ui.tar"
+}
+
 acquire_k3s() {
   local k3s_cache installer_cache sums_cache release_url expected actual reported
   mkdir -p "${CACHE_DIRECTORY}/k3s/${K3S_VERSION}"
@@ -908,6 +928,9 @@ PY
 save_registry_image
 build_control_image node-reporter reporter
 build_control_image node-status-controller status_controller
+npm --prefix "${REPO_ROOT}/deploy/ui/web" ci
+npm --prefix "${REPO_ROOT}/deploy/ui/web" run build
+build_ui_image
 acquire_k3s
 acquire_traffic
 log_edge_profile
@@ -1609,6 +1632,87 @@ python3 -m tvt_runtime.image_lock render \
 
 )
 
+tvt_op_install_apexfabric_ui() (
+# Source: scripts/install-apexfabric-ui.sh
+#
+# Opt-in add-on: the ApexFabric dashboard and its k3s-native control plane
+# (SQLite-backed catalog/telemetry/alert-rules) run alongside TVT's own
+# Postgres-backed management plane, not in place of it. Alert rules and
+# telemetry are tracked independently in each; this is a known V1 limitation,
+# not an oversight. Run this after install-k3s-plane and install-tvt-kubeconfig.
+set -Eeuo pipefail
+
+readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${REPO_ROOT}"
+UI_IMAGE_LOCK=""
+
+usage() {
+  echo "usage: scripts/tvt-edge-operations.sh install-apexfabric-ui --image-lock FILE" >&2
+}
+
+while (($#)); do
+  case "$1" in
+    --image-lock) UI_IMAGE_LOCK="${2:-}"; shift 2 ;;
+    *) usage; exit 2 ;;
+  esac
+done
+[[ -f "${UI_IMAGE_LOCK}" ]] || { usage; exit 2; }
+[[ ${EUID} -eq 0 ]] || { echo "run as root" >&2; exit 1; }
+command -v k3s >/dev/null 2>&1 || { echo "K3s is not installed" >&2; exit 1; }
+command -v openssl >/dev/null 2>&1 || { echo "openssl is required" >&2; exit 1; }
+getent group tvt-edge >/dev/null || { echo "the tvt-edge group is not installed; run bootstrap-postgresql first" >&2; exit 1; }
+[[ -f /etc/tvt/kubeconfig ]] || { echo "/etc/tvt/kubeconfig is missing; run install-tvt-kubeconfig first" >&2; exit 1; }
+k3s kubectl get namespace apexfabric >/dev/null 2>&1 || {
+  echo "the apexfabric namespace is missing; run install-k3s-plane first" >&2
+  exit 1
+}
+
+install -o root -g root -m 0644 \
+  "${REPO_ROOT}/deploy/systemd/apexfabric-control.service" \
+  /etc/systemd/system/apexfabric-control.service
+systemctl daemon-reload
+systemctl enable --now apexfabric-control.service
+
+ready=false
+for _attempt in {1..30}; do
+  if curl --fail --silent --show-error --max-time 2 http://127.0.0.1:8088/api/status >/dev/null 2>&1; then
+    ready=true
+    break
+  fi
+  sleep 1
+done
+"${ready}" || { echo "apexfabric-control.service did not become ready on 127.0.0.1:8088" >&2; exit 1; }
+
+if ! k3s kubectl get secret apexfabric-ui-admin-auth -n apexfabric >/dev/null 2>&1; then
+  password="$(openssl rand -base64 24)"
+  temporary_htpasswd="$(mktemp)"
+  trap 'rm -f "${temporary_htpasswd}"' EXIT
+  printf 'admin:%s\n' "$(openssl passwd -apr1 "${password}")" >"${temporary_htpasswd}"
+  k3s kubectl create secret generic apexfabric-ui-admin-auth \
+    --from-file=admin.htpasswd="${temporary_htpasswd}" -n apexfabric
+  rm -f "${temporary_htpasswd}"
+  trap - EXIT
+  install -d -o root -g root -m 0700 /etc/tvt
+  temporary_password="$(mktemp /etc/tvt/.apexfabric-ui-admin-password.XXXXXX)"
+  printf '%s\n' "${password}" >"${temporary_password}"
+  chmod 0600 "${temporary_password}"
+  mv -f "${temporary_password}" /etc/tvt/apexfabric-ui-admin-password
+  echo "Generated the apexfabricdashboard admin password (saved to /etc/tvt/apexfabric-ui-admin-password):"
+  echo "${password}"
+  unset password
+fi
+
+rendered="$(mktemp)"
+trap 'rm -f "${rendered}"' EXIT
+python3 -m tvt_runtime.ui_image render \
+  --lock "${UI_IMAGE_LOCK}" \
+  --template "${REPO_ROOT}/deploy/single-box/ui.yaml" \
+  --output "${rendered}"
+k3s kubectl apply -f "${rendered}"
+k3s kubectl rollout status deployment/apexfabric-ui -n apexfabric --timeout=180s
+
+)
+
 tvt_op_install_k3s_single_node() (
 # Source: scripts/install-k3s-single-node.sh
 set -Eeuo pipefail
@@ -1712,7 +1816,7 @@ if ! command -v k3s >/dev/null 2>&1; then
   install_environment=(env \
     INSTALL_K3S_VERSION="${K3S_VERSION}" \
     K3S_KUBECONFIG_MODE="600" \
-    INSTALL_K3S_EXEC="server --disable=traefik --disable=servicelb --secrets-encryption --secrets-encryption-provider=secretbox")
+    INSTALL_K3S_EXEC="server --secrets-encryption --secrets-encryption-provider=secretbox")
   if ${skip_download}; then
     install_environment+=(INSTALL_K3S_SKIP_DOWNLOAD=true)
   fi
@@ -2759,6 +2863,89 @@ echo "Wrote digest-pinned image lock ${LOCK_OUTPUT}"
 
 )
 
+tvt_op_publish_ui_image() (
+# Source: scripts/publish-ui-image.sh
+set -Eeuo pipefail
+
+readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${REPO_ROOT}"
+# shellcheck source=config/platform.env
+source "${REPO_ROOT}/config/platform.env"
+
+REGISTRY=""
+SCHEME="http"
+LOCK_OUTPUT="${REPO_ROOT}/build/ui-image.lock.json"
+ARCHIVE_DIR=""
+
+usage() {
+  echo "usage: scripts/tvt-edge-operations.sh publish-ui-image --registry HOST[:PORT] [--archive-dir DIR] [--scheme http|https] [--lock-output FILE]" >&2
+}
+
+while (($#)); do
+  case "$1" in
+    --registry) REGISTRY="${2:-}"; shift 2 ;;
+    --scheme) SCHEME="${2:-}"; shift 2 ;;
+    --lock-output) LOCK_OUTPUT="${2:-}"; shift 2 ;;
+    --archive-dir) ARCHIVE_DIR="${2:-}"; shift 2 ;;
+    *) usage; exit 2 ;;
+  esac
+done
+
+if [[ -z "${REGISTRY}" || "${REGISTRY}" == *"://"* || "${REGISTRY}" == */* || "${REGISTRY}" =~ [[:space:]] ]]; then
+  echo "--registry must be a HOST[:PORT] value" >&2
+  exit 2
+fi
+if [[ "${SCHEME}" != http && "${SCHEME}" != https ]]; then
+  echo "--scheme must be http or https" >&2
+  exit 2
+fi
+command -v docker >/dev/null 2>&1 || { echo "docker is required" >&2; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
+if [[ -n ${ARCHIVE_DIR} && (! -d ${ARCHIVE_DIR} || -L ${ARCHIVE_DIR}) ]]; then
+  echo "--archive-dir must be a non-symlinked directory" >&2
+  exit 2
+fi
+
+DOCKER=(docker)
+if ! docker info >/dev/null 2>&1; then
+  command -v sudo >/dev/null 2>&1 || { echo "cannot access Docker" >&2; exit 1; }
+  DOCKER=(sudo docker)
+fi
+curl --fail --silent --show-error "${SCHEME}://${REGISTRY}/v2/" >/dev/null
+
+image="${REGISTRY}/apexfabric/ui:${UI_IMAGE_VERSION}"
+if [[ -n ${ARCHIVE_DIR} ]]; then
+  archive="${ARCHIVE_DIR}/ui.tar"
+  [[ -f ${archive} && ! -L ${archive} ]] || {
+    echo "prebuilt image archive is missing: ${archive}" >&2
+    exit 1
+  }
+  "${DOCKER[@]}" load --input "${archive}"
+  source_image="apexfabric/ui:${UI_IMAGE_VERSION}"
+  architecture="$("${DOCKER[@]}" image inspect --format '{{.Architecture}}' "${source_image}")"
+  [[ ${architecture} == amd64 ]] || {
+    echo "ui image architecture is ${architecture}, not amd64" >&2
+    exit 1
+  }
+  "${DOCKER[@]}" tag "${source_image}" "${image}"
+else
+  npm --prefix "${REPO_ROOT}/deploy/ui/web" ci
+  npm --prefix "${REPO_ROOT}/deploy/ui/web" run build
+  "${DOCKER[@]}" build --pull=false --provenance=false \
+    -f "${REPO_ROOT}/deploy/ui/Dockerfile" \
+    -t "${image}" "${REPO_ROOT}"
+fi
+"${DOCKER[@]}" push "${image}"
+echo "Published ${image}"
+
+python3 -m tvt_runtime.ui_image create \
+  --registry "${SCHEME}://${REGISTRY}" \
+  --version "${UI_IMAGE_VERSION}" \
+  --output "${LOCK_OUTPUT}"
+echo "Wrote digest-pinned image lock ${LOCK_OUTPUT}"
+
+)
+
 tvt_op_qualify_traffic_edge() (
 # Source: scripts/qualify-traffic-edge.sh
 set -Eeuo pipefail
@@ -3554,6 +3741,7 @@ operations:
   configure-k3s-registry
   enable-k3s-secrets-encryption
   import-pipeline-traffic-image
+  install-apexfabric-ui
   install-k3s-plane
   install-k3s-single-node
   install-local-registry
@@ -3563,6 +3751,7 @@ operations:
   install-tvt-kubeconfig
   probe-edge-hardware
   publish-control-images
+  publish-ui-image
   qualify-traffic-edge
   verify-k3s-plane
   verify-local-registry
@@ -3585,6 +3774,7 @@ case "${operation}" in
   configure-k3s-registry) tvt_op_configure_k3s_registry "$@" ;;
   enable-k3s-secrets-encryption) tvt_op_enable_k3s_secrets_encryption "$@" ;;
   import-pipeline-traffic-image) tvt_op_import_pipeline_traffic_image "$@" ;;
+  install-apexfabric-ui) tvt_op_install_apexfabric_ui "$@" ;;
   install-k3s-plane) tvt_op_install_k3s_plane "$@" ;;
   install-k3s-single-node) tvt_op_install_k3s_single_node "$@" ;;
   install-local-registry) tvt_op_install_local_registry "$@" ;;
@@ -3594,6 +3784,7 @@ case "${operation}" in
   install-tvt-kubeconfig) tvt_op_install_tvt_kubeconfig "$@" ;;
   probe-edge-hardware) tvt_op_probe_edge_hardware "$@" ;;
   publish-control-images) tvt_op_publish_control_images "$@" ;;
+  publish-ui-image) tvt_op_publish_ui_image "$@" ;;
   qualify-traffic-edge) tvt_op_qualify_traffic_edge "$@" ;;
   verify-k3s-plane) tvt_op_verify_k3s_plane "$@" ;;
   verify-local-registry) tvt_op_verify_local_registry "$@" ;;

@@ -106,7 +106,7 @@ if not isinstance(source_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", sourc
 artifacts = manifest.get("artifacts")
 required = {
     "application_wheel", "input_lock", "registry_image", "node_reporter_image",
-    "node_status_controller_image", "traffic_image", "k3s_installer", "k3s_binary",
+    "node_status_controller_image", "traffic_image", "ui_image", "k3s_installer", "k3s_binary",
 }
 if not isinstance(artifacts, dict) or required - artifacts.keys():
     raise SystemExit("manifest artifacts section is incomplete")
