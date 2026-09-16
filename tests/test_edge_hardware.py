@@ -143,7 +143,9 @@ class EdgeHardwareInventoryTests(unittest.TestCase):
         self.assertIn("--output", probe)
         self.assertIn(".sha256", probe)
         self.assertIn("--ssh", probe)
-        self.assertIn("sudo -n python3 - probe --output -", probe)
+        self.assertIn("ssh -tt", probe)
+        self.assertIn("sudo python3 -c", probe)
+        self.assertIn("probe --output -", probe)
         for forbidden in ("apt-get install", "modprobe", "systemctl"):
             self.assertNotIn(forbidden, probe)
 

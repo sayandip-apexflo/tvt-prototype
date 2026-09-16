@@ -3500,7 +3500,7 @@ SSH_TARGET=""
 
 usage() {
   echo "usage: scripts/tvt-edge-operations.sh probe-edge-hardware --output FILE [--ssh TARGET]" >&2
-  echo "  Read-only edge probe. With --ssh, requires key access and sudo -n on TARGET." >&2
+  echo "  Read-only edge probe. With --ssh, prompts for SSH and sudo credentials when needed." >&2
 }
 
 while (($#)); do
@@ -3519,12 +3519,16 @@ done
 mkdir -p "$(dirname "${OUTPUT}")"
 if [[ -n ${SSH_TARGET} ]]; then
   command -v ssh >/dev/null 2>&1 || { echo "ssh is required for --ssh" >&2; exit 1; }
+  command -v base64 >/dev/null 2>&1 || { echo "base64 is required for --ssh" >&2; exit 1; }
+  command -v tr >/dev/null 2>&1 || { echo "tr is required for --ssh" >&2; exit 1; }
   temporary="$(mktemp)"
   cleanup() { rm -f -- "${temporary}"; }
   trap cleanup EXIT
-  ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 \
-    -o ServerAliveCountMax=3 "${SSH_TARGET}" 'sudo -n python3 - probe --output -' \
-    <"${REPO_ROOT}/scripts/tvt-hardware-inventory.py" >"${temporary}"
+  encoded_probe="$(base64 -w 0 <"${REPO_ROOT}/scripts/tvt-hardware-inventory.py")"
+  ssh -tt -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+    "${SSH_TARGET}" \
+    "sudo python3 -c 'import base64; exec(compile(base64.b64decode(\"${encoded_probe}\"), \"tvt-hardware-inventory.py\", \"exec\"))' probe --output -" \
+    | tee /dev/tty | tr -d '\r' | sed -n '/^{/,$p' >"${temporary}"
   python3 "${REPO_ROOT}/scripts/tvt-hardware-inventory.py" \
     verify --inventory "${temporary}" >/dev/null
   install -m 0644 "${temporary}" "${OUTPUT}"
