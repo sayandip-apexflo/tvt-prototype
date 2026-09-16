@@ -1,0 +1,12 @@
+{
+  "deliveries": [
+    {
+      "directory": "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4",
+      "repository": "apexfabric/traffic-edge-runtime"
+    },
+    {
+      "directory": "solution-packs/catalog/surveillance-edge-runtime-2026.08.24-v3",
+      "repository": "apexfabric/surveillance-edge-runtime"
+    }
+  ]
+}

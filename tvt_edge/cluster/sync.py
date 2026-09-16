@@ -382,11 +382,14 @@ class SyncWorker:
     def _server_side_secret_manifest(secret_list: dict[str, Any]) -> dict[str, Any]:
         result = json.loads(json.dumps(secret_list))
         for item in result["items"]:
-            values = item.pop("stringData", {})
-            item["data"] = {
-                key: base64.b64encode(value.encode()).decode()
-                for key, value in values.items()
-            }
+            # Secrets carry write-only stringData -> base64 data for server-side
+            # apply. ConfigMaps carry plain data and must not be base64-encoded.
+            if item.get("kind") == "Secret":
+                values = item.pop("stringData", {})
+                item["data"] = {
+                    key: base64.b64encode(value.encode()).decode()
+                    for key, value in values.items()
+                }
         return result
 
     def _phase(self, work: SyncWorkItem, phase: str) -> None:
@@ -616,7 +619,12 @@ class SyncWorker:
             for item in render(work.bundle, work.namespace)
             if item["kind"] != "Namespace"
         ]
-        references.extend(("v1", "Secret", name) for name in configured_secrets)
+        for name in configured_secrets:
+            # Input List at 5ada504 is ConfigMap <deployment>-desired-state
+            # (non-secret desired state) + Secret <deployment>-camera-sources
+            # (write-only RTSP URLs). Record kinds exactly; never store bodies.
+            kind = "ConfigMap" if name.endswith("-desired-state") else "Secret"
+            references.append(("v1", kind, name))
         for api_version, kind, name in sorted(set(references)):
             session.add(
                 KubernetesResourceRef(

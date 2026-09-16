@@ -14,9 +14,7 @@ from typing import Any
 
 import yaml
 
-from tvt_edge.paths import RESOURCE_ROOT
-
-ROOT = RESOURCE_ROOT
+ROOT = Path(__file__).resolve().parents[2]
 from apexfabric.solution_management.camera_locality import camera_affinity
 from apexfabric.solution_management.validation import load_yaml, validate_bundle
 
@@ -25,6 +23,7 @@ PRUNABLE = {"Deployment", "ConfigMap", "Secret", "Service", "NetworkPolicy"}
 INTEL_285H_METIS_PROFILE = "intel-285h-metis"
 INTEL_285H_GPU_NPU_PROFILE = "intel-285h-gpu-npu"
 INTEL_285H_DEVICE_GROUPS = [44, 992]
+ACTIVE_LOCAL_CLAIMS = "apexfabric.com/active-local-claims"
 
 
 def revision(bundle: dict[str, Any]) -> str:
@@ -70,10 +69,6 @@ def placement(app: dict[str, Any]) -> dict[str, Any]:
     configured = app.get("placement", {})
     if configured.get("requires_qualified_node", True):
         requirements.append({"key": "apexfabric.com/qualified", "operator": "In", "values": ["true"]})
-    if configured.get("runtime_profile") == INTEL_285H_GPU_NPU_PROFILE:
-        requirements.append(
-            {"key": "apexfabric.com/gpu-npu-ready", "operator": "In", "values": ["true"]}
-        )
     if configured.get("node_class"):
         requirements.append({"key": "apexfabric.com/node-class", "operator": "In", "values": [configured["node_class"]]})
     if configured.get("architecture"):
@@ -203,28 +198,31 @@ def render(bundle: dict[str, Any], namespace: str) -> list[dict[str, Any]]:
             container["volumeMounts"].append(volume_mount)
         plan_compiler = app.get("plan_compiler")
         if plan_compiler:
-            volumes.extend([
-                {
-                    "name": "desired-state",
-                    "secret": {
-                        "secretName": plan_compiler["desired_state_secret"],
-                        "items": [{"key": plan_compiler["desired_state_key"], "path": "desired_state.json"}],
-                        "defaultMode": 0o444,
-                    },
+            desired_state_volume = {
+                "name": "desired-state",
+                "configMap": {
+                    "name": plan_compiler["desired_state_config_map"],
+                    "items": [{"key": plan_compiler["desired_state_key"], "path": "desired_state.json"}],
+                    "defaultMode": 0o444,
                 },
+            } if "desired_state_config_map" in plan_compiler else {
+                "name": "desired-state",
+                "secret": {
+                    "secretName": plan_compiler["desired_state_secret"],
+                    "items": [{"key": plan_compiler["desired_state_key"], "path": "desired_state.json"}],
+                    "defaultMode": 0o444,
+                },
+            }
+            volumes.extend([
+                desired_state_volume,
                 {"name": "compiled-plans", "emptyDir": {}},
-                {"name": "apexfabric-tmp", "emptyDir": {}},
             ])
             # The contracted main entrypoint recompiles and atomically updates
             # generated plan files before launching the solution runtime.
             container["volumeMounts"].append({"name": "compiled-plans", "mountPath": "/plans"})
-            container["volumeMounts"].append({"name": "apexfabric-tmp", "mountPath": "/tmp/apexfabric"})
             # The contracted solution-image entrypoint validates and compiles
             # desired state before it launches the runtime as well.
-            container["volumeMounts"].append({
-                "name": "desired-state", "mountPath": "/configs/desired_state.json",
-                "subPath": "desired_state.json", "readOnly": True,
-            })
+            container["volumeMounts"].append({"name": "desired-state", "mountPath": "/configs", "readOnly": True})
         selector = {"apexfabric.com/deployment-id": deployment_id, "apexfabric.com/application": app_name}
         lifecycle = app.get("lifecycle", {})
         contract_annotations = {
@@ -289,7 +287,7 @@ def render(bundle: dict[str, Any], namespace: str) -> list[dict[str, Any]]:
             strategy = {"type": "Recreate"}
         if plan_compiler:
             compiler_mounts = [
-                {"name": "desired-state", "mountPath": "/configs/desired_state.json", "subPath": "desired_state.json", "readOnly": True},
+                {"name": "desired-state", "mountPath": "/configs", "readOnly": True},
                 {"name": "compiled-plans", "mountPath": "/plans"},
             ]
             compiler_mounts.extend(
@@ -297,7 +295,7 @@ def render(bundle: dict[str, Any], namespace: str) -> list[dict[str, Any]]:
                 for mount in container["volumeMounts"]
                 if (mount["mountPath"].startswith("/models/")
                     or mount["mountPath"].startswith("/run/secrets/apexfabric/")
-                    or mount["mountPath"] in {"/dev/dri", "/dev/accel", "/tmp/apexfabric"})
+                    or mount["mountPath"] in {"/dev/dri", "/dev/accel"})
             )
             pod_spec["initContainers"] = [{
                 "name": "plan-compiler",
@@ -314,6 +312,11 @@ def render(bundle: dict[str, Any], namespace: str) -> list[dict[str, Any]]:
                 "volumeMounts": compiler_mounts,
             }]
         deployment_meta = {**base_meta, "annotations": {**base_meta["annotations"], **contract_annotations}}
+        if any(volume.get("storage_class") == "local-path" for volume in app.get("persistent_volumes", [])):
+            deployment_meta["annotations"].update({
+                "apexfabric.com/local-storage-failover": "retain-and-recreate",
+                "apexfabric.com/failover-after-seconds": str(lifecycle.get("failover_after_seconds", 120)),
+            })
         deployment = {
             "apiVersion": "apps/v1", "kind": "Deployment", "metadata": deployment_meta,
             "spec": {"replicas": 0 if lifecycle.get("desired_state", "Running") == "Stopped" else app.get("replicas", 1), "revisionHistoryLimit": 3, "selector": {"matchLabels": selector}, "template": {
@@ -361,6 +364,31 @@ def reconcile(bundle: dict[str, Any], namespace: str, kubectl: Kubectl, dry_run:
     desired = render(bundle, namespace)
     if dry_run:
         return {"desired": desired, "applied": [], "removed": [], "observed": []}
+    # A storage failover deliberately moves a Deployment to a fresh local PVC
+    # while retaining the old claim. Preserve that active mapping when the same
+    # bundle is reconciled again; otherwise server-side apply would pin the Pod
+    # back to the failed node's original PV.
+    existing_result = kubectl.run("get", "deployments", "-n", namespace,
+                                  "-l", f"apexfabric.com/deployment-id={bundle['deployment_id']}",
+                                  "-o", "json", check=False)
+    if getattr(existing_result, "returncode", 0) == 0:
+        existing = {item["metadata"]["name"]: item for item in json.loads(existing_result.stdout).get("items", [])}
+        for item in desired:
+            if item["kind"] != "Deployment" or item["metadata"]["name"] not in existing:
+                continue
+            annotation = existing[item["metadata"]["name"]].get("metadata", {}).get("annotations", {}).get(ACTIVE_LOCAL_CLAIMS)
+            try:
+                active_claims = json.loads(annotation) if annotation else {}
+            except json.JSONDecodeError:
+                active_claims = {}
+            if not isinstance(active_claims, dict):
+                continue
+            for volume in item["spec"]["template"]["spec"].get("volumes", []):
+                if volume["name"] in active_claims and "persistentVolumeClaim" in volume:
+                    volume["persistentVolumeClaim"]["claimName"] = active_claims[volume["name"]]
+            if active_claims:
+                item["metadata"]["annotations"][ACTIVE_LOCAL_CLAIMS] = json.dumps(active_claims, sort_keys=True)
+                item["spec"]["template"]["metadata"]["annotations"][ACTIVE_LOCAL_CLAIMS] = json.dumps(active_claims, sort_keys=True)
     manifest = yaml.safe_dump_all(desired, sort_keys=False)
     applied = kubectl.run("apply", "--server-side", "--field-manager", MANAGED_BY, "-f", "-", input_text=manifest).stdout.strip().splitlines()
     deployment_id = bundle["deployment_id"]

@@ -325,14 +325,14 @@ camera Secret snapshot, and image digest while leaving the failed revision
 pending for operator action or explicit rollback.
 
 The same edge service hosts the React management console at
-`http://127.0.0.1:8088/`. It includes site health, camera onboarding and
+`http://127.0.0.1:8089/`. It includes site health, camera onboarding and
 validation, bounded network discovery, Solution Pack assignments and lifecycle,
 alerts and notification history, audit activity, and the K3s node/workload view
 that previously lived in the prototype port-8088 console. Workload telemetry is
 read-only and restricted to ApexFabric-managed Deployments.
 
 The console is a TypeScript/Vite project in `ui/`. For local development, run
-the API on port 8088 and start Vite's loopback development server:
+the API on port 8089 and start Vite's loopback development server:
 
 ```bash
 npm --prefix ui install

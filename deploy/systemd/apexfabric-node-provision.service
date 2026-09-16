@@ -1,0 +1,14 @@
+[Unit]
+Description=ApexFabric host discovery audit
+After=k3s.service k3s-agent.service
+Wants=k3s.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=__REPO_ROOT__
+Environment=APEXFABRIC_STATE_DIR=/var/lib/apexfabric/control
+ExecStart=__REPO_ROOT__/scripts/discover-node.sh --output /var/lib/apexfabric/control/node-capabilities.json
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

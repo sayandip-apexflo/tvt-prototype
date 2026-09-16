@@ -99,7 +99,7 @@ def catalog_traffic_bundle(
                 "scheduling_mode": "runtime-connectivity",
             },
             "configuration": {
-                "desired_state_secret": f"{deployment_id}-desired-state",
+                "desired_state_config_map": f"{deployment_id}-desired-state",
                 "desired_state_key": "desired_state.json",
                 "models_delivery": "baked-in",
                 "models_root": contract.get("models", {}).get("root", "/models/traffic/openvino"),
@@ -117,7 +117,7 @@ def catalog_traffic_bundle(
             "external_mounts": [],
             "plan_compiler": {
                 "type": "edge-agent-v1",
-                "desired_state_secret": f"{deployment_id}-desired-state",
+                "desired_state_config_map": f"{deployment_id}-desired-state",
                 "desired_state_key": "desired_state.json",
             },
             "health": {
@@ -212,11 +212,11 @@ def instantiate_traffic_bundle(
     app["cameras"] = camera_keys
     app["external_mounts"] = mounts
     app["resources"]["camera_streams"] = len(camera_keys)
-    app.setdefault("configuration", {})["desired_state_secret"] = desired_secret
+    app.setdefault("configuration", {})["desired_state_config_map"] = desired_secret
     app["configuration"]["desired_state_key"] = "desired_state.json"
     app["plan_compiler"] = {
         "type": "edge-agent-v1",
-        "desired_state_secret": desired_secret,
+        "desired_state_config_map": desired_secret,
         "desired_state_key": "desired_state.json",
     }
     validate_tvt_bundle(result)

@@ -88,15 +88,14 @@ spec:
       nodeSelector: {apexfabric.com/node-reporter-enabled: "true"}
       tolerations:
         - {operator: Exists}
-      # Temporary test-kit device passthrough. Replace with Intel GPU/NPU
-      # device plugins before treating this as a production isolation boundary.
-      securityContext: {seccompProfile: {type: Unconfined}}
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
       containers:
         - name: reporter
-          image: __APEXFABRIC_REGISTRY__/apexfabric/node-reporter:0.1.0
+          image: __APEXFABRIC_REGISTRY__/apexfabric/node-reporter:0.1.1
           imagePullPolicy: IfNotPresent
           env:
             - {name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}
+            - {name: REPORTER_VERSION, value: "0.1.1"}
             - {name: REPORT_INTERVAL_SECONDS, value: "30"}
           ports: [{name: metrics, containerPort: 9100}]
           startupProbe: {httpGet: {path: /health, port: metrics}, periodSeconds: 2, failureThreshold: 30}
@@ -106,22 +105,35 @@ spec:
             requests: {cpu: 25m, memory: 48Mi}
             limits: {cpu: 250m, memory: 192Mi}
           securityContext:
+            # Host accelerator probing needs device ioctls that K3s/containerd
+            # otherwise blocks. Privileged and allowPrivilegeEscalation must
+            # agree; Kubernetes rejects privileged=true with APE=false.
             privileged: true
             allowPrivilegeEscalation: true
             readOnlyRootFilesystem: true
             runAsUser: 0
+            capabilities: {drop: [ALL]}
           volumeMounts:
             - {name: host-sys, mountPath: /sys, readOnly: true}
             - {name: host-machine-id, mountPath: /etc/machine-id, readOnly: true}
             - {name: host-os-release, mountPath: /etc/os-release, readOnly: true}
             - {name: host-dri, mountPath: /dev/dri, readOnly: true}
             - {name: host-accel, mountPath: /dev/accel, readOnly: true}
+            - {name: camera-config, mountPath: /etc/apexfabric/cameras.json, subPath: cameras.json, readOnly: true}
       volumes:
         - {name: host-sys, hostPath: {path: /sys, type: Directory}}
         - {name: host-machine-id, hostPath: {path: /etc/machine-id, type: File}}
         - {name: host-os-release, hostPath: {path: /etc/os-release, type: File}}
         - {name: host-dri, hostPath: {path: /dev/dri, type: DirectoryOrCreate}}
         - {name: host-accel, hostPath: {path: /dev/accel, type: DirectoryOrCreate}}
+        - name: camera-config
+          configMap: {name: node-reporter-camera-config}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: node-reporter-camera-config, namespace: apexfabric}
+data:
+  cameras.json: '{"cameras":{"accessible":["camera-01","camera-02"]}}'
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -166,7 +178,7 @@ spec:
       securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
       containers:
         - name: controller
-          image: __APEXFABRIC_REGISTRY__/apexfabric/node-status-controller:0.1.0
+          image: __APEXFABRIC_REGISTRY__/apexfabric/node-status-controller:0.1.1
           imagePullPolicy: IfNotPresent
           env:
             - {name: RECONCILE_INTERVAL_SECONDS, value: "15"}

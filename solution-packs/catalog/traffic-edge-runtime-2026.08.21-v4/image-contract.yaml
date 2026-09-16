@@ -1,6 +1,77 @@
 name: traffic-edge-runtime
 version: 2026.08.21-v4
 contractVersion: v1
+ui:
+  displayName: Traffic analytics
+  description: Traffic monitoring and roadway analytics for Intel edge systems.
+  camera:
+    defaultFps: 8
+    defaultApp: anpr
+    apps:
+      anpr:
+        label: ANPR
+        symbol: ID
+        geometry:
+          kind: zone
+          label: ANPR plate region
+          configPath: zones.anpr
+          required: false
+          nameTemplate: "{app}_zone"
+          idTemplate: "{camera_id}-{app}-zone"
+      wrong_way:
+        label: Wrong-way detection
+        symbol: ↩
+        geometry:
+          kind: line
+          label: Wrong-way direction line
+          configPath: lines.wrong_way
+          required: true
+          nameTemplate: "{app}_line"
+          idTemplate: "{camera_id}-{app}-line"
+          values:
+            direction: a_to_b
+      vehicle_counting:
+        label: Vehicle counting
+        symbol: VC
+        geometry:
+          kind: line
+          label: Vehicle counting line
+          configPath: lines.vehicle_counting
+          required: false
+          nameTemplate: "{app}_line"
+          idTemplate: "{camera_id}-{app}-line"
+          values:
+            direction: both
+      pedestrian_counting:
+        label: Pedestrian counting
+        symbol: PC
+        geometry:
+          kind: line
+          label: Pedestrian counting line
+          configPath: lines.pedestrian_counting
+          required: false
+          nameTemplate: "{app}_line"
+          idTemplate: "{camera_id}-{app}-line"
+          values:
+            direction: both
+      illegal_parking:
+        label: Illegal parking
+        symbol: P!
+        geometry:
+          kind: zone
+          label: Illegal-parking region
+          configPath: zones.illegal_parking
+          required: true
+          nameTemplate: "{app}_zone"
+          idTemplate: "{camera_id}-{app}-zone"
+  deployment:
+    storageGi: 2
+    cpuRequest: 8
+    cpuLimit: 16
+    memoryRequestGi: 16
+    memoryLimitGi: 32
+    pullPolicy: IfNotPresent
+    inferenceMode: cpu-compatible
 architectures: [amd64]
 hardwareProfile: intel-285h
 models:

@@ -34,8 +34,9 @@ class BootstrapScriptTests(unittest.TestCase):
             ROOT / "apexfabric/node_management/discovery/discovery.py"
         ).read_text()
         self.assertIn("privileged: true", manifest)
-        self.assertIn("seccompProfile: {type: Unconfined}", manifest)
-        self.assertIn('[executable, "--display", "drm", "--device", device]', discovery)
+        # k3s-prototype@5ada504 exact copy uses RuntimeDefault (not Unconfined).
+        self.assertIn("seccompProfile: {type: RuntimeDefault}", manifest)
+        self.assertIn('"--display", "drm", "--device"', discovery)
 
     def test_registry_file_is_installed_private(self):
         configuration = self.text("configure-k3s-registry.sh")
@@ -79,10 +80,17 @@ class BootstrapScriptTests(unittest.TestCase):
         foundation = (ROOT / "deploy/k8s/apexfabric-foundation.yaml").read_text()
         installer = self.text("install-tvt-kubeconfig.sh")
         environment = (ROOT / "deploy/host/tvt-edge.env.example").read_text()
-        self.assertIn("node-agent-host-token", foundation)
-        self.assertIn('resourceNames: ["apexfabric"]', foundation)
-        self.assertIn("apexfabric-node-agent-status", foundation)
-        self.assertIn('verbs: ["get", "list"]', foundation)
+        # k3s-prototype@5ada504 exact copy: Namespace + node-agent SA
+        # (automountServiceAccountToken: false) + namespace-scoped
+        # Role node-agent-reconciler (no ClusterRole, no host token).
+        self.assertIn("name: apexfabric", foundation)
+        self.assertIn("name: node-agent", foundation)
+        self.assertIn("name: node-agent-reconciler", foundation)
+        self.assertIn("automountServiceAccountToken: false", foundation)
+        self.assertIn("auth can-i patch deployments", installer)
+        self.assertIn("auth can-i list nodes", installer)
+        self.assertIn("auth can-i patch nodes", installer)
+        self.assertIn("TVT_KUBECONFIG=/etc/tvt/kubeconfig", environment)
         self.assertIn("auth can-i patch deployments", installer)
         self.assertIn("auth can-i list nodes", installer)
         self.assertIn("auth can-i patch nodes", installer)

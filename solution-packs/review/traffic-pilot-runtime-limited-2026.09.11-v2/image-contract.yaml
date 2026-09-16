@@ -1,0 +1,63 @@
+name: traffic-pilot-runtime-limited
+version: 2026.09.11-v2
+contractVersion: v1
+architectures: [amd64]
+hardwareProfile: intel-285h
+runtimeBase:
+  image: apexfabric-intel-traffic-runtime-base:intel-285h-2026.08.24-v1
+  deployment: reused-intel-environment-base
+capabilities:
+  apps: [vehicle_counting, pedestrian_counting, anpr, plate_detection, fire_smoke_detection]
+models:
+  delivery: baked-in
+  root: /opt/traffic-pilot/models/openvino
+configuration:
+  desiredStatePath: /configs/desired_state.json
+  hotReload:
+    enabled: true
+    pollSeconds: 3
+    strategy: validate-compile-then-worker-swap
+    revisionPolicy: nondecreasing
+    mountPath: /configs
+    kubernetesSubPathSupported: false
+secrets:
+  root: /run/secrets/apexfabric
+  referenceFormat: file:/run/secrets/apexfabric/<camera-id>.rtsp
+runtimePlan:
+  compiler: python -m traffic_pilot_runtime.solution_image_entrypoint
+  output: /plans/traffic-pilot.runtime_plan.json
+network:
+  port: 8080
+  hostNetworkRequired: false
+endpoints:
+  health: /healthz
+  readiness: /readyz
+  metrics: /metrics
+  events: /events
+metricsFormat: application/json
+eventProtocol: sse
+process:
+  uid: 10001
+  gid: 10001
+  readOnlyRootSupported: true
+resources:
+  cpuRequest: "8"
+  memoryRequest: 16Gi
+accelerators:
+  - intel-igpu
+  - intel-npu
+devices:
+  - /dev/dri
+  - /dev/accel
+storage:
+  persistentVolumes:
+    - mountPath: /state
+      purpose: event and snapshot storage
+  snapshots:
+    root: /state/snapshots
+    emittedAs: path
+    useCases: [fire_smoke_detection]
+  temporaryPaths: [/plans, /tmp/apexfabric]
+externalDependencies: []
+ui:
+  included: false

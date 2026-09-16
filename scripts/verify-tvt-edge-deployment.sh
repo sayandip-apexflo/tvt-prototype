@@ -461,7 +461,7 @@ check_row 'TVT K3s management plane' 'verified' \
   "$([[ ${result} == PASS ]] && printf verified || printf 'verification failed')" "${result}"
 
 api_health="$(curl --fail --silent --show-error --max-time 10 \
-  http://127.0.0.1:8088/api/v1/health 2>/dev/null || true)"
+  http://127.0.0.1:8089/api/v1/health 2>/dev/null || true)"
 if python3 - "${api_health}" <<'PY' >/dev/null 2>&1
 import json
 import sys

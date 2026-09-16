@@ -1,258 +1,173 @@
-import hashlib
 import json
-import shutil
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
-from sqlalchemy import create_engine, func, select
-from sqlalchemy.dialects import postgresql
-from sqlalchemy.pool import StaticPool
-from sqlalchemy.schema import CreateTable
-from sqlalchemy.orm import sessionmaker
-
-from apexfabric.solution_management.catalog import (
-    CatalogError,
-    load_delivery_metadata,
-    resolve_registry_digest,
-)
-from tvt_edge.api import create_app
-from tvt_edge.db.models import (
-    Base,
-    Site,
-    SolutionCatalogEntry,
-    SolutionDeployment,
-)
-from tvt_edge.security import CredentialKeyring
-from tvt_edge.service import ManagementService
+from apexfabric.control_plane.server import Controller
+from apexfabric.solution_management.catalog import SolutionCatalog, resolve_registry_digest
+from apexfabric.solution_management.renderer import render
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DELIVERY = (
-    ROOT / "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
-)
-MANIFEST = b'{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}'
+MANIFEST = b'{"schemaVersion":2}'
 DIGEST = "sha256:" + hashlib.sha256(MANIFEST).hexdigest()
 
 
-class FakeManifestResponse:
-    def __init__(self, digest=DIGEST):
-        self.headers = {"Docker-Content-Digest": digest}
-
-    def read(self, _limit):
-        return MANIFEST
+class ManifestResponse:
+    headers = {"Docker-Content-Digest": DIGEST}
 
     def __enter__(self):
         return self
 
-    def __exit__(self, *_args):
+    def __exit__(self, *args):
         return False
+
+    def read(self, maximum):
+        return MANIFEST
 
 
 class SolutionCatalogTests(unittest.TestCase):
-    def setUp(self):
-        self.engine = create_engine(
-            "sqlite+pysqlite:///:memory:",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-        )
-        Base.metadata.create_all(self.engine)
-        self.sessions = sessionmaker(self.engine, expire_on_commit=False)
-        self.keyring = CredentialKeyring.generate_for_test()
+    def test_every_catalog_delivery_has_complete_schema_driven_ui_annotations(self):
+        deliveries = sorted((ROOT / "solution-packs/catalog").glob("*/image-contract.yaml"))
+        self.assertTrue(deliveries)
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = SolutionCatalog(Path(directory) / "catalog.sqlite3")
+            for contract_path in deliveries:
+                catalog.seed_delivery(contract_path.parent, "registry.local:5000", f"apexfabric/{contract_path.parent.name}")
+            for entry in catalog.list():
+                camera = entry["desired_state_schema"]["properties"]["cameras"]["items"]["properties"]
+                app_ids = set(camera["apps"]["items"]["enum"])
+                ui = entry["contract"]["ui"]["camera"]
+                self.assertEqual(set(ui["apps"]), app_ids)
+                self.assertIn(ui["defaultApp"], app_ids)
+                deployment = entry["contract"]["ui"]["deployment"]
+                self.assertTrue({
+                    "storageGi", "cpuRequest", "cpuLimit", "memoryRequestGi",
+                    "memoryLimitGi", "pullPolicy", "inferenceMode",
+                }.issubset(deployment))
 
-    def test_vendored_metadata_and_provenance_are_consistent(self):
-        metadata = load_delivery_metadata(DELIVERY)
-        self.assertEqual(
-            metadata["catalog_id"], "traffic-edge-runtime:2026.08.21-v4"
-        )
-        self.assertEqual(metadata["version"], "2026.08.21-v4")
-        self.assertEqual(metadata["architectures"], ["amd64"])
-        self.assertEqual(metadata["hardware_profile"], "intel-285h")
-        self.assertEqual(metadata["contract"]["models"]["delivery"], "baked-in")
-        provenance = metadata["provenance"]
-        self.assertEqual(
-            provenance["pipeline"]["commit"],
-            "6513562c9d27eba511322280e19e054c3948ae4d",
-        )
-        self.assertEqual(provenance["archive"]["filename"], "image-2026.08.21-v4.tar")
-        self.assertEqual(provenance["archive"]["size"], 1930041856)
-        self.assertEqual(
-            provenance["archive"]["loaded_image"],
-            "localhost/traffic-edge-runtime:intel-285h-2026.08.21-v4",
-        )
-        self.assertEqual(
-            provenance["archive"]["sha256"],
-            "a6787bba6a27bc486f90b4c4dd41681d051c7c834568d99bc4a884d177d10e0f",
-        )
-        configured = {}
-        for line in (ROOT / "config/pipeline.env").read_text(
-            encoding="utf-8"
-        ).splitlines():
-            if line and not line.startswith("#"):
-                key, value = line.split("=", 1)
-                configured[key] = value.strip("'")
-        self.assertEqual(provenance["pipeline"]["repository"], configured["PIPELINE_REPOSITORY"])
-        self.assertEqual(provenance["pipeline"]["commit"], configured["PIPELINE_REVISION"])
-        self.assertEqual(provenance["delivery"]["branch"], configured["PIPELINE_DELIVERY_BRANCH"])
-        self.assertEqual(
-            provenance["delivery"]["directory"],
-            configured["PIPELINE_TRAFFIC_DELIVERY_DIR"],
-        )
-        self.assertEqual(provenance["delivery"]["version"], configured["PIPELINE_TRAFFIC_VERSION"])
-        self.assertEqual(provenance["archive"]["filename"], configured["PIPELINE_TRAFFIC_ARCHIVE"])
-        self.assertEqual(
-            provenance["archive"]["size"],
-            int(configured["PIPELINE_TRAFFIC_ARCHIVE_SIZE"]),
-        )
-        self.assertEqual(
-            provenance["archive"]["sha256"],
-            configured["PIPELINE_TRAFFIC_ARCHIVE_SHA256"],
-        )
-        checksum_configuration = {
-            "image-contract.yaml": "PIPELINE_TRAFFIC_CONTRACT_SHA256",
-            "desired-state.schema.json": "PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256",
-            "metrics.schema.json": "PIPELINE_TRAFFIC_METRICS_SCHEMA_SHA256",
-            "analytics-event.schema.json": "PIPELINE_TRAFFIC_ANALYTICS_EVENT_SCHEMA_SHA256",
-            "analytics-event.example.json": "PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256",
-        }
-        for filename, configuration_key in checksum_configuration.items():
-            self.assertEqual(
-                metadata["checksums"][filename], configured[configuration_key]
+    def test_site_ui_derives_apps_from_catalog_schema(self):
+        javascript = (ROOT / "apexfabric/control_plane/static/site.js").read_text(encoding="utf-8")
+        self.assertIn("cameraSchema.apps?.items?.enum", javascript)
+        self.assertNotIn("const packSpecs", javascript)
+        for hard_coded_app in ("wrong_way", "face_recognition", "illegal_parking", "people_counting"):
+            self.assertNotIn(hard_coded_app, javascript)
+
+    def test_controller_backfills_ui_annotations_for_existing_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            catalog = SolutionCatalog(state / "catalog.sqlite3")
+            delivery = ROOT / "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
+            catalog.seed_delivery(delivery, "registry.local:5000", "apexfabric/traffic-edge-runtime")
+            with catalog._connect() as connection:
+                connection.execute("""
+                    INSERT INTO solutions
+                    SELECT 'traffic-edge-runtime:2026.08.21-v5', name, '2026.08.21-v5', registry,
+                           repository, 'intel-285h-2026.08.21-v5', digest, status,
+                           json_remove(contract_json, '$.ui'), desired_state_schema_json,
+                           desired_state_example_json, last_error, updated_at
+                    FROM solutions WHERE catalog_id='traffic-edge-runtime:2026.08.21-v4'
+                """)
+            controller = Controller(state)
+            version_five = controller.catalog.get("traffic-edge-runtime:2026.08.21-v5")
+            self.assertEqual(version_five["contract"]["ui"]["camera"]["defaultApp"], "anpr")
+
+    def test_admin_solution_types_and_catalog_images_are_catalog_driven(self):
+        javascript = (ROOT / "apexfabric/control_plane/static/enhancements.js").read_text(encoding="utf-8")
+        self.assertIn("function solutionTypeOptions()", javascript)
+        self.assertIn("catalogEntriesFor(S.solutionType)", javascript)
+        self.assertIn("selected.name", javascript)
+        self.assertNotIn("192.168.", javascript)
+        self.assertNotIn("Manual image entry", javascript)
+        for hard_coded_app in ("wrong_way", "face_recognition", "illegal_parking", "people_counting"):
+            self.assertNotIn(hard_coded_app, javascript)
+
+    def test_both_uis_share_catalog_and_cluster_sources(self):
+        site = (ROOT / "apexfabric/control_plane/static/site.js").read_text(encoding="utf-8")
+        admin = (ROOT / "apexfabric/control_plane/static/enhancements.js").read_text(encoding="utf-8")
+        self.assertIn("contract?.ui?.deployment", site)
+        self.assertIn("contract?.ui?.deployment", admin)
+        self.assertIn("desired_state_example", site)
+        self.assertIn("desired_state_example", admin)
+        self.assertIn("state.node_reports", site)
+        self.assertIn("S.data?.node_reports", admin)
+        self.assertIn("d.spec?.selector?.matchLabels", site)
+        self.assertIn("d.spec?.selector?.matchLabels", admin)
+
+    def test_seed_and_resolve_delivery_to_immutable_digest(self):
+        with patch("apexfabric.solution_management.catalog.urlopen", return_value=ManifestResponse()):
+            registry = "registry.local:5000"
+            with tempfile.TemporaryDirectory() as directory:
+                catalog = SolutionCatalog(Path(directory) / "catalog.sqlite3")
+                delivery = ROOT / "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
+                catalog.seed_delivery(delivery, registry, "apexfabric/traffic-edge-runtime")
+                seeded = catalog.list()[0]
+                self.assertEqual(seeded["status"], "unresolved")
+                self.assertIn("cameras", seeded["desired_state_schema"]["properties"])
+                example = seeded["desired_state_example"]
+                self.assertEqual(example["revision"], 1)
+                self.assertEqual(example["cameras"][0]["camera_id"], "cam-traffic-01")
+                self.assertIn("zones", example["cameras"][0]["config"])
+                refreshed = catalog.refresh()[0]
+                self.assertEqual(refreshed["status"], "available")
+                self.assertEqual(refreshed["digest"], DIGEST)
+                self.assertEqual(refreshed["image"]["tag"], "intel-285h-2026.08.21-v4")
+
+    def test_registry_digest_resolver_uses_manifest_digest_header(self):
+        with patch("apexfabric.solution_management.catalog.urlopen", return_value=ManifestResponse()) as mocked:
+            digest = resolve_registry_digest(
+                "registry.local:5000",
+                "apexfabric/traffic-edge-runtime",
+                "intel-285h-2026.08.21-v4",
             )
+            self.assertEqual(digest, DIGEST)
+            request = mocked.call_args.args[0]
+            self.assertEqual(request.full_url, "http://registry.local:5000/v2/apexfabric/traffic-edge-runtime/manifests/intel-285h-2026.08.21-v4")
 
-    def test_vendored_metadata_drift_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            copied = Path(temporary) / "delivery"
-            shutil.copytree(DELIVERY, copied)
-            contract = copied / "image-contract.yaml"
-            contract.write_text(
-                contract.read_text(encoding="utf-8") + "# drift\n",
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(CatalogError, "checksum mismatch"):
-                load_delivery_metadata(copied)
+    def test_retarget_moves_existing_versions_and_requires_digest_refresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = SolutionCatalog(Path(directory) / "catalog.sqlite3")
+            delivery = ROOT / "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
+            catalog.seed_delivery(delivery, "192.168.10.187:5000", "apexfabric/traffic-edge-runtime")
+            with patch("apexfabric.solution_management.catalog.resolve_registry_digest", return_value=DIGEST):
+                catalog.refresh()
+            self.assertEqual(catalog.list()[0]["digest"], DIGEST)
+            self.assertEqual(catalog.retarget(
+                "traffic-edge-runtime", "192.168.10.31:5000", "apexfabric/traffic-edge-runtime",
+            ), 1)
+            moved = catalog.list()[0]
+            self.assertEqual(moved["registry"], "192.168.10.31:5000")
+            self.assertEqual(moved["status"], "unresolved")
+            self.assertIsNone(moved["digest"])
+            self.assertIsNone(moved["last_error"])
 
-    def test_catalog_model_compiles_for_postgresql_and_has_migration(self):
-        statement = str(
-            CreateTable(SolutionCatalogEntry.__table__).compile(
-                dialect=postgresql.dialect()
-            )
-        )
-        self.assertIn("solution_catalog_entries", statement)
-        self.assertIn("JSON", statement)
-        migration = (
-            ROOT
-            / "tvt_edge/db/migrations/versions/0003_solution_catalog.py"
-        ).read_text(encoding="utf-8")
-        self.assertIn('down_revision = "0002_alerting_foundation"', migration)
-        self.assertIn('Base.metadata.tables["solution_catalog_entries"]', migration)
-        catalog_source = (
-            ROOT / "apexfabric/solution_management/catalog.py"
-        ).read_text(encoding="utf-8")
-        self.assertNotIn("sqlite3", catalog_source)
+    def test_renderer_prefers_digest_over_mutable_tag(self):
+        bundle = json.loads(json.dumps(__import__("yaml").safe_load(
+            (ROOT / "solution-packs/traffic/traffic-edge-runtime-intel-285h.yaml").read_text()
+        )))
+        bundle["applications"][0]["image"]["digest"] = DIGEST
+        deployment = next(item for item in render(bundle, "apexfabric") if item["kind"] == "Deployment")
+        image = deployment["spec"]["template"]["spec"]["containers"][0]["image"]
+        self.assertEqual(image, f"__APEXFABRIC_REGISTRY__/apexfabric/traffic-edge-runtime@{DIGEST}")
 
-    def test_seed_is_idempotent(self):
-        service = ManagementService(self.sessions, self.keyring)
-        first = service.seed_solution_catalog(DELIVERY, "127.0.0.1:5000")
-        second = service.seed_solution_catalog(DELIVERY, "127.0.0.1:5000")
-        self.assertEqual(first["catalog_id"], second["catalog_id"])
-        with self.sessions() as session:
-            count = session.scalar(select(func.count()).select_from(SolutionCatalogEntry))
-        self.assertEqual(count, 1)
-
-    def test_successful_refresh_does_not_alter_deployment(self):
-        service = ManagementService(
-            self.sessions, self.keyring, catalog_resolver=lambda *_args: DIGEST
-        )
-        service.seed_solution_catalog(DELIVERY, "127.0.0.1:5000")
-        with self.sessions.begin() as session:
-            site = Site(
-                site_key="site-01",
-                edge_id="edge-01",
-                display_name="Site 01",
-                timezone_name="UTC",
-            )
-            session.add(site)
-            session.flush()
-            session.add(
-                SolutionDeployment(
-                    site_id=site.id,
-                    deployment_key="existing",
-                    solution_id="existing-solution",
-                    namespace="apexfabric",
-                    registry="127.0.0.1:5000",
-                )
-            )
-        before = service.list_deployments()
-        refreshed = service.refresh_solutions()
-        after = service.list_deployments()
-        self.assertEqual(before, after)
-        self.assertEqual(refreshed[0]["status"], "available")
-        self.assertEqual(refreshed[0]["image"]["digest"], DIGEST)
-        self.assertEqual(
-            refreshed[0]["image"]["reference"],
-            f"127.0.0.1:5000/apexfabric/traffic-edge-runtime@{DIGEST}",
-        )
-
-    def test_failed_refresh_is_safe_and_marks_unavailable(self):
-        def fail(*_args):
-            raise CatalogError("cannot read rtsp://operator:camera-secret@example/live")
-
-        service = ManagementService(self.sessions, self.keyring, catalog_resolver=fail)
-        service.seed_solution_catalog(DELIVERY, "127.0.0.1:5000")
-        result = service.refresh_solutions()
-        self.assertEqual(result[0]["status"], "unavailable")
-        self.assertIsNone(result[0]["image"]["digest"])
-        self.assertNotIn("camera-secret", result[0]["last_error"])
-
-    def test_registry_digest_is_verified_against_manifest_bytes(self):
-        registry = "127.0.0.1:5000"
-        with patch(
-            "apexfabric.solution_management.catalog.urlopen",
-            return_value=FakeManifestResponse(),
-        ):
-            self.assertEqual(
-                resolve_registry_digest(registry, "apexfabric/traffic", "v4"),
-                DIGEST,
-            )
-        with patch(
-            "apexfabric.solution_management.catalog.urlopen",
-            return_value=FakeManifestResponse("sha256:" + "0" * 64),
-        ):
-            with self.assertRaisesRegex(CatalogError, "digest mismatch"):
-                resolve_registry_digest(registry, "apexfabric/traffic", "v4")
-
-    def test_solution_api_lists_and_refreshes_safe_metadata(self):
-        registry = "127.0.0.1:5000"
-        ManagementService(self.sessions, self.keyring).seed_solution_catalog(
-            DELIVERY, registry
-        )
-        app = create_app(self.sessions, self.keyring)
-        list_route = next(
-            route.endpoint
-            for route in app.routes
-            if route.path == "/api/v1/solutions" and "GET" in route.methods
-        )
-        refresh_route = next(
-            route.endpoint
-            for route in app.routes
-            if route.path == "/api/v1/solutions/refresh" and "POST" in route.methods
-        )
-
-        with patch(
-            "apexfabric.solution_management.catalog.urlopen",
-            return_value=FakeManifestResponse(),
-        ):
-            listed = list_route()
-            refreshed = refresh_route(
-                SimpleNamespace(state=SimpleNamespace(request_id="api:test")), None
-            )
-        self.assertEqual(len(listed), 1)
-        body = refreshed[0]
-        self.assertEqual(body["status"], "available")
-        self.assertNotIn("credentials", json.dumps(body).lower())
+    def test_catalog_selection_generates_digest_pinned_traffic_bundle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            controller = Controller(Path(directory))
+            with patch("apexfabric.solution_management.catalog.resolve_registry_digest", return_value=DIGEST):
+                controller.catalog.refresh()
+            generated = controller.generate_bundle({
+                "solution_type": "traffic-edge-runtime",
+                "catalog_id": "traffic-edge-runtime:2026.08.21-v4",
+                "deployment_id": "traffic-demo",
+                "edge_id": "intel-box-01",
+                "camera_configuration": [{"camera_id": "traffic-1", "apps": ["anpr"]}],
+            })
+            app_image = generated["bundle"]["applications"][0]["image"]
+            self.assertEqual(app_image["digest"], DIGEST)
+            deployment = next(item for item in generated["objects"] if item["kind"] == "Deployment")
+            self.assertTrue(deployment["spec"]["template"]["spec"]["containers"][0]["image"].endswith(f"@{DIGEST}"))
 
 
 if __name__ == "__main__":

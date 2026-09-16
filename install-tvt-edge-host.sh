@@ -310,7 +310,7 @@ PY
   actual_migration="$(runuser -u postgres -- psql -d tvt -Atc 'SELECT version_num FROM alembic_version')"
   [[ ${actual_migration} == "${expected_migration}" ]] || tvt_fail \
     "database migration ${actual_migration:-missing} does not match release head ${expected_migration}"
-  api_health="$(curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8088/api/v1/health)"
+  api_health="$(curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8089/api/v1/health)"
   python3 - "${api_health}" <<'PY'
 import json, sys
 health = json.loads(sys.argv[1])

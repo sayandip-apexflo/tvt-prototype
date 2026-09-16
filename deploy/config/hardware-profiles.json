@@ -9,8 +9,5 @@
   "jetson-orin": {
     "architecture": "arm64",
     "camera_streams": 25
-  },
-  "generic-amd64": {
-    "architecture": "amd64"
   }
 }

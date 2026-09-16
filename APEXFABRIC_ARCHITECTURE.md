@@ -54,7 +54,7 @@ K3s-specific concepts.
 
 ```mermaid
 flowchart TB
-    User[Developer or operator] --> UI[Dev-only local UI<br/>127.0.0.1:8088]
+    User[Developer or operator] --> UI[Dev-only local UI<br/>127.0.0.1:8089]
     UI --> HostControl[Host control service]
 
     subgraph Cluster[K3s cluster]

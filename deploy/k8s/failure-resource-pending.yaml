@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: failure-resource-pending
+  namespace: apexfabric
+  labels:
+    app.kubernetes.io/part-of: apexfabric
+    apexfabric.com/test: failure-recovery
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: impossible-request
+      image: registry.k8s.io/pause:3.10
+      resources:
+        requests: {cpu: "100000", memory: 1Mi}
+        limits: {cpu: "100000", memory: 1Mi}

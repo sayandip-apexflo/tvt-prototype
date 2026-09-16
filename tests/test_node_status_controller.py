@@ -17,12 +17,6 @@ def intel_node(ready=True):
     return candidate
 
 
-def generic_node(ready=True):
-    candidate = node(ready)
-    candidate["metadata"]["labels"]["apexfabric.com/hardware-profile"] = "generic-amd64"
-    return candidate
-
-
 def report(observed_at=None):
     return {"metadata": {"name": "node-01"}, "spec": {
         "nodeName": "node-01", "reporterVersion": "0.1.0",
@@ -63,20 +57,35 @@ class NodeStatusControllerTests(unittest.TestCase):
             "gpu": {"present": True, "device_nodes": ["/dev/dri/renderD128"]},
             "npu": {"present": True, "device_nodes": ["/dev/accel/accel0"], "driver": {"loaded": True}},
         })
-        _, accepted, reason = report_labels(candidate, intel_node())
+        labels, accepted, reason = report_labels(candidate, intel_node())
         self.assertTrue(accepted, reason)
+        self.assertEqual(labels["apexfabric.com/gpu"], "present")
+        self.assertEqual(labels["apexfabric.com/npu"], "intel")
+        self.assertEqual(labels["apexfabric.com/metis"], "false")
 
         candidate["spec"]["capabilities"]["accelerators"]["npu"]["driver"]["loaded"] = False
         _, accepted, reason = report_labels(candidate, intel_node())
         self.assertFalse(accepted)
         self.assertIn("IntelNpuDriverUnavailable", reason)
 
-    def test_generic_amd64_profile_does_not_require_intel_devices(self):
+    def test_accelerator_labels_distinguish_intel_npu_from_metis(self):
         candidate = report()
-        candidate["spec"]["capabilities"]["accelerators"] = {"metis": {"present": False}}
-        candidate["spec"]["capabilities"]["decoder"]["va_api"]["available"] = False
-        _, accepted, reason = report_labels(candidate, generic_node())
-        self.assertTrue(accepted, reason)
+        candidate["spec"]["capabilities"]["accelerators"].update({
+            "gpu": {
+                "present": True,
+                "devices": [{"vendor": "Intel"}],
+                "device_nodes": ["/dev/dri/renderD128"],
+            },
+            "npu": {
+                "present": True,
+                "device_nodes": ["/dev/accel/accel0"],
+                "driver": {"name": "intel_vpu", "loaded": True},
+            },
+        })
+        labels, _, _ = report_labels(candidate, node())
+        self.assertEqual(labels["apexfabric.com/gpu"], "intel")
+        self.assertEqual(labels["apexfabric.com/npu"], "intel")
+        self.assertEqual(labels["apexfabric.com/metis"], "false")
 
 
 if __name__ == "__main__": unittest.main()

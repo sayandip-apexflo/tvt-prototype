@@ -19,9 +19,9 @@ from jsonschema import Draft202012Validator
 
 from apexfabric.solution_management.catalog import (
     CatalogError,
-    load_delivery_metadata,
     resolve_registry_digest,
 )
+from tvt_edge.delivery_metadata import load_delivery_metadata
 from tvt_edge.bundles import (
     BundleCamera,
     apply_registry,

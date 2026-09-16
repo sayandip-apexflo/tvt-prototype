@@ -79,6 +79,14 @@ class TvtRuntimeTests(unittest.TestCase):
                 "traffic-edge-intel-285h-camera-sources",
             ],
         )
+        # Exact k3s@5ada504 contract: ConfigMap (plain data) + Secret.
+        self.assertEqual(
+            [item["kind"] for item in result["items"]],
+            ["ConfigMap", "Secret"],
+        )
+        self.assertIn(
+            "desired_state.json", result["items"][0]["data"]
+        )
         sources = result["items"][1]["stringData"]
         self.assertEqual(set(sources), {"cam4.rtsp", "cam5.rtsp"})
 
@@ -118,12 +126,15 @@ class TvtRuntimeTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             main(["render", str(self.bundle_path)])
 
-    def test_node_discovery_has_no_gstreamer_contract(self):
+    def test_node_discovery_matches_upstream_k3s_contract(self):
+        # k3s-prototype@5ada504 reports both va_api and gstreamer decoder info.
         capabilities = discover()
         self.assertIn("va_api", capabilities["decoder"])
-        self.assertNotIn("gstreamer", capabilities["decoder"])
+        self.assertIn("gstreamer", capabilities["decoder"])
 
-    def test_node_management_manifest_has_no_camera_config_gateway_contract(self):
+    def test_node_management_manifest_matches_upstream_k3s_contract(self):
+        # k3s-prototype@5ada504 reporter DaemonSet mounts camera-config
+        # (/etc/apexfabric/cameras.json) for camera capacity reporting.
         resources = list(
             yaml.safe_load_all(
                 (
@@ -133,7 +144,7 @@ class TvtRuntimeTests(unittest.TestCase):
         )
         daemon_set = next(item for item in resources if item["kind"] == "DaemonSet")
         pod = daemon_set["spec"]["template"]["spec"]
-        self.assertNotIn(
+        self.assertIn(
             "camera-config", {volume["name"] for volume in pod.get("volumes", [])}
         )
 

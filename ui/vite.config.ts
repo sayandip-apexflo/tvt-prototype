@@ -10,7 +10,7 @@ export default defineConfig({
   build: { outDir: "../tvt_edge/static", emptyOutDir: true },
   server: {
     host: "127.0.0.1",
-    proxy: { "/api": "http://127.0.0.1:8088" },
+    proxy: { "/api": "http://127.0.0.1:8089" },
   },
   test: { environment: "jsdom", setupFiles: "./src/test.setup.ts" },
 });

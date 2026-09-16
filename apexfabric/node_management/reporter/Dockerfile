@@ -1,11 +1,12 @@
 FROM python:3.12-slim
 
 ARG REPORTER_VERSION=0.1.0
-ENV REPORTER_VERSION=${REPORTER_VERSION} \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+ENV REPORTER_VERSION=${REPORTER_VERSION} PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends vainfo intel-media-va-driver \
+    && apt-get install -y --no-install-recommends iproute2 pciutils util-linux gstreamer1.0-tools \
+    && if [ "$(dpkg --print-architecture)" = amd64 ]; then \
+         apt-get install -y --no-install-recommends vainfo intel-media-va-driver; \
+       fi \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY apexfabric /app/apexfabric

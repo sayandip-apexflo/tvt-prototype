@@ -1,0 +1,1 @@
+{"blockdevices":[{"name":"sda","kname":"sda","type":"disk","size":1000000000,"model":"Fixture Disk","vendor":"ACME","tran":"sata"}]}

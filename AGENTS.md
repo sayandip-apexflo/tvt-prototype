@@ -13,11 +13,17 @@ plane (`tvt_edge/`), reused K3s/Solution Pack runtime (`apexfabric/`,
   (`alerting/`), observability (`observability/`), watchdog (`watchdog.py`),
   qualification (`qualification.py`), CLI (`cli.py`), crypto/redaction
   (`security.py`), config (`settings.py`, `service.py`, `paths.py`).
-- `apexfabric/` + `solution-packs/schema`, `solution-packs/traffic/` — **frozen
-  reference plane** copied from `k3s-prototype` commit
-  `bcb58030f89b22b14ff1dbd0a68c5806d2f6a002`. Validator, camera-locality,
-  renderer, field-manager/apply/prune, reporter/controller, and their tests
-  stay behavior-identical (see §6).
+- `apexfabric/` + `solution-packs/schema`, `solution-packs/traffic/`,
+  `solution-packs/catalog/`, `solution-packs/review/`, `deploy/k8s/`,
+  `deploy/single-box/`, `deploy/ui/` — **exact copy** of `k3s-prototype` commit
+  `5ada504fbb3a5fc3c15e08428c6e996eeb6fbd44` (full `control_plane/`,
+  validator, camera-locality, renderer, field-manager/apply/prune,
+  reporter/controller, catalog/install_catalog, and their tests stay
+  behavior-identical — never edit to fix a TVT problem, see §6).
+  TVT-only extras kept alongside the copy: `tvt_edge/delivery_metadata.py`
+  (Postgres catalog loader with `metrics.schema` + `analytics-event.*` +
+  `provenance.json` checksums) and the 4 TVT-only files under
+  `solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4/`.
 - `ui/` — TypeScript/Vite React console, built into `tvt_edge/static/` and
   served by the edge API. `ui/src/`.
 - `tests/` — pytest suite (`test_*.py` at top level plus `unit/`,
@@ -29,7 +35,8 @@ plane (`tvt_edge/`), reused K3s/Solution Pack runtime (`apexfabric/`,
   orchestrator. `prepare-tvt-edge-host.sh` / `install-tvt-edge-host.sh` —
   sole production host entry points. `config/*.env` — pinned digests/versions.
 - `deploy/` — systemd units, K3s manifests, monitoring profile.
-  `solution-packs/catalog/` — vendored Traffic v4 pack. `examples/` — docs-only
+  `solution-packs/catalog/` — vendored Traffic v4 pack (+ Surveillance v3 +
+  review quarantine, exact k3s copies; TVT seeds Traffic only). `examples/` — docs-only
   inputs. `docs/` — runbooks (`EDGE-RELEASE-BUILD.md`,
   `TRAFFIC-EDGE-QUALIFICATION.md`, `PIPELINE-TRAFFIC-IMAGE.md`,
   `EDGE-FLEET-DEPLOYMENT.md`).
@@ -68,7 +75,7 @@ Useful local API checks (loopback only, docs-only credentials):
   --registry 127.0.0.1:5000 \
   --secret-inputs examples/traffic.secret-inputs.example.json \
   --dry-run
-npm --prefix ui run dev   # API on :8088 + Vite on loopback
+npm --prefix ui run dev   # API on :8089 + Vite on loopback
 ```
 
 Alembic: `alembic.ini` at root, migrations in
@@ -86,7 +93,7 @@ revision.
 - Python: type-annotate new public functions, use UTC `timestamptz` for new
   timestamps, keep `tvt_edge` imports absolute.
 - UI: TypeScript strict (`tsc --noEmit` must pass); no direct K8s access, no
-  secret material in state/logs; management API is `http://127.0.0.1:8088`.
+  secret material in state/logs; management API is `http://127.0.0.1:8089`.
 - Shell: new host operations go in `scripts/tvt-edge-operations.sh` as
   subcommands plus `lib/` helpers — never add standalone component installers
   to the release bundle. Scripts must be idempotent and fail without mutating
@@ -181,7 +188,7 @@ touch:
 
 ## 7. API / DB / sync rules
 
-- API binds loopback (`127.0.0.1:8088`); UI binds the on-site management
+- API binds loopback (`127.0.0.1:8089`); UI binds the on-site management
   interface only. All responses carry `X-Request-ID`; mutations append an
   audit event. Passwords are write-only; camera list/detail responses are
   non-secret.

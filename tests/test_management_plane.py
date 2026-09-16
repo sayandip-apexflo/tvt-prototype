@@ -312,8 +312,10 @@ class ManagementPlaneTests(unittest.TestCase):
         self.assertIn("@sha256:", main["image"])
         main_mounts = {item["mountPath"] for item in main["volumeMounts"]}
         compiler_mounts = {item["mountPath"] for item in compiler["volumeMounts"]}
-        self.assertTrue({"/state", "/plans", "/tmp/apexfabric", "/dev/dri", "/dev/accel"}.issubset(main_mounts))
-        self.assertTrue({"/plans", "/tmp/apexfabric", "/dev/dri", "/dev/accel"}.issubset(compiler_mounts))
+        # k3s-prototype@5ada504 contract: /configs (ConfigMap desired-state) +
+        # /plans + /dev/dri + /dev/accel; no /state or /tmp/apexfabric.
+        self.assertTrue({"/configs", "/plans", "/dev/dri", "/dev/accel"}.issubset(main_mounts))
+        self.assertTrue({"/configs", "/plans"}.issubset(compiler_mounts))
         self.assertFalse(any(path.startswith("/models/") for path in main_mounts | compiler_mounts))
         desired_camera = preview["desired_state"]["cameras"][0]
         self.assertIn("wrong_way", desired_camera["config"]["lines"])
@@ -815,11 +817,16 @@ def base64_decode_manifest(manifest_text):
     import base64
 
     value = json.loads(manifest_text)
-    return " ".join(
-        base64.b64decode(encoded).decode()
-        for item in value["items"]
-        for encoded in item["data"].values()
-    )
+    parts = []
+    for item in value["items"]:
+        if item.get("kind") == "Secret":
+            for encoded in item.get("data", {}).values():
+                parts.append(base64.b64decode(encoded).decode())
+        else:
+            # ConfigMap desired-state is plain (non-secret) data.
+            for plain in item.get("data", {}).values():
+                parts.append(plain)
+    return " ".join(parts)
 
 
 if __name__ == "__main__":

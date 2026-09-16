@@ -1,0 +1,20 @@
+api_version: wrong/version
+kind: DeploymentBundle
+deployment_id: Invalid ID
+solution:
+  solution_id: traffic
+applications:
+  - name: traffic-cv
+    image: {repository: nginx, tag: latest}
+    resources:
+      cpu: {request: bad, limit: "2"}
+      memory: {request: 4Gi, limit: 4Gi}
+      accelerators: {decoder: -1, metis: 0}
+    cameras: [camera-01, camera-01]
+    health:
+      readiness: {path: health, port: missing}
+      liveness: {path: /health, port: missing}
+    ports:
+      - {name: http, container_port: 70000}
+    environment: {bad-name: value}
+    unexpected: true

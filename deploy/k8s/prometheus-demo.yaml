@@ -1,0 +1,103 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-demo-config
+  namespace: apexfabric
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 2s
+      evaluation_interval: 2s
+    scrape_configs:
+      - job_name: fake-cv
+        metrics_path: /metrics
+        static_configs:
+          - targets: [fake-cv-test-pipeline.apexfabric.svc.cluster.local:8080]
+      - job_name: fake-cv-jetson
+        static_configs:
+          - targets: [fake-cv-jetson-pipeline.apexfabric.svc.cluster.local:8080]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-demo
+  namespace: apexfabric
+  labels:
+    app.kubernetes.io/name: prometheus-demo
+    app.kubernetes.io/part-of: apexfabric
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-demo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: prometheus-demo
+        app.kubernetes.io/part-of: apexfabric
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.5.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=2h
+          ports:
+            - name: http
+              containerPort: 9090
+          readinessProbe:
+            httpGet: {path: /-/ready, port: http}
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          livenessProbe:
+            httpGet: {path: /-/healthy, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/prometheus, readOnly: true}
+            - {name: data, mountPath: /prometheus}
+      volumes:
+        - name: config
+          configMap: {name: prometheus-demo-config}
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-demo
+  namespace: apexfabric
+spec:
+  selector:
+    app.kubernetes.io/name: prometheus-demo
+  ports:
+    - {name: http, port: 9090, targetPort: http}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prometheus-demo
+  namespace: apexfabric
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-demo
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - {port: 9090, protocol: TCP}

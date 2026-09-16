@@ -86,6 +86,8 @@ class NodeAgentTests(unittest.TestCase):
         self.assertEqual(claim["spec"]["resources"]["requests"]["storage"], "2Gi")
 
         deployment = next(item for item in objects if item["kind"] == "Deployment")
+        self.assertEqual(deployment["metadata"]["annotations"]["apexfabric.com/local-storage-failover"], "retain-and-recreate")
+        self.assertEqual(deployment["metadata"]["annotations"]["apexfabric.com/failover-after-seconds"], "120")
         self.assertEqual(deployment["spec"]["strategy"], {"type": "Recreate"})
         self.assertEqual(deployment["spec"]["replicas"], 1)
         self.assertEqual(deployment["spec"]["revisionHistoryLimit"], 3)
@@ -113,30 +115,25 @@ class NodeAgentTests(unittest.TestCase):
         self.assertEqual(deployment["spec"]["strategy"], {"type": "Recreate"})
         pod = deployment["spec"]["template"]["spec"]
         self.assertEqual(pod["securityContext"]["supplementalGroups"], [44, 992])
-        expressions = pod["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"][0]["matchExpressions"]
-        self.assertIn(
-            {"key": "apexfabric.com/gpu-npu-ready", "operator": "In", "values": ["true"]},
-            expressions,
-        )
         container = pod["containers"][0]
         self.assertEqual(container["resources"]["requests"]["apexfabric.com/camera-streams"], "2")
         self.assertEqual(container["resources"]["limits"]["apexfabric.com/camera-streams"], "2")
         self.assertEqual(container["securityContext"], {"privileged": True, "readOnlyRootFilesystem": False})
         mounts = {item["mountPath"]: item for item in container["volumeMounts"]}
         self.assertFalse(mounts["/plans"].get("readOnly", False))
-        self.assertTrue(mounts["/configs/desired_state.json"]["readOnly"])
+        self.assertTrue(mounts["/configs"]["readOnly"])
         self.assertNotIn("/models/traffic/openvino", mounts)
         self.assertIn("/dev/dri", mounts)
         self.assertIn("/dev/accel", mounts)
         volumes = {item["name"]: item for item in pod["volumes"]}
-        self.assertEqual(volumes["desired-state"]["secret"]["secretName"], "traffic-edge-intel-285h-desired-state")
-        self.assertEqual(volumes["desired-state"]["secret"]["defaultMode"], 0o444)
+        self.assertEqual(volumes["desired-state"]["configMap"]["name"], "traffic-edge-intel-285h-desired-state")
+        self.assertEqual(volumes["desired-state"]["configMap"]["defaultMode"], 0o444)
         self.assertEqual(volumes["external-cam4-source"]["secret"]["defaultMode"], 0o444)
         compiler = pod["initContainers"][0]
         self.assertEqual(compiler["name"], "plan-compiler")
         self.assertIn("edge_runtime.agent.edge_agent", compiler["command"])
         compiler_mounts = {item["mountPath"] for item in compiler["volumeMounts"]}
-        self.assertIn("/configs/desired_state.json", compiler_mounts)
+        self.assertIn("/configs", compiler_mounts)
         self.assertNotIn("/models/traffic/openvino", compiler_mounts)
         self.assertIn("/run/secrets/apexfabric/cam4.rtsp", compiler_mounts)
         self.assertIn("/dev/dri", compiler_mounts)
@@ -200,7 +197,7 @@ class NodeAgentTests(unittest.TestCase):
         report = reconcile(self.bundle, "apexfabric", client)
         self.assertEqual(report["removed"], ["ConfigMap/obsolete"])
         self.assertEqual(report["observed"][0]["ready_replicas"], 1)
-        apply = client.calls[0]
+        apply = next(call for call in client.calls if call[0][0] == "apply")
         self.assertIn("--server-side", apply[0])
         self.assertTrue(any(call[0][:3] == ("delete", "configmap", "obsolete") for call in client.calls))
 

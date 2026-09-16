@@ -129,12 +129,17 @@
         "plan_compiler": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["type", "desired_state_secret", "desired_state_key"],
+          "required": ["type", "desired_state_key"],
           "properties": {
             "type": {"const": "edge-agent-v1"},
             "desired_state_secret": {"$ref": "#/$defs/id"},
+            "desired_state_config_map": {"$ref": "#/$defs/id"},
             "desired_state_key": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"}
-          }
+          },
+          "oneOf": [
+            {"required": ["desired_state_secret"]},
+            {"required": ["desired_state_config_map"]}
+          ]
         },
         "health": {
           "type": "object", "additionalProperties": false, "required": ["readiness", "liveness"],

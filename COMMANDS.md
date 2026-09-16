@@ -206,9 +206,9 @@ the vendored v4 entry:
 ```bash
 sudo ./scripts/tvt-edge-operations.sh bootstrap-postgresql
 curl --fail --silent --show-error \
-  -X POST http://127.0.0.1:8088/api/v1/solutions/refresh
+  -X POST http://127.0.0.1:8089/api/v1/solutions/refresh
 curl --fail --silent --show-error \
-  http://127.0.0.1:8088/api/v1/solutions | python3 -m json.tool
+  http://127.0.0.1:8089/api/v1/solutions | python3 -m json.tool
 ```
 
 Run refresh only after image synchronization succeeds. The entry becomes
@@ -249,7 +249,7 @@ production import source.
 ## Phase 4: preview and deploy Traffic from the catalog
 
 The normal operator path is the Solutions page at
-`http://127.0.0.1:8088/#solutions`. Select an `available` catalog entry,
+`http://127.0.0.1:8089/#solutions`. Select an `available` catalog entry,
 enabled/online cameras, applications, inference mode, resources, and normalized
 geometry. Review the generated bundle and desired state, then commit that exact
 preview.
@@ -260,7 +260,7 @@ The equivalent API sequence is:
 curl --fail --silent --show-error \
   -H 'Content-Type: application/json' \
   --data @deployment-request.json \
-  http://127.0.0.1:8088/api/v1/deployments/preview \
+  http://127.0.0.1:8089/api/v1/deployments/preview \
   > /tmp/tvt-deployment-preview.json
 
 jq '.bundle, .desired_state, .image_reference, .bundle_sha256' \
@@ -273,7 +273,7 @@ jq --slurpfile preview /tmp/tvt-deployment-preview.json \
 curl --fail --silent --show-error \
   -H 'Content-Type: application/json' \
   --data @/tmp/tvt-deployment-commit.json \
-  http://127.0.0.1:8088/api/v1/deployments
+  http://127.0.0.1:8089/api/v1/deployments
 ```
 
 `deployment-request.json` contains `catalog_id`, `deployment_id`, `namespace`,
@@ -299,7 +299,7 @@ in the Solutions UI or call:
 curl --fail --silent --show-error \
   -H 'Content-Type: application/json' \
   --data '{"bundle_sha256":"<previous-complete-bundle-sha256>"}' \
-  http://127.0.0.1:8088/api/v1/deployments/traffic-v4/rollback
+  http://127.0.0.1:8089/api/v1/deployments/traffic-v4/rollback
 ```
 
 ## Phase 5: qualify the complete Traffic edge path

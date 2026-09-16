@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from apexfabric.solution_management.catalog import load_delivery_metadata
+from tvt_edge.delivery_metadata import load_delivery_metadata
 from tvt_edge.qualification import (
     CATALOG_ID,
     QualificationOptions,
@@ -179,9 +179,8 @@ class FakeCommands:
     @staticmethod
     def deployment():
         mounts = [
-            {"name": "desired-state", "mountPath": "/configs/desired_state.json"},
+            {"name": "desired-state", "mountPath": "/configs"},
             {"name": "plans", "mountPath": "/plans"},
-            {"name": "tmp", "mountPath": "/tmp/apexfabric"},
             {"name": "state", "mountPath": "/state"},
             {"name": "dri", "mountPath": "/dev/dri"},
             {"name": "accel", "mountPath": "/dev/accel"},

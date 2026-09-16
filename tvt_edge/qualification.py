@@ -20,7 +20,7 @@ from urllib.request import Request, urlopen
 
 import jsonschema
 
-from apexfabric.solution_management.catalog import load_delivery_metadata
+from tvt_edge.delivery_metadata import load_delivery_metadata
 from tvt_edge.security import redact, redact_text
 from tvt_edge.paths import RESOURCE_ROOT
 
@@ -89,7 +89,7 @@ class Commands(Protocol):
 class LocalApiClient:
     """Small loopback-only client for exercising the real management API."""
 
-    def __init__(self, base_url: str = "http://127.0.0.1:8088", timeout: int = 10):
+    def __init__(self, base_url: str = "http://127.0.0.1:8089", timeout: int = 10):
         parsed = urlsplit(base_url)
         if (
             parsed.scheme != "http"
@@ -741,20 +741,18 @@ class TrafficQualifier:
                 item["mountPath"] for item in compiler.get("volumeMounts", [])
             }
             volumes = pod_spec.get("volumes", [])
+            # k3s-prototype@5ada504 contract: /configs (ConfigMap directory
+            # mount) + /plans + accelerators; /state only when the bundle
+            # declares persistent_volumes (TVT catalog bundles do).
             required_main = {
-                "/configs/desired_state.json",
+                "/configs",
                 "/plans",
-                "/tmp/apexfabric",
-                "/state",
                 "/dev/dri",
                 "/dev/accel",
             }
             required_compiler = {
-                "/configs/desired_state.json",
+                "/configs",
                 "/plans",
-                "/tmp/apexfabric",
-                "/dev/dri",
-                "/dev/accel",
             }
             camera_main = any(
                 value.startswith("/run/secrets/apexfabric/") for value in mounts
@@ -1107,7 +1105,7 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("deployment_id")
     result.add_argument("--namespace", default="apexfabric")
-    result.add_argument("--api-url", default="http://127.0.0.1:8088")
+    result.add_argument("--api-url", default="http://127.0.0.1:8089")
     result.add_argument("--catalog-directory", type=Path, default=DEFAULT_CATALOG_DIRECTORY)
     result.add_argument("--image-lock", type=Path, default=DEFAULT_IMAGE_LOCK)
     result.add_argument("--output", type=Path)

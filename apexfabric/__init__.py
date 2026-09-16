@@ -1,1 +1,1 @@
-"""ApexFabric components reused by the TVT single-box runtime."""
+"""ApexFabric platform components."""

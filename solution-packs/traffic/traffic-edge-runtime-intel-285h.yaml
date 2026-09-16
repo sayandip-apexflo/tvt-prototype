@@ -8,7 +8,7 @@ applications:
   - name: runtime
     image:
       repository: __APEXFABRIC_REGISTRY__/apexfabric/traffic-edge-runtime
-      tag: intel-285h-2026.08.20-v2
+      tag: intel-285h-2026.08.21-v4
       pull_policy: IfNotPresent
     replicas: 1
     lifecycle:
@@ -26,7 +26,7 @@ applications:
       required_for_readiness: false
       scheduling_mode: runtime-connectivity
     configuration:
-      desired_state_secret: traffic-edge-intel-285h-desired-state
+      desired_state_config_map: traffic-edge-intel-285h-desired-state
       desired_state_key: desired_state.json
       models_delivery: baked-in
       models_root: /models/traffic/openvino
@@ -56,7 +56,7 @@ applications:
           key: cam5.rtsp
     plan_compiler:
       type: edge-agent-v1
-      desired_state_secret: traffic-edge-intel-285h-desired-state
+      desired_state_config_map: traffic-edge-intel-285h-desired-state
       desired_state_key: desired_state.json
     health:
       startup: {path: /readyz, port: management, period_seconds: 5, timeout_seconds: 4, failure_threshold: 60}

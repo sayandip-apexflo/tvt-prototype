@@ -1,0 +1,29 @@
+api_version: apexfabric.com/v1alpha1
+kind: DeploymentBundle
+deployment_id: traffic-upgrade-test
+solution: {solution_id: traffic-synthetic, version: 0.2.0}
+applications:
+  - name: pipeline
+    image: {repository: apexfabric/fake-cv, tag: 0.2.0, pull_policy: Never}
+    replicas: 1
+    resources:
+      cpu: {request: 50m, limit: 250m}
+      memory: {request: 32Mi, limit: 128Mi}
+      accelerators: {decoder: 0, metis: 0}
+    cameras: [camera-01, camera-02]
+    configuration:
+      confidence_threshold: 0.5
+      event_interval_seconds: 0.25
+      enabled_apps: [detection, tracking, zone_analytics]
+      event_sink_url: http://event-sink-test-receiver:8090/events
+      event_sink_timeout_seconds: 1
+    placement: {requires_qualified_node: true, node_class: cv, architecture: amd64}
+    health:
+      readiness: {path: /upgrade-intentionally-unhealthy, port: http, initial_delay_seconds: 1, period_seconds: 2, timeout_seconds: 1, failure_threshold: 3}
+      liveness: {path: /health, port: http, initial_delay_seconds: 2, period_seconds: 5, timeout_seconds: 1, failure_threshold: 3}
+      startup: {path: /ready, port: http, period_seconds: 1, timeout_seconds: 1, failure_threshold: 30}
+    ports: [{name: http, container_port: 8080, protocol: TCP}]
+    environment: {LOG_LEVEL: INFO}
+    secrets: {api-token: traffic-upgrade-test-secret}
+    secret_environment: {TRAFFIC_API_TOKEN: api-token}
+configuration: {site_id: local-k3s, purpose: traffic-upgrade-lifecycle}

@@ -1,0 +1,108 @@
+name: surveillance-edge-runtime
+version: 2026.08.24-v3
+contractVersion: v1
+ui:
+  displayName: Surveillance analytics
+  description: Identity, intrusion, and occupancy analytics for camera deployments.
+  camera:
+    defaultFps: 8
+    defaultApp: reid
+    apps:
+      reid:
+        label: Person re-identification
+        symbol: RE
+      face_recognition:
+        label: Face recognition
+        symbol: FR
+      intrusion:
+        label: Intrusion detection
+        symbol: IN
+        geometry:
+          kind: zone
+          label: Intrusion detection region
+          configPath: zones.intrusion
+          required: false
+          nameTemplate: "{app}_zone"
+      people_counting:
+        label: People counting
+        symbol: PC
+        geometry:
+          kind: line
+          label: People counting line
+          configPath: lines.people_counting
+          required: false
+          nameTemplate: "{app}_line"
+          values:
+            in_side: right
+  deployment:
+    storageGi: 20
+    cpuRequest: 8
+    cpuLimit: 16
+    memoryRequestGi: 16
+    memoryLimitGi: 32
+    pullPolicy: IfNotPresent
+    inferenceMode: cpu-compatible
+contractExtensions:
+  persistentSurveillanceState:
+    required: true
+    mountPath: /state
+    reason: durable face gallery, ReID rejoin state, history, and event evidence
+architectures: [amd64]
+hardwareProfile: intel-285h
+runtimeBase:
+  image: apexfabric-intel-surveillance-runtime-base:intel-285h-2026.08.24-v1
+  digest: sha256:ff3bc61535f4b4289298db44915ba18e2412c2bfa2c66065597dd1af3ea96f5d
+  deployment: build-parent-only
+models:
+  delivery: baked-in
+  root: /models/surveillance
+  metadata: /opt/pipeline/edge_runtime/model_registry/models.yaml
+configuration:
+  desiredStatePath: /configs/desired_state.json
+  hotReload:
+    enabled: true
+    pollSeconds: 2
+    strategy: transactional-child-restart
+    revisionPolicy: nondecreasing
+    mountPath: /configs
+    kubernetesSubPathSupported: false
+secrets:
+  root: /run/secrets/apexfabric
+  referenceFormat: file:/run/secrets/apexfabric/<camera-id>.rtsp
+runtimePlan:
+  compiler: python -m edge_runtime.agent.edge_agent
+  output: /plans/surveillance.runtime_plan.json
+network:
+  port: 8080
+  hostNetworkRequired: false
+endpoints:
+  health: /healthz
+  readiness: /readyz
+  metrics: /metrics
+  events: /events
+  snapshots: /snapshots/<state-relative-path>
+  faceGallery: /api/face_gallery
+  faceEnrollment: /api/enrollment
+  faceGroup: /api/face_group
+metricsFormat: application/json
+eventProtocol: sse
+process:
+  uid: 10001
+  gid: 10001
+  readOnlyRootSupported: true
+resources:
+  cpuRequest: "8"
+  memoryRequest: 16Gi
+  maxCameraStreams: 16
+accelerators:
+  - intel-igpu
+  - intel-npu
+devices:
+  - /dev/dri
+  - /dev/accel
+storage:
+  persistentVolumes:
+    - mountPath: /state
+      purpose: event, gallery, history, crop, and snapshot storage
+  temporaryPaths: [/plans, /tmp/apexfabric]
+externalDependencies: []

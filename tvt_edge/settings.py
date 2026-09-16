@@ -25,7 +25,7 @@ class Settings:
     database_url: str = "postgresql+psycopg:///tvt"
     credential_key_dir: Path = Path("/etc/tvt/credential-keys")
     listen_host: str = "127.0.0.1"
-    listen_port: int = 8088
+    listen_port: int = 8089
     metrics_host: str = "127.0.0.1"
     metrics_port: int = 9108
     kubeconfig: str | None = None
@@ -37,7 +37,7 @@ class Settings:
 
     @classmethod
     def from_environment(cls) -> "Settings":
-        port = int(os.getenv("TVT_LISTEN_PORT", "8088"))
+        port = int(os.getenv("TVT_LISTEN_PORT", "8089"))
         metrics_port = int(os.getenv("TVT_METRICS_LISTEN_PORT", "9108"))
         timeout = int(os.getenv("TVT_ROLLOUT_TIMEOUT", "180"))
         onvif_timeout = float(os.getenv("TVT_DISCOVERY_ONVIF_TIMEOUT", "1.0"))

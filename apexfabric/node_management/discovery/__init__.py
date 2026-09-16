@@ -1,1 +1,1 @@
-"""Read-only node capability discovery for the TVT appliance."""
+"""Read-only compute-node capability discovery."""

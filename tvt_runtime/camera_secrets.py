@@ -1,8 +1,13 @@
-"""Validate and materialize installation-owned direct-camera Secrets.
+"""Validate and materialize installation-owned direct-camera inputs.
 
-Camera URLs are deliberately accepted only as ephemeral inputs. They are
-returned in a Kubernetes object that callers must send directly to the API;
-callers must never log or persist that object.
+Mirrors ``apexfabric/control_plane/server.py::_apply_bundle_inputs`` at
+``k3s-prototype@5ada504`` (ConfigMap ``<deployment>-desired-state`` +
+Secret ``<deployment>-camera-sources``) but returns the Kubernetes List
+instead of applying it. Callers must send it directly to the API and must
+never log or persist Secret values.
+
+``apexfabric/`` is an exact copy and must not be edited; this adapter stays
+in ``tvt_runtime/``.
 """
 
 from __future__ import annotations
@@ -20,45 +25,63 @@ TRAFFIC_APPS = {
     "wrong_way",
 }
 
+SURVEILLANCE_APPS = {
+    "reid",
+    "face_recognition",
+    "intrusion",
+    "people_counting",
+}
+
+_CONTRACTS = {
+    "traffic-runtime-v1": ("traffic", TRAFFIC_APPS),
+    "surveillance-runtime-v1": ("surveillance", SURVEILLANCE_APPS),
+}
+
 
 def build_camera_secret_list(
     bundle: dict[str, Any],
     secret_inputs: Any,
     namespace: str = "apexfabric",
 ) -> dict[str, Any] | None:
-    """Return the reference Traffic runtime Secret List after strict validation.
+    """Return the reference runtime input List (ConfigMap + Secret).
 
     ``None`` means the bundle has no ephemeral camera-secret contract. Passing
     inputs to such a bundle is rejected rather than silently ignored.
     """
 
     configuration = bundle.get("configuration", {})
-    if configuration.get("secret_input_contract") != "traffic-runtime-v1":
+    input_contract = configuration.get("secret_input_contract")
+    if input_contract not in _CONTRACTS:
         if secret_inputs is not None:
             raise ValueError("secret_inputs are unsupported by this bundle")
         return None
+    solution_pack, allowed_apps = _CONTRACTS[input_contract]
     if not isinstance(secret_inputs, dict):
-        raise ValueError("camera Secret values are required for Traffic Edge Runtime")
+        raise ValueError(
+            f"camera Secret values are required for {solution_pack.title()} Edge Runtime"
+        )
 
     desired_state = secret_inputs.get("desired_state")
     camera_sources = secret_inputs.get("camera_sources")
-    if not isinstance(desired_state, dict) or not isinstance(camera_sources, dict):
-        raise ValueError("desired_state and camera_sources are required objects")
+    if not isinstance(desired_state, dict):
+        raise ValueError("desired_state is required")
+    if not isinstance(camera_sources, dict):
+        raise ValueError("camera_sources or camera_ids are required")
 
     applications = bundle.get("applications", [])
     if len(applications) != 1 or applications[0].get("name") != "runtime":
-        raise ValueError("traffic-runtime-v1 requires exactly one runtime application")
+        raise ValueError(f"{input_contract} requires exactly one runtime application")
     app = applications[0]
     deployment_id = bundle["deployment_id"]
-    expected_desired_secret = f"{deployment_id}-desired-state"
+    expected_desired_config_map = f"{deployment_id}-desired-state"
     expected_camera_secret = f"{deployment_id}-camera-sources"
 
     compiler = app.get("plan_compiler", {})
     if (
-        compiler.get("desired_state_secret") != expected_desired_secret
+        compiler.get("desired_state_config_map") != expected_desired_config_map
         or compiler.get("desired_state_key") != "desired_state.json"
     ):
-        raise ValueError("bundle desired-state Secret contract is invalid")
+        raise ValueError("bundle desired-state ConfigMap contract is invalid")
 
     expected_cameras = app.get("cameras", [])
     desired_cameras = desired_state.get("cameras")
@@ -86,13 +109,13 @@ def build_camera_secret_list(
         expected_path = f"/run/secrets/apexfabric/{camera_id}.rtsp"
         if (
             camera.get("source") != f"file:{expected_path}"
-            or camera.get("solution_pack") != "traffic"
+            or camera.get("solution_pack") != solution_pack
             or not isinstance(camera.get("apps"), list)
             or not camera["apps"]
-            or any(value not in TRAFFIC_APPS for value in camera["apps"])
+            or any(value not in allowed_apps for value in camera["apps"])
         ):
             raise ValueError(
-                f"desired_state camera {camera_id} violates the Traffic contract"
+                f"desired_state camera {camera_id} violates the {solution_pack.title()} contract"
             )
         mount_source = mounts.get(expected_path, {}).get("source", {})
         if mount_source != {
@@ -120,20 +143,23 @@ def build_camera_secret_list(
         "app.kubernetes.io/managed-by": "apexfabric-control-plane",
         "apexfabric.com/deployment-id": deployment_id,
     }
+    revision = desired_state.get("revision")
     return {
         "apiVersion": "v1",
         "kind": "List",
         "items": [
             {
                 "apiVersion": "v1",
-                "kind": "Secret",
+                "kind": "ConfigMap",
                 "metadata": {
-                    "name": expected_desired_secret,
+                    "name": expected_desired_config_map,
                     "namespace": namespace,
                     "labels": labels,
+                    "annotations": {
+                        "apexfabric.com/desired-revision": str(revision),
+                    },
                 },
-                "type": "Opaque",
-                "stringData": {
+                "data": {
                     "desired_state.json": json.dumps(
                         desired_state, separators=(",", ":")
                     )

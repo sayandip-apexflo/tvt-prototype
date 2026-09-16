@@ -1,0 +1,38 @@
+contractVersion: apexfabric-ui/v1
+name: apexfabric-ui
+version: alerts-v1
+architectures: [amd64]
+image: apexfabric/ui:alerts-v1
+role: site-presentation-and-api-proxy
+listenPort: 18081
+health:
+  liveness: /healthz
+  readiness: /healthz
+  note: Checks the UI process; installer separately verifies backend and registry.
+pages:
+  management: /apexfabricdashboard
+  customer: /dashboard
+backend:
+  origin: http://127.0.0.1:8088
+  hostNetworkRequired: true
+  managementPrefix: /apexfabricdashboard/api
+  customerPrefix: /dashboard/api
+  customerMethods: [GET, POST]
+  customerWrites: [alert-rules, alerts/acknowledge]
+  customerResources: [customer, cameras/snapshot, telemetry/events, telemetry/snapshots, alert-rules, alerts]
+storage:
+  persistent: false
+  writablePaths: [/tmp, /var/cache/nginx]
+process:
+  uid: 101
+  gid: 101
+  readOnlyRootFilesystem: true
+  kubernetesCredentialsRequired: false
+features:
+  management: [camera-inventory, catalog-selection, deployment, start-stop, health, configuration, events, snapshots]
+  customer: [camera-assignments, deployment-status, refreshed-camera-snapshots, emitted-events, numeric-threshold-rules, alert-popups, alert-acknowledgement]
+limitations:
+  - No continuous browser video transport.
+  - Alert rules compare individual numeric event values; no time-window aggregation or external actions.
+  - No per-user authentication or authorization; routes are not a security boundary between users.
+  - Runtime image contracts and event/configuration schema hardening are separate work.

@@ -1,0 +1,17 @@
+[Unit]
+Description=ApexFabric local metrics browser ports
+After=k3s.service apexfabric-control.service
+Wants=k3s.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=__REPO_ROOT__
+Environment=PIPELINE_LOCAL_PORT=18080
+Environment=PROMETHEUS_LOCAL_PORT=19090
+ExecStart=__REPO_ROOT__/scripts/metrics-ports.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

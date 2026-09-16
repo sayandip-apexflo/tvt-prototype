@@ -26,12 +26,8 @@ PROFILE_CONFIG = Path(os.getenv("APEXFABRIC_HARDWARE_PROFILES", "/app/config/har
 
 def load_camera_capacities(path: Path = PROFILE_CONFIG) -> dict[str, int]:
     profiles = json.loads(path.read_text(encoding="utf-8"))
-    capacities = {
-        name: details["camera_streams"]
-        for name, details in profiles.items()
-        if "camera_streams" in details
-    }
-    if any(not isinstance(value, int) or value < 1 for value in capacities.values()):
+    capacities = {name: details["camera_streams"] for name, details in profiles.items()}
+    if not capacities or any(not isinstance(value, int) or value < 1 for value in capacities.values()):
         raise ValueError("hardware profile camera_streams values must be positive integers")
     return capacities
 

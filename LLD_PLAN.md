@@ -267,7 +267,7 @@ Root-owned `/etc/tvt/edge.yaml` contains only non-secret settings:
 
 ```yaml
 site_id: tvt-plant-01
-listen: 127.0.0.1:8088
+listen: 127.0.0.1:8089
 camera_interfaces: [enp2s0]
 camera_subnets: [192.168.20.0/24]
 rtsp_ports: [554, 8554]

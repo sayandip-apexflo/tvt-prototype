@@ -46,11 +46,21 @@ def report_labels(report: dict[str, Any], node: dict[str, Any], now: datetime | 
             reasons.append("IntelVaApiUnavailable")
         if not npu.get("present") or not npu.get("driver", {}).get("loaded"):
             reasons.append("IntelNpuDriverUnavailable")
-    metis = str(bool(capabilities.get("accelerators", {}).get("metis", {}).get("present"))).lower()
+    accelerators = capabilities.get("accelerators", {})
+    gpu = accelerators.get("gpu", {})
+    npu = accelerators.get("npu", {})
+    metis = str(bool(accelerators.get("metis", {}).get("present"))).lower()
+    gpu_label = "none"
+    if gpu.get("present"):
+        vendors = {str(device.get("vendor", "")).lower() for device in gpu.get("devices", [])}
+        gpu_label = next((vendor for vendor in ("intel", "nvidia", "amd", "apple") if vendor in vendors), "present")
+    npu_label = "intel" if npu.get("present") and npu.get("driver", {}).get("loaded") else "none"
     decoder = "vaapi" if capabilities.get("decoder", {}).get("va_api", {}).get("available") else "none"
     labels = {
         "apexfabric.com/node-class": "cv",
         "apexfabric.com/architecture": arch or "unknown",
+        "apexfabric.com/gpu": gpu_label,
+        "apexfabric.com/npu": npu_label,
         "apexfabric.com/metis": metis,
         "apexfabric.com/decoder": decoder,
         "apexfabric.com/reporter-version": str(spec.get("reporterVersion", "unknown")).replace("+", "_"),

@@ -47,10 +47,6 @@ class NodeReporterTests(unittest.TestCase):
         path = Path(__file__).resolve().parents[1] / "deploy/config/hardware-profiles.json"
         self.assertEqual(reporter.load_camera_capacities(path), {"intel-285h": 30, "jetson-orin": 25})
 
-    def test_generic_profile_does_not_invent_camera_capacity(self):
-        path = Path(__file__).resolve().parents[1] / "deploy/config/hardware-profiles.json"
-        self.assertNotIn("generic-amd64", reporter.load_camera_capacities(path))
-
     def test_capacity_matches_each_hardware_profile(self):
         for profile, expected in (("intel-285h", 30), ("jetson-orin", 25)):
             with self.subTest(profile=profile), patch.object(reporter, "NODE_NAME", "node-01"):
