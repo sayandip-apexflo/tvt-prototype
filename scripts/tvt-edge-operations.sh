@@ -459,10 +459,12 @@ python3 - "${OUTPUT}/manifest.json" "wheels/${application_wheel}" \
   "${RELEASE_VERSION}" "${SOURCE_COMMIT}" "${INPUT_LOCK}" <<'PY'
 import json, pathlib, sys
 path = pathlib.Path(sys.argv[1])
-lock = json.loads(pathlib.Path(sys.argv[4]).read_text(encoding="utf-8"))
+lock = json.loads(pathlib.Path(sys.argv[5]).read_text(encoding="utf-8"))
 manifest = json.loads(path.read_text(encoding="utf-8"))
 manifest["artifacts"]["application_wheel"] = sys.argv[2]
 manifest["release_version"] = sys.argv[3]
+if lock["source_commit"] != sys.argv[4]:
+    raise SystemExit("release input lock commit does not match the requested source commit")
 manifest["source_commit"] = lock["source_commit"]
 manifest["hardware_profile"] = "intel-285h"
 manifest["axelera_variant"] = "metis" if lock["edge_inventory"]["axelera_present"] else "intel-only"
