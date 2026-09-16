@@ -19,8 +19,6 @@ const responses: Record<string, unknown> = {
     config_revision: 1,
   },
   "/api/v1/cameras": [],
-  "/api/v1/discovery-runs?limit=50": [],
-  "/api/v1/discovery-scopes": [],
   "/api/v1/deployments": [],
   "/api/v1/solutions": [],
   "/api/v1/cluster": {
@@ -79,8 +77,8 @@ describe("edge management UI", () => {
       image: { registry: "127.0.0.1:5000", repository: "apexfabric/traffic-edge-runtime", tag: "intel-285h-2026.08.21-v4", digest: `sha256:${"1".repeat(64)}`, reference: `127.0.0.1:5000/apexfabric/traffic-edge-runtime@sha256:${"1".repeat(64)}` }, contract: {},
     }];
     responses["/api/v1/cameras"] = [{
-      camera_id: "camera-01", friendly_name: "Main entrance", state: "online", enabled: true,
-      credentials_configured: true, validation_failures: 0, identifiers: [], created_at: "2026-09-03T00:00:00Z", updated_at: "2026-09-03T00:00:00Z",
+      camera_id: "camera-01", friendly_name: "Main entrance", configured: true, enabled: true,
+      credentials_configured: true, identifiers: [], created_at: "2026-09-03T00:00:00Z", updated_at: "2026-09-03T00:00:00Z",
     }];
     render(<App />);
     await waitFor(() => expect(screen.getByText("Plant 01 · edge-01")).toBeInTheDocument());

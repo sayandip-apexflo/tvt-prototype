@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import ipaddress
 import json
 import re
 import uuid
@@ -12,6 +11,7 @@ from collections import Counter
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -41,16 +41,11 @@ from tvt_edge.db.models import (
     CameraIdentifier,
     CameraRole,
     CameraRoleAssignment,
-    CameraStatus,
     CameraStreamProfile,
-    CameraValidationAttempt,
     CredentialKeyVersion,
     DeploymentAssignmentSet,
     DeploymentSyncState,
     DeploymentSyncAttempt,
-    DiscoveryScope,
-    DiscoveryRun,
-    CameraObservation,
     KubernetesResourceRef,
     ManagementOperation,
     Site,
@@ -64,7 +59,24 @@ from tvt_edge.security import CredentialKeyring, redact, redact_text
 
 DNS_ID = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,61}[a-z0-9])?$")
 SAFE_HOST = re.compile(r"^[A-Za-z0-9_.:-]+$")
-SAFE_INTERFACE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+
+
+def _parse_rtsp_url(url: str) -> tuple[str, str, int, str]:
+    """Split an operator-supplied RTSP URL into scheme, host, port, path.
+
+    Credentials belong to the separate credentials endpoint, never the URL.
+    """
+
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"rtsp", "rtsps"}:
+        raise ValueError("rtsp_url must use the rtsp or rtsps scheme")
+    if parsed.username or parsed.password:
+        raise ValueError("rtsp_url must not contain credentials")
+    if not parsed.hostname:
+        raise ValueError("rtsp_url must include a host")
+    if parsed.query or parsed.fragment:
+        raise ValueError("rtsp_url must not contain a query or fragment")
+    return parsed.scheme, parsed.hostname, parsed.port or 554, parsed.path or "/"
 
 
 class ManagementService:
@@ -320,6 +332,7 @@ class ManagementService:
         manufacturer: str | None,
         model: str | None,
         identifiers: list[dict[str, str]],
+        rtsp_url: str | None = None,
         actor: str,
         request_id: str,
     ) -> Camera:
@@ -347,7 +360,22 @@ class ManagementService:
                         confidence=value.get("confidence", "asserted"),
                     )
                 )
-            session.add(CameraStatus(camera_id=camera.id))
+            if rtsp_url:
+                scheme, host, port, path = _parse_rtsp_url(rtsp_url)
+                self._upsert_stream_profile(
+                    session,
+                    camera,
+                    scheme=scheme,
+                    host=host,
+                    port=port,
+                    path=path,
+                    profile_token="primary",
+                    transport="tcp",
+                    codec=None,
+                    width=None,
+                    height=None,
+                    fps=None,
+                )
             self._audit(
                 session,
                 actor=actor,
@@ -416,17 +444,7 @@ class ManagementService:
     def get_camera(self, camera_key: str) -> dict[str, Any]:
         with self.sessions() as session:
             camera = self._camera(session, camera_key)
-            result = self._camera_view(session, camera)
-            observations = session.scalars(
-                select(CameraObservation)
-                .where(CameraObservation.camera_id == camera.id)
-                .order_by(CameraObservation.observed_at.desc())
-                .limit(20)
-            ).all()
-            result["observations"] = [
-                self._camera_observation_view(session, item) for item in observations
-            ]
-            return result
+            return self._camera_view(session, camera)
 
     @staticmethod
     def _camera(session: Session, camera_key: str) -> Camera:
@@ -439,7 +457,6 @@ class ManagementService:
 
     @staticmethod
     def _camera_view(session: Session, camera: Camera) -> dict[str, Any]:
-        status = session.get(CameraStatus, camera.id)
         profile = session.scalar(
             select(CameraStreamProfile).where(
                 CameraStreamProfile.camera_id == camera.id,
@@ -513,7 +530,7 @@ class ManagementService:
             "friendly_name": camera.friendly_name,
             "manufacturer": camera.manufacturer,
             "model": camera.model,
-            "state": camera.onboarding_state,
+            "configured": profile is not None,
             "enabled": camera.enabled,
             "credentials_configured": credential is not None,
             "selected_profile_id": str(profile.id) if profile else None,
@@ -542,20 +559,6 @@ class ManagementService:
                 for assignment, role in role_rows
             ],
             "assignments": assignments,
-            "validation_code": status.validation_code if status else None,
-            "validation_failures": status.consecutive_failures if status else 0,
-            "next_retry_at": status.next_retry_at.isoformat()
-            if status and status.next_retry_at
-            else None,
-            "last_observed_at": status.last_observed_at.isoformat()
-            if status and status.last_observed_at
-            else None,
-            "last_validated_at": status.last_validated_at.isoformat()
-            if status and status.last_validated_at
-            else None,
-            "last_media_at": status.last_media_at.isoformat()
-            if status and status.last_media_at
-            else None,
             "identifiers": [
                 {"kind": item.kind, "value": item.display_value or item.normalized_value}
                 for item in identifiers
@@ -564,105 +567,6 @@ class ManagementService:
             "updated_at": camera.updated_at.isoformat(),
         }
 
-    def list_discovery_scopes(self) -> list[dict[str, Any]]:
-        with self.sessions() as session:
-            scopes = session.scalars(
-                select(DiscoveryScope)
-                .order_by(DiscoveryScope.interface_name, DiscoveryScope.cidr)
-                .limit(100)
-            ).all()
-            return [self._discovery_scope_view(scope) for scope in scopes]
-
-    def create_discovery_scope(
-        self,
-        *,
-        interface_name: str,
-        cidr: str,
-        rtsp_ports: list[int],
-        enabled: bool,
-        actor: str,
-        request_id: str,
-    ) -> dict[str, Any]:
-        interface_name = interface_name.strip()
-        if not SAFE_INTERFACE.fullmatch(interface_name):
-            raise ValueError("interface_name contains unsupported characters")
-        try:
-            network = ipaddress.ip_network(cidr.strip(), strict=False)
-        except ValueError as error:
-            raise ValueError("cidr must be a valid network") from error
-        if network.version != 4:
-            raise ValueError("only IPv4 discovery scopes are supported")
-        ports = sorted(set(rtsp_ports))
-        if not ports or len(ports) > 16 or any(
-            isinstance(port, bool) or port < 1 or port > 65535 for port in ports
-        ):
-            raise ValueError("rtsp_ports must contain 1 to 16 valid ports")
-        canonical_cidr = str(network)
-        with self.sessions.begin() as session:
-            site = self.current_site(session)
-            existing = session.scalar(
-                select(DiscoveryScope).where(
-                    DiscoveryScope.site_id == site.id,
-                    DiscoveryScope.interface_name == interface_name,
-                    DiscoveryScope.cidr == canonical_cidr,
-                )
-            )
-            if existing is not None:
-                raise ValueError("discovery scope already exists")
-            scope = DiscoveryScope(
-                site_id=site.id,
-                interface_name=interface_name,
-                cidr=canonical_cidr,
-                rtsp_ports=ports,
-                enabled=enabled,
-            )
-            session.add(scope)
-            session.flush()
-            self._audit(
-                session,
-                actor=actor,
-                request_id=request_id,
-                action="discovery_scope.create",
-                target_type="discovery_scope",
-                target_id=str(scope.id),
-                details={
-                    "interface_name": interface_name,
-                    "cidr": canonical_cidr,
-                    "rtsp_ports": ports,
-                },
-            )
-            return self._discovery_scope_view(scope)
-
-    def delete_discovery_scope(
-        self, scope_id: uuid.UUID, actor: str, request_id: str
-    ) -> None:
-        with self.sessions.begin() as session:
-            scope = session.get(DiscoveryScope, scope_id)
-            if scope is None:
-                raise ValueError("unknown discovery scope")
-            self._audit(
-                session,
-                actor=actor,
-                request_id=request_id,
-                action="discovery_scope.delete",
-                target_type="discovery_scope",
-                target_id=str(scope.id),
-                details={
-                    "interface_name": scope.interface_name,
-                    "cidr": scope.cidr,
-                },
-            )
-            session.delete(scope)
-
-    @staticmethod
-    def _discovery_scope_view(scope: DiscoveryScope) -> dict[str, Any]:
-        return {
-            "scope_id": str(scope.id),
-            "interface_name": scope.interface_name,
-            "cidr": scope.cidr,
-            "rtsp_ports": scope.rtsp_ports,
-            "enabled": scope.enabled,
-        }
 
     def list_audit_events(self, limit: int = 200) -> list[dict[str, Any]]:
         if limit <= 0 or limit > 500:
@@ -688,6 +592,80 @@ class ManagementService:
                 for event in events
             ]
 
+    @staticmethod
+    def _upsert_stream_profile(
+        session: Session,
+        camera: Camera,
+        *,
+        scheme: str,
+        host: str,
+        port: int,
+        path: str,
+        profile_token: str,
+        transport: str,
+        codec: str | None,
+        width: int | None,
+        height: int | None,
+        fps: float | None,
+    ) -> CameraStreamProfile:
+        if scheme not in {"rtsp", "rtsps"} or not SAFE_HOST.fullmatch(host):
+            raise ValueError("stream endpoint is invalid")
+        if not 1 <= port <= 65535:
+            raise ValueError("stream port is invalid")
+        if not path.startswith("/") or any(char in path for char in "?#@"):
+            raise ValueError("stream path must be non-secret and contain no query/userinfo")
+        if transport not in {"tcp", "udp"}:
+            raise ValueError("transport must be tcp or udp")
+        session.query(CameraStreamProfile).filter_by(camera_id=camera.id).update(
+            {"selected": False}
+        )
+        endpoint = session.scalar(
+            select(CameraEndpoint).where(
+                CameraEndpoint.camera_id == camera.id,
+                CameraEndpoint.kind == "rtsp",
+                CameraEndpoint.host == host,
+                CameraEndpoint.port == port,
+            )
+        )
+        if endpoint is None:
+            endpoint = CameraEndpoint(
+                camera_id=camera.id,
+                kind="rtsp",
+                scheme=scheme,
+                host=host,
+                port=port,
+                path="/",
+            )
+            session.add(endpoint)
+            session.flush()
+        profile = session.scalar(
+            select(CameraStreamProfile).where(
+                CameraStreamProfile.camera_id == camera.id,
+                CameraStreamProfile.profile_token == profile_token,
+            )
+        )
+        values = {
+            "endpoint_id": endpoint.id,
+            "path": path,
+            "transport": transport,
+            "codec": codec,
+            "width": width,
+            "height": height,
+            "fps": fps,
+            "available": True,
+            "selected": True,
+            "observed_at": utc_now(),
+        }
+        if profile is None:
+            profile = CameraStreamProfile(
+                camera_id=camera.id, profile_token=profile_token, **values
+            )
+            session.add(profile)
+        else:
+            for key, value in values.items():
+                setattr(profile, key, value)
+        return profile
+
     def configure_stream(
         self,
         camera_key: str,
@@ -705,66 +683,21 @@ class ManagementService:
         actor: str,
         request_id: str,
     ) -> CameraStreamProfile:
-        if scheme not in {"rtsp", "rtsps"} or not SAFE_HOST.fullmatch(host):
-            raise ValueError("stream endpoint is invalid")
-        if not 1 <= port <= 65535:
-            raise ValueError("stream port is invalid")
-        if not path.startswith("/") or any(char in path for char in "?#@"):
-            raise ValueError("stream path must be non-secret and contain no query/userinfo")
-        if transport not in {"tcp", "udp"}:
-            raise ValueError("transport must be tcp or udp")
         with self.sessions.begin() as session:
             camera = self._camera(session, camera_key)
-            session.query(CameraStreamProfile).filter_by(camera_id=camera.id).update(
-                {"selected": False}
-            )
-            endpoint = session.scalar(
-                select(CameraEndpoint).where(
-                    CameraEndpoint.camera_id == camera.id,
-                    CameraEndpoint.kind == "rtsp",
-                    CameraEndpoint.host == host,
-                    CameraEndpoint.port == port,
-                )
-            )
-            if endpoint is None:
-                endpoint = CameraEndpoint(
-                    camera_id=camera.id,
-                    kind="rtsp",
-                    scheme=scheme,
-                    host=host,
-                    port=port,
-                    path="/",
-                )
-                session.add(endpoint)
-                session.flush()
-            profile = session.scalar(
-                select(CameraStreamProfile).where(
-                    CameraStreamProfile.camera_id == camera.id,
-                    CameraStreamProfile.profile_token == profile_token,
-                )
-            )
-            values = {
-                "endpoint_id": endpoint.id,
-                "path": path,
-                "transport": transport,
-                "codec": codec,
-                "width": width,
-                "height": height,
-                "fps": fps,
-                "available": True,
-                "selected": True,
-                "observed_at": utc_now(),
-            }
-            if profile is None:
-                profile = CameraStreamProfile(
-                    camera_id=camera.id, profile_token=profile_token, **values
-                )
-                session.add(profile)
-            else:
-                for key, value in values.items():
-                    setattr(profile, key, value)
-            camera.onboarding_state = (
-                "validating" if camera.onboarding_state != "online" else "online"
+            profile = self._upsert_stream_profile(
+                session,
+                camera,
+                scheme=scheme,
+                host=host,
+                port=port,
+                path=path,
+                profile_token=profile_token,
+                transport=transport,
+                codec=codec,
+                width=width,
+                height=height,
+                fps=fps,
             )
             camera.row_version += 1
             self._audit(
@@ -849,7 +782,6 @@ class ManagementService:
                 activated_at=now,
             )
             session.add(credential)
-            camera.onboarding_state = "validating"
             camera.row_version += 1
             session.flush()
             if old is not None:
@@ -892,33 +824,9 @@ class ManagementService:
                 )
                 if profile_id is None:
                     raise ValueError("camera requires a selected stream profile")
-                credential = self._active_credential(session, camera.id)
-                credential_filter = (
-                    CameraValidationAttempt.credential_version_id
-                    == credential.id
-                    if credential is not None
-                    else CameraValidationAttempt.credential_version_id.is_(None)
-                )
-                validated = session.scalar(
-                    select(CameraValidationAttempt.id).where(
-                        CameraValidationAttempt.camera_id == camera.id,
-                        CameraValidationAttempt.profile_id == profile_id,
-                        credential_filter,
-                        CameraValidationAttempt.status == "succeeded",
-                        CameraValidationAttempt.result_code == "OK",
-                    )
-                )
-                if validated is None:
-                    raise ValueError(
-                        "camera requires successful validation of its selected "
-                        "stream and current credentials"
-                    )
                 camera.enabled = True
-                if camera.onboarding_state == "disabled":
-                    camera.onboarding_state = "validating"
             else:
                 camera.enabled = False
-                camera.onboarding_state = "disabled"
             camera.row_version += 1
             self._audit(
                 session,
@@ -930,216 +838,27 @@ class ManagementService:
             )
             return camera
 
-    def queue_validation(
-        self, camera_key: str, trigger: str, actor: str, request_id: str
-    ) -> CameraValidationAttempt:
-        with self.sessions.begin() as session:
-            camera = self._camera(session, camera_key)
-            profile = session.scalar(
-                select(CameraStreamProfile).where(
-                    CameraStreamProfile.camera_id == camera.id,
-                    CameraStreamProfile.selected.is_(True),
-                )
-            )
-            if profile is None:
-                raise ValueError("camera requires a selected stream profile")
-            credential = self._active_credential(session, camera.id)
-            attempt = CameraValidationAttempt(
-                camera_id=camera.id,
-                profile_id=profile.id,
-                credential_version_id=credential.id if credential else None,
-                trigger=trigger,
-            )
-            session.add(attempt)
-            camera.onboarding_state = "validating"
-            self._audit(
-                session,
-                actor=actor,
-                request_id=request_id,
-                action="camera.validation.queue",
-                target_type="camera",
-                target_id=camera_key,
-            )
-            return attempt
-
-    def list_validation_attempts(
-        self, camera_key: str, limit: int = 20
-    ) -> list[dict[str, Any]]:
-        if limit <= 0 or limit > 100:
-            raise ValueError("limit must be between 1 and 100")
-        with self.sessions() as session:
-            camera = self._camera(session, camera_key)
-            attempts = session.scalars(
-                select(CameraValidationAttempt)
-                .where(CameraValidationAttempt.camera_id == camera.id)
-                .order_by(CameraValidationAttempt.created_at.desc())
-                .limit(limit)
-            ).all()
-            return [
-                self._validation_attempt_view(attempt, camera.camera_key)
-                for attempt in attempts
-            ]
-
-    @staticmethod
-    def _validation_attempt_view(
-        attempt: CameraValidationAttempt, camera_key: str,
-    ) -> dict[str, Any]:
-        return {
-            "attempt_id": str(attempt.id),
-            "camera_id": camera_key,
-            "profile_id": str(attempt.profile_id) if attempt.profile_id else None,
-            "credential_version_id": str(attempt.credential_version_id)
-            if attempt.credential_version_id
-            else None,
-            "trigger": attempt.trigger,
-            "status": attempt.status,
-            "stage": attempt.stage,
-            "result_code": attempt.result_code,
-            "safe_result": attempt.safe_result,
-            "started_at": attempt.started_at.isoformat() if attempt.started_at else None,
-            "finished_at": attempt.finished_at.isoformat() if attempt.finished_at else None,
-            "created_at": attempt.created_at.isoformat(),
-        }
-
-    def record_validation_result(
-        self,
-        attempt_id: uuid.UUID,
-        *,
-        result_code: str,
-        safe_result: dict[str, Any],
-        actor: str,
-        request_id: str,
-    ) -> CameraValidationAttempt:
-        with self.sessions.begin() as session:
-            attempt = session.get(CameraValidationAttempt, attempt_id)
-            if attempt is None:
-                raise ValueError("unknown validation attempt")
-            if attempt.status not in {"queued", "running"}:
-                raise ValueError("validation attempt is already complete")
-            success = result_code == "OK"
-            attempt.status = "succeeded" if success else "failed"
-            attempt.result_code = result_code
-            attempt.safe_result = redact(safe_result)
-            attempt.finished_at = utc_now()
-            camera = session.get(Camera, attempt.camera_id)
-            if camera is None:
-                raise ValueError("validation camera is missing")
-            camera.onboarding_state = "online" if success else "invalid"
-            status = session.get(CameraStatus, camera.id)
-            if status is None:
-                status = CameraStatus(camera_id=camera.id)
-                session.add(status)
-            status.validation_code = result_code
-            status.last_validated_at = attempt.finished_at
-            status.consecutive_failures = 0 if success else status.consecutive_failures + 1
-            self._audit(
-                session,
-                actor=actor,
-                request_id=request_id,
-                action="camera.validation.result",
-                target_type="camera",
-                target_id=camera.camera_key,
-                result=attempt.status,
-                details={"result_code": result_code},
-            )
-            return attempt
-
-    def list_discovery_runs(self, limit: int = 20) -> list[dict[str, Any]]:
-        if limit <= 0 or limit > 100:
-            raise ValueError("limit must be between 1 and 100")
-        with self.sessions() as session:
-            runs = session.scalars(
-                select(DiscoveryRun)
-                .order_by(DiscoveryRun.created_at.desc())
-                .limit(limit)
-            ).all()
-            return [self._discovery_run_view(run) for run in runs]
-
-    def get_discovery_run(
-        self, run_id: uuid.UUID, observation_limit: int = 100
-    ) -> dict[str, Any]:
-        if observation_limit <= 0 or observation_limit > 100:
-            raise ValueError("observation_limit must be between 1 and 100")
-        with self.sessions() as session:
-            run = session.get(DiscoveryRun, run_id)
-            if run is None:
-                raise ValueError("unknown discovery operation")
-            observations = session.scalars(
-                select(CameraObservation)
-                .where(CameraObservation.run_id == run.id)
-                .order_by(CameraObservation.observed_at.desc())
-                .limit(observation_limit + 1)
-            ).all()
-            result = self._discovery_run_view(run)
-            result["observations"] = [
-                self._camera_observation_view(session, item)
-                for item in observations[:observation_limit]
-            ]
-            result["observations_truncated"] = len(observations) > observation_limit
-            return result
-
-    @staticmethod
-    def _discovery_run_view(run: DiscoveryRun) -> dict[str, Any]:
-        return {
-            "operation_id": str(run.id),
-            "run_id": str(run.id),
-            "trigger": run.trigger,
-            "status": run.status,
-            "counters": run.counters,
-            "error_code": run.error_code,
-            "started_at": run.started_at.isoformat() if run.started_at else None,
-            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
-            "created_at": run.created_at.isoformat(),
-        }
-
-    @staticmethod
-    def _camera_observation_view(
-        session: Session, observation: CameraObservation
-    ) -> dict[str, Any]:
-        camera = (
-            session.get(Camera, observation.camera_id)
-            if observation.camera_id is not None
-            else None
-        )
-        return {
-            "observation_id": str(observation.id),
-            "camera_id": camera.camera_key if camera is not None else None,
-            "method": observation.method,
-            "address": observation.address,
-            "result_code": observation.result_code,
-            "metadata": redact(observation.metadata_json),
-            "observed_at": observation.observed_at.isoformat(),
-        }
-
     def management_status(self) -> dict[str, Any]:
-        """Aggregate durable camera-validation and synchronization state."""
+        """Aggregate durable camera-configuration and synchronization state."""
 
         with self.sessions() as session:
             cameras = session.scalars(
                 select(Camera).where(Camera.deleted_at.is_(None))
             ).all()
-            camera_states = Counter(camera.onboarding_state for camera in cameras)
             enabled = [camera for camera in cameras if camera.enabled]
-            enabled_ids = [camera.id for camera in enabled]
-            statuses = (
+            configured_ids = set(
                 session.scalars(
-                    select(CameraStatus).where(CameraStatus.camera_id.in_(enabled_ids))
+                    select(CameraStreamProfile.camera_id).where(
+                        CameraStreamProfile.selected.is_(True)
+                    )
                 ).all()
-                if enabled_ids
-                else []
             )
-            status_by_camera = {status.camera_id: status for status in statuses}
-            validation_ok = sum(
-                1
-                for camera in enabled
-                if camera.onboarding_state == "online"
-                and status_by_camera.get(camera.id) is not None
-                and status_by_camera[camera.id].validation_code == "OK"
-            )
-            validation_failing = len(enabled) - validation_ok
+            configured = sum(1 for camera in cameras if camera.id in configured_ids)
             if not cameras:
                 camera_health = "unconfigured"
-            elif validation_failing:
+            elif any(
+                camera.enabled and camera.id not in configured_ids for camera in cameras
+            ):
                 camera_health = "degraded"
             else:
                 camera_health = "healthy"
@@ -1174,9 +893,7 @@ class ManagementService:
                     "status": camera_health,
                     "total": len(cameras),
                     "enabled": len(enabled),
-                    "validated_online": validation_ok,
-                    "validation_failing": validation_failing,
-                    "by_state": dict(sorted(camera_states.items())),
+                    "configured": configured,
                 },
                 "synchronization": {
                     "status": sync_health,
@@ -1195,24 +912,6 @@ class ManagementService:
             "items": deployments,
             "items_truncated": summary["total"] > len(deployments),
         }
-
-    def queue_discovery(
-        self, trigger: str, actor: str, request_id: str
-    ) -> DiscoveryRun:
-        with self.sessions.begin() as session:
-            site = self.current_site(session)
-            run = DiscoveryRun(site_id=site.id, trigger=trigger)
-            session.add(run)
-            session.flush()
-            self._audit(
-                session,
-                actor=actor,
-                request_id=request_id,
-                action="discovery.queue",
-                target_type="discovery_run",
-                target_id=str(run.id),
-            )
-            return run
 
     def register_deployment(
         self,
@@ -1312,8 +1011,8 @@ class ManagementService:
         desired_cameras: list[dict[str, Any]] = []
         for position, item in enumerate(assignments):
             camera = self._camera(session, item["camera_id"])
-            if camera.site_id != site.id or not camera.enabled or camera.onboarding_state != "online":
-                raise ValueError(f"camera {camera.camera_key!r} is not enabled and online")
+            if camera.site_id != site.id or not camera.enabled:
+                raise ValueError(f"camera {camera.camera_key!r} is not enabled")
             profile = session.scalar(
                 select(CameraStreamProfile).where(
                     CameraStreamProfile.camera_id == camera.id,
@@ -1589,8 +1288,8 @@ class ManagementService:
             bundle_cameras: list[BundleCamera] = []
             for position, item in enumerate(assignments):
                 camera = self._camera(session, item["camera_id"])
-                if camera.site_id != site.id or not camera.enabled or camera.onboarding_state != "online":
-                    raise ValueError(f"camera {camera.camera_key!r} is not enabled and online")
+                if camera.site_id != site.id or not camera.enabled:
+                    raise ValueError(f"camera {camera.camera_key!r} is not enabled")
                 profile = session.scalar(
                     select(CameraStreamProfile).where(
                         CameraStreamProfile.camera_id == camera.id,
@@ -2005,7 +1704,6 @@ class ManagementService:
                 credential.state = "revoked"
                 credential.destroyed_at = now
             camera.enabled = False
-            camera.onboarding_state = "deleted"
             camera.deleted_at = now
             self._audit(
                 session,
@@ -2050,7 +1748,6 @@ class ManagementService:
                 credential.nonce = None
                 credential.state = "revoked"
                 credential.destroyed_at = now
-            camera.onboarding_state = "needs_credentials"
             camera.enabled = False
             self._audit(
                 session,
@@ -2066,26 +1763,12 @@ class ManagementService:
 
         now = now or utc_now()
         cutoffs = {
-            "observations": now - timedelta(days=30),
-            "validation": now - timedelta(days=90),
             "sync": now - timedelta(days=180),
             "audit": now - timedelta(days=365),
             "bundles": now - timedelta(days=365),
         }
         counts: dict[str, int] = {}
         with self.sessions.begin() as session:
-            counts["camera_observations"] = session.query(CameraObservation).filter(
-                CameraObservation.observed_at < cutoffs["observations"]
-            ).delete(synchronize_session=False)
-            counts["discovery_runs"] = session.query(DiscoveryRun).filter(
-                DiscoveryRun.created_at < cutoffs["observations"],
-                ~DiscoveryRun.id.in_(select(CameraObservation.run_id)),
-            ).delete(synchronize_session=False)
-            counts["validation_attempts"] = session.query(
-                CameraValidationAttempt
-            ).filter(
-                CameraValidationAttempt.created_at < cutoffs["validation"]
-            ).delete(synchronize_session=False)
             old_attempt_ids = select(DeploymentSyncAttempt.id).where(
                 DeploymentSyncAttempt.started_at < cutoffs["sync"]
             )

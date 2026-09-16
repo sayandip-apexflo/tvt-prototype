@@ -58,13 +58,7 @@ class CameraCreate(StrictModel):
     manufacturer: str | None = None
     model: str | None = None
     identifiers: list[IdentifierInput] = Field(default_factory=list)
-
-
-class DiscoveryScopeInput(StrictModel):
-    interface_name: str
-    cidr: str
-    rtsp_ports: list[int] = Field(default_factory=lambda: [554])
-    enabled: bool = True
+    rtsp_url: str | None = None
 
 
 class StreamInput(StrictModel):
@@ -96,11 +90,6 @@ class CameraRoleInput(StrictModel):
     display_name: str
     direction: str = "unknown"
     ordinal: int | None = None
-
-
-class ValidationResultInput(StrictModel):
-    result_code: str
-    safe_result: dict[str, Any] = Field(default_factory=dict)
 
 
 class DeploymentInput(StrictModel):
@@ -398,63 +387,19 @@ def create_app(
             manufacturer=body.manufacturer,
             model=body.model,
             identifiers=[item.model_dump() for item in body.identifiers],
+            rtsp_url=body.rtsp_url,
             actor=actor,
             request_id=request_id,
         )
-        return {"camera_id": camera.camera_key, "state": camera.onboarding_state}
+        return {"camera_id": camera.camera_key}
 
     @app.get("/api/v1/cameras")
     def list_cameras() -> list[dict[str, Any]]:
         return service.list_cameras()
 
-    @app.get("/api/v1/discovery-runs")
-    def list_discovery_runs(limit: int = 20) -> list[dict[str, Any]]:
-        if limit <= 0:
-            raise ValueError("limit must be positive")
-        return service.list_discovery_runs(limit)
-
-    @app.get("/api/v1/discovery-scopes")
-    def list_discovery_scopes() -> list[dict[str, Any]]:
-        return service.list_discovery_scopes()
-
-    @app.post("/api/v1/discovery-scopes", status_code=201)
-    def create_discovery_scope(
-        body: DiscoveryScopeInput,
-        request: Request,
-        x_tvt_actor: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        actor, request_id = identity(request, x_tvt_actor)
-        return service.create_discovery_scope(
-            **body.model_dump(), actor=actor, request_id=request_id
-        )
-
-    @app.delete("/api/v1/discovery-scopes/{scope_id}", status_code=204)
-    def delete_discovery_scope(
-        scope_id: uuid.UUID,
-        request: Request,
-        x_tvt_actor: str | None = Header(default=None),
-    ) -> Response:
-        actor, request_id = identity(request, x_tvt_actor)
-        service.delete_discovery_scope(scope_id, actor, request_id)
-        return Response(status_code=204)
-
-    @app.get("/api/v1/discovery-runs/{operation_id}")
-    def get_discovery_run(
-        operation_id: uuid.UUID, observation_limit: int = 100
-    ) -> dict[str, Any]:
-        return service.get_discovery_run(operation_id, observation_limit)
-
     @app.get("/api/v1/cameras/{camera_id}")
     def get_camera(camera_id: str) -> dict[str, Any]:
         return service.get_camera(camera_id)
-
-    @app.get("/api/v1/cameras/{camera_id}/validation-attempts")
-    def list_validation_attempts(
-        camera_id: str, limit: int = 20
-    ) -> list[dict[str, Any]]:
-        if limit <= 0:
-            raise ValueError("limit must be positive")
-        return service.list_validation_attempts(camera_id, limit)
 
     @app.put("/api/v1/cameras/{camera_id}/stream")
     def configure_stream(
@@ -527,35 +472,6 @@ def create_app(
         )
         return {"camera_id": camera.camera_key, "enabled": camera.enabled}
 
-    @app.post("/api/v1/cameras/{camera_id}/validate", status_code=202)
-    def queue_validation(
-        camera_id: str,
-        request: Request,
-        x_tvt_actor: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        actor, request_id = identity(request, x_tvt_actor)
-        attempt = service.queue_validation(
-            camera_id, "operator", actor, request_id
-        )
-        return {"validation_attempt_id": str(attempt.id), "status": attempt.status}
-
-    @app.post("/internal/v1/validation-attempts/{attempt_id}/result")
-    def validation_result(
-        attempt_id: uuid.UUID,
-        body: ValidationResultInput,
-        request: Request,
-        x_tvt_actor: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        actor, request_id = identity(request, x_tvt_actor)
-        attempt = service.record_validation_result(
-            attempt_id,
-            result_code=body.result_code,
-            safe_result=body.safe_result,
-            actor=actor,
-            request_id=request_id,
-        )
-        return {"validation_attempt_id": str(attempt.id), "status": attempt.status}
-
     @app.delete("/api/v1/cameras/{camera_id}", status_code=204)
     def delete_camera(
         camera_id: str,
@@ -565,15 +481,6 @@ def create_app(
         actor, request_id = identity(request, x_tvt_actor)
         service.delete_camera(camera_id, actor, request_id)
         return Response(status_code=204)
-
-    @app.post("/api/v1/discovery-runs", status_code=202)
-    def queue_discovery(
-        request: Request,
-        x_tvt_actor: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        actor, request_id = identity(request, x_tvt_actor)
-        run = service.queue_discovery("operator", actor, request_id)
-        return {"operation_id": str(run.id), "status": run.status}
 
     @app.post("/internal/v1/deployments/bundles", status_code=201)
     def register_trusted_bundle(

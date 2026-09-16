@@ -34,65 +34,16 @@ export interface Camera {
   friendly_name: string;
   manufacturer?: string | null;
   model?: string | null;
-  state: string;
+  configured: boolean;
   enabled: boolean;
   credentials_configured: boolean;
   selected_profile_id?: string | null;
   selected_profile?: CameraProfile | null;
   roles?: CameraRole[];
   assignments?: Array<{ deployment_id: string; apps: string[]; fps: number }>;
-  validation_code?: string | null;
-  validation_failures: number;
-  next_retry_at?: string | null;
-  last_observed_at?: string | null;
-  last_validated_at?: string | null;
-  last_media_at?: string | null;
   identifiers: CameraIdentifier[];
-  observations?: Observation[];
   created_at: string;
   updated_at: string;
-}
-
-export interface Observation {
-  observation_id: string;
-  camera_id?: string | null;
-  method: string;
-  address: string;
-  result_code: string;
-  metadata: Record<string, unknown>;
-  observed_at: string;
-}
-
-export interface ValidationAttempt {
-  attempt_id: string;
-  trigger: string;
-  status: string;
-  stage?: string | null;
-  result_code?: string | null;
-  safe_result: Record<string, unknown>;
-  started_at?: string | null;
-  finished_at?: string | null;
-  created_at: string;
-}
-
-export interface DiscoveryRun {
-  operation_id: string;
-  trigger: string;
-  status: string;
-  counters: Record<string, number>;
-  error_code?: string | null;
-  created_at: string;
-  started_at?: string | null;
-  finished_at?: string | null;
-  observations?: Observation[];
-}
-
-export interface DiscoveryScope {
-  scope_id: string;
-  interface_name: string;
-  cidr: string;
-  rtsp_ports: number[];
-  enabled: boolean;
 }
 
 export interface Deployment {

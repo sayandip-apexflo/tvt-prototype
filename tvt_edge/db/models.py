@@ -74,28 +74,9 @@ class SiteConfigRevision(Base, IdMixin):
     )
 
 
-class DiscoveryScope(Base, IdMixin, TimeMixin):
-    __tablename__ = "discovery_scopes"
-    __table_args__ = (UniqueConstraint("site_id", "interface_name", "cidr"),)
-    site_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("sites.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    interface_name: Mapped[str] = mapped_column(String(64), nullable=False)
-    cidr: Mapped[str] = mapped_column(String(64), nullable=False)
-    rtsp_ports: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-
-
 class Camera(Base, IdMixin, TimeMixin):
     __tablename__ = "cameras"
-    __table_args__ = (
-        UniqueConstraint("site_id", "camera_key"),
-        CheckConstraint(
-            "onboarding_state IN ('discovered','needs_credentials','validating',"
-            "'online','offline','invalid','disabled','deleted')",
-            name="camera_onboarding_state",
-        ),
-    )
+    __table_args__ = (UniqueConstraint("site_id", "camera_key"),)
     site_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("sites.id", ondelete="RESTRICT"), nullable=False, index=True
     )
@@ -106,9 +87,6 @@ class Camera(Base, IdMixin, TimeMixin):
     firmware_version: Mapped[str | None] = mapped_column(String(200))
     identity_state: Mapped[str] = mapped_column(
         String(32), default="provisional", nullable=False
-    )
-    onboarding_state: Mapped[str] = mapped_column(
-        String(32), default="discovered", nullable=False, index=True
     )
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     row_version: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
@@ -215,20 +193,6 @@ class CameraEndpoint(Base, IdMixin, TimeMixin):
     )
 
 
-class CameraOnvifConfig(Base):
-    __tablename__ = "camera_onvif_config"
-    camera_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("cameras.id", ondelete="RESTRICT"), primary_key=True
-    )
-    device_endpoint_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("camera_endpoints.id", ondelete="RESTRICT")
-    )
-    media_service_path: Mapped[str | None] = mapped_column(String(1024))
-    scopes: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-    capabilities: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-    last_queried_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
 class CameraStreamProfile(Base, IdMixin, TimeMixin):
     __tablename__ = "camera_stream_profiles"
     __table_args__ = (
@@ -307,75 +271,6 @@ class CameraCredentialVersion(Base, IdMixin):
     superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     purge_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     destroyed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-class DiscoveryRun(Base, IdMixin):
-    __tablename__ = "discovery_runs"
-    site_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("sites.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    trigger: Mapped[str] = mapped_column(String(32), nullable=False)
-    status: Mapped[str] = mapped_column(String(24), default="queued", nullable=False)
-    counters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-    error_code: Mapped[str | None] = mapped_column(String(64))
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
-    )
-
-
-class CameraObservation(Base, IdMixin):
-    __tablename__ = "camera_observations"
-    run_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("discovery_runs.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    camera_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("cameras.id", ondelete="RESTRICT"), index=True
-    )
-    method: Mapped[str] = mapped_column(String(32), nullable=False)
-    address: Mapped[str] = mapped_column(String(255), nullable=False)
-    result_code: Mapped[str] = mapped_column(String(64), nullable=False)
-    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-    observed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False, index=True
-    )
-
-
-class CameraValidationAttempt(Base, IdMixin):
-    __tablename__ = "camera_validation_attempts"
-    camera_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("cameras.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    profile_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("camera_stream_profiles.id", ondelete="RESTRICT")
-    )
-    credential_version_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("camera_credential_versions.id", ondelete="RESTRICT")
-    )
-    trigger: Mapped[str] = mapped_column(String(32), nullable=False)
-    status: Mapped[str] = mapped_column(String(24), default="queued", nullable=False)
-    stage: Mapped[str | None] = mapped_column(String(32))
-    result_code: Mapped[str | None] = mapped_column(String(64))
-    safe_result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
-    )
-
-
-class CameraStatus(Base):
-    __tablename__ = "camera_status"
-    camera_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("cameras.id", ondelete="RESTRICT"), primary_key=True
-    )
-    validation_code: Mapped[str | None] = mapped_column(String(64))
-    last_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_media_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class SolutionCatalogEntry(Base):

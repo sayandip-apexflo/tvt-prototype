@@ -7,14 +7,12 @@ import json
 import logging
 import subprocess
 import time
-import uuid
 from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
 
 from tvt_edge.api import create_app
-from tvt_edge.camera import DiscoveryWorker, ValidationWorker
 from tvt_edge.cluster import ClusterStatusReader, CrictlImagePuller, SyncWorker
 from tvt_edge.db.session import build_engine, build_session_factory
 from tvt_edge.legacy import import_sqlite_lifecycle
@@ -47,14 +45,6 @@ def parser() -> argparse.ArgumentParser:
         aliases=["camera-list"],
         help="list camera configuration and health",
     )
-    commands.add_parser("discover", help="queue a bounded camera discovery run")
-    discovery_runs = commands.add_parser(
-        "discovery-runs", help="list or inspect camera discovery operations"
-    )
-    discovery_runs.add_argument("operation_id", nargs="?", type=uuid.UUID)
-    discovery_runs.add_argument("--limit", type=int, default=20)
-    validate = commands.add_parser("validate", help="queue camera RTSP validation")
-    validate.add_argument("camera_id")
     api = commands.add_parser("api", help="serve the loopback management API")
     api.add_argument("--host")
     api.add_argument("--port", type=int)
@@ -151,40 +141,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in {"cameras", "camera-list"}:
         print(json.dumps(service.list_cameras(), sort_keys=True))
         return 0
-    if args.command == "discover":
-        run = service.queue_discovery(
-            "operator", "local-operator", f"cli:discovery:{uuid.uuid4()}"
-        )
-        print(
-            json.dumps(
-                {"operation_id": str(run.id), "status": run.status}, sort_keys=True
-            )
-        )
-        return 0
-    if args.command == "discovery-runs":
-        if args.operation_id is not None:
-            result = service.get_discovery_run(args.operation_id)
-        else:
-            result = service.list_discovery_runs(args.limit)
-        print(json.dumps(result, sort_keys=True))
-        return 0
-    if args.command == "validate":
-        attempt = service.queue_validation(
-            args.camera_id,
-            "operator",
-            "local-operator",
-            f"cli:validation:{uuid.uuid4()}",
-        )
-        print(
-            json.dumps(
-                {
-                    "validation_attempt_id": str(attempt.id),
-                    "status": attempt.status,
-                },
-                sort_keys=True,
-            )
-        )
-        return 0
     if args.command == "init-site":
         site = service.create_site(
             args.site_key,
@@ -260,19 +216,9 @@ def main(argv: list[str] | None = None) -> int:
         rollout_timeout=settings.rollout_timeout,
         image_puller=CrictlImagePuller(timeout=settings.rollout_timeout),
     )
-    discovery_worker = DiscoveryWorker(
-        sessions,
-        onvif_timeout=settings.discovery_onvif_timeout,
-        tcp_timeout=settings.discovery_tcp_timeout,
-    )
-    validation_worker = ValidationWorker(sessions, keyring)
     while True:
         had_error = False
-        for name, worker in (
-            ("discovery", discovery_worker),
-            ("validation", validation_worker),
-            ("sync", sync_worker),
-        ):
+        for name, worker in (("sync", sync_worker),):
             try:
                 result = worker.run_once()
                 if result is not None:

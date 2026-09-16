@@ -2,7 +2,6 @@ import asyncio
 import json
 import tempfile
 import unittest
-import uuid
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -195,16 +194,6 @@ class ManagementPlaneTests(unittest.TestCase):
             {"username": "camera-user", "password": password},
             "test",
             f"credential:{camera_id}:{password}",
-        )
-        attempt = self.service.queue_validation(
-            camera_id, "test", "test", f"validate:{camera_id}"
-        )
-        self.service.record_validation_result(
-            attempt.id,
-            result_code="OK",
-            safe_result={"codec": "h264", "keyframe": True},
-            actor="probe",
-            request_id=f"validation-result:{camera_id}",
         )
         self.service.set_camera_enabled(
             camera_id, True, "test", f"enable:{camera_id}"
@@ -505,7 +494,7 @@ class ManagementPlaneTests(unittest.TestCase):
             stored = session.get(DeploymentAssignmentSet, committed.id)
             self.assertEqual(stored.desired_revision, 1)
 
-    def test_camera_cannot_be_enabled_before_current_stream_is_validated(self):
+    def test_camera_cannot_be_enabled_without_a_configured_stream(self):
         self.service.create_site(
             "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"
         )
@@ -518,22 +507,7 @@ class ManagementPlaneTests(unittest.TestCase):
             actor="test",
             request_id="camera",
         )
-        self.service.configure_stream(
-            "camera-01",
-            scheme="rtsp",
-            host="192.0.2.10",
-            port=554,
-            path="/live/main",
-            profile_token="profile-main",
-            transport="tcp",
-            codec="h264",
-            width=1920,
-            height=1080,
-            fps=15,
-            actor="test",
-            request_id="stream",
-        )
-        with self.assertRaisesRegex(ValueError, "successful validation"):
+        with self.assertRaisesRegex(ValueError, "selected stream profile"):
             self.service.set_camera_enabled("camera-01", True, "test", "enable")
 
     def test_credential_rotation_queues_new_revision(self):
@@ -610,28 +584,22 @@ class ManagementPlaneTests(unittest.TestCase):
             ("/api/v1/cameras/{camera_id}/credentials", ("GET",)), routes
         )
 
-    def test_discovery_scopes_and_audit_history_are_managed(self):
+    def test_audit_history_is_managed(self):
         self.service.create_site(
             "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"
         )
-        scope = self.service.create_discovery_scope(
-            interface_name="enp1s0",
-            cidr="192.168.20.4/24",
-            rtsp_ports=[8554, 554, 554],
-            enabled=True,
+        self.service.create_camera(
+            camera_key="camera-01",
+            friendly_name="Main entrance",
+            manufacturer=None,
+            model=None,
+            identifiers=[],
             actor="operator",
-            request_id="scope-create",
+            request_id="camera-create",
         )
-        self.assertEqual(scope["cidr"], "192.168.20.0/24")
-        self.assertEqual(scope["rtsp_ports"], [554, 8554])
-        self.assertEqual(self.service.list_discovery_scopes(), [scope])
         self.assertEqual(
-            self.service.list_audit_events()[0]["action"], "discovery_scope.create"
+            self.service.list_audit_events()[0]["action"], "camera.create"
         )
-        self.service.delete_discovery_scope(
-            uuid.UUID(scope["scope_id"]), "operator", "scope-delete"
-        )
-        self.assertEqual(self.service.list_discovery_scopes(), [])
 
     def test_edge_api_serves_packaged_react_application(self):
         app = create_app(self.sessions, self.keyring)
@@ -679,7 +647,7 @@ class ManagementPlaneTests(unittest.TestCase):
                 transport=transport, base_url="http://127.0.0.1"
             ) as client:
                 return await client.post(
-                    "/api/v1/discovery-runs",
+                    "/api/v1/cameras",
                     content=b"x",
                     headers={"Content-Length": str(1024 * 1024 + 1)},
                 )
@@ -709,21 +677,18 @@ class ManagementPlaneTests(unittest.TestCase):
         health = self.route_handler(app, "/api/v1/health")()
         self.assertEqual(health["status"], "healthy")
         self.assertEqual(
-            health["components"]["camera_validation"]["validated_online"], 1
+            health["components"]["camera_validation"]["configured"], 1
         )
         self.assertEqual(health["components"]["k3s_api"]["status"], "healthy")
 
-    def test_discovery_progress_and_camera_detail_are_bounded_and_non_secret(self):
-        self.service.create_site(
-            "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"
-        )
-        run = self.service.queue_discovery("test", "test", "discovery")
+    def test_camera_detail_is_bounded_and_non_secret(self):
+        self.commit()
         app = create_app(self.sessions, self.keyring)
-        response = self.route_handler(
-            app, "/api/v1/discovery-runs/{operation_id}"
-        )(run.id)
-        self.assertEqual(response["operation_id"], str(run.id))
-        self.assertEqual(response["observations"], [])
+        response = self.route_handler(app, "/api/v1/cameras/{camera_id}")(
+            "camera-01"
+        )
+        self.assertEqual(response["camera_id"], "camera-01")
+        self.assertNotIn("password", json.dumps(response))
 
     def test_cluster_reader_degrades_without_exposing_command_error(self):
         class FailedKubectl:
@@ -738,9 +703,6 @@ class ManagementPlaneTests(unittest.TestCase):
         self.assertEqual(edge_parser().parse_args(["status"]).command, "status")
         self.assertEqual(edge_parser().parse_args(["cluster"]).command, "cluster")
         self.assertEqual(edge_parser().parse_args(["cameras"]).command, "cameras")
-        self.assertEqual(edge_parser().parse_args(["discover"]).command, "discover")
-        validation = edge_parser().parse_args(["validate", "camera-01"])
-        self.assertEqual(validation.camera_id, "camera-01")
 
     def test_retention_keeps_applied_credential_until_replacement_is_applied(self):
         self.commit()
