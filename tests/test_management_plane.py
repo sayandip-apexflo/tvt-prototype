@@ -14,6 +14,7 @@ from sqlalchemy.pool import StaticPool
 
 from tvt_edge.api import create_app
 from tvt_edge.cli import parser as edge_parser
+from tvt_edge.observability.metrics import DEFAULT_ROUTES
 from tvt_edge.cluster import ClusterStatusReader
 from tvt_edge.cluster.sync import CrictlImagePuller, SyncWorker
 from apexfabric.solution_management.renderer import render
@@ -163,6 +164,17 @@ class ManagementPlaneTests(unittest.TestCase):
             for route in app.routes
             if route.path == path and method in (route.methods or set())
         )
+
+    def test_every_registered_route_is_metrics_allowlisted(self):
+        # A route missing here makes every request to it crash the HTTP
+        # metrics middleware with MetricsContractError (500 Internal Server
+        # Error), since it raises on any route outside the bounded allowlist.
+        app = create_app(self.sessions, self.keyring)
+        registered = {
+            route.path for route in app.routes if hasattr(route, "path")
+        }
+        missing = registered - DEFAULT_ROUTES
+        self.assertFalse(missing, f"routes missing from DEFAULT_ROUTES: {missing}")
 
     def onboard(self, camera_id="camera-01", password="camera-secret"):
         self.service.create_camera(

@@ -931,6 +931,9 @@ build_control_image node-status-controller status_controller
 npm --prefix "${REPO_ROOT}/deploy/ui/web" ci
 npm --prefix "${REPO_ROOT}/deploy/ui/web" run build
 build_ui_image
+# npm ci leaves symlinks (e.g. node_modules/.bin/*) in the source tree; the
+# release bundle copies deploy/ verbatim and rejects any symlink it contains.
+rm -rf "${REPO_ROOT}/deploy/ui/web/node_modules"
 acquire_k3s
 acquire_traffic
 log_edge_profile

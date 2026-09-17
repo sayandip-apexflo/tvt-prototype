@@ -15,6 +15,19 @@ metadata:
     app.kubernetes.io/part-of: apexfabric
 automountServiceAccountToken: false
 ---
+# Kubernetes 1.24+ no longer auto-generates a Secret per ServiceAccount, so the
+# legacy-style token Secret needed by install-tvt-kubeconfig must be declared
+# explicitly; the built-in token controller still populates it when the type
+# and annotation below are present.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: node-agent-host-token
+  namespace: apexfabric
+  annotations:
+    kubernetes.io/service-account.name: node-agent
+type: kubernetes.io/service-account-token
+---
 # Namespace-scoped reconciliation permissions. Namespace creation remains an
 # installer/control-plane responsibility and does not require a broad ClusterRole.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -32,6 +45,14 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  # A Role (unlike a ClusterRole) may grant access to a cluster-scoped
+  # resource only when pinned by resourceNames to the Role's own namespace
+  # object; this is the documented pattern for letting a namespace's own
+  # workload label/patch that one namespace without a ClusterRole.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["apexfabric"]
+    verbs: ["get", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -46,3 +67,28 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: node-agent-reconciler
+---
+# Nodes are cluster-scoped and "list"/"watch" ignore resourceNames, so
+# read-only access for the read-only K3s node/workload view requires a
+# ClusterRole rather than the namespaced Role above.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: apexfabric-node-agent-nodes-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: apexfabric-node-agent-nodes-reader
+subjects:
+  - kind: ServiceAccount
+    name: node-agent
+    namespace: apexfabric
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: apexfabric-node-agent-nodes-reader

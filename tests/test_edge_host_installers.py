@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -282,13 +283,14 @@ class EdgeHostInstallerTests(unittest.TestCase):
             self.make_bundle(bundle)
             manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
             wheel = bundle / manifest["artifacts"]["application_wheel"]
+            release_version = manifest["release_version"]
             with zipfile.ZipFile(wheel, "w") as archive:
                 archive.writestr(
-                    "tvt_runtime-0.1.0.dist-info/METADATA",
-                    "Metadata-Version: 2.2\nName: tvt-runtime\nVersion: 0.1.0\n",
+                    f"tvt_runtime-{release_version}.dist-info/METADATA",
+                    f"Metadata-Version: 2.2\nName: tvt-runtime\nVersion: {release_version}\n",
                 )
                 archive.writestr(
-                    "tvt_edge/static/assets/app.js", '"TVT Runtime","0.1.0"'
+                    "tvt_edge/static/assets/app.js", f'"TVT Runtime","{release_version}"'
                 )
             locked_paths = [
                 "images/registry.tar", "images/node-reporter.tar",
@@ -425,14 +427,18 @@ tvt_run_stage {state} 0.1.0 sample worker
         self.assertIn('"schema_version": 2', installer)
 
     def test_application_version_is_canonical_and_consistent(self) -> None:
+        init_source = (ROOT / "tvt_edge/__init__.py").read_text(encoding="utf-8")
+        match = re.search(r'__version__\s*=\s*"([^"]+)"', init_source)
+        assert match is not None, "tvt_edge/__init__.py must define __version__"
+        canonical_version = match.group(1)
         result = subprocess.run(
-            ["python3", str(ROOT / "scripts/tvt-version.py"), "--check", "--expected", "0.1.0"],
+            ["python3", str(ROOT / "scripts/tvt-version.py"), "--check", "--expected", canonical_version],
             cwd=ROOT,
             capture_output=True,
             text=True,
             check=True,
         )
-        self.assertEqual(result.stdout.strip(), "0.1.0")
+        self.assertEqual(result.stdout.strip(), canonical_version)
         self.assertNotIn("0.2.0", (ROOT / "tvt_edge/__init__.py").read_text(encoding="utf-8"))
 
     def test_release_input_lock_detects_changed_artifact(self) -> None:
