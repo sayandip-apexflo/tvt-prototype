@@ -15,6 +15,18 @@
               "name": "restricted_area",
               "poly": [[0.10, 0.20], [0.90, 0.20], [0.90, 0.90], [0.10, 0.90]]
             }
+          ],
+          "face_recognition": [
+            {
+              "id": "main-entrance-1-face_entry",
+              "name": "main_entrance_1_face_entry",
+              "poly": [[0.05, 0.15], [0.45, 0.15], [0.45, 0.95], [0.05, 0.95]]
+            },
+            {
+              "id": "main-entrance-1-face_exit",
+              "name": "main_entrance_1_face_exit",
+              "poly": [[0.55, 0.15], [0.95, 0.15], [0.95, 0.95], [0.55, 0.95]]
+            }
           ]
         },
         "lines": {
@@ -28,6 +40,13 @@
           ]
         }
       }
+    },
+    {
+      "camera_id": "main-entrance-1-face-enroll",
+      "source": "file:/run/secrets/apexfabric/main-entrance-1-face-enroll.rtsp",
+      "solution_pack": "surveillance",
+      "fps": 8,
+      "apps": ["face_enrollment"]
     }
   ]
 }

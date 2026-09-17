@@ -55,7 +55,7 @@ contractExtensions:
   persistentSurveillanceState:
     required: true
     mountPath: /state
-    reason: durable face gallery, ReID rejoin state, history, and event evidence
+    reason: ReID rejoin state, history, and event evidence
 architectures: [amd64]
 hardwareProfile: intel-285h
 runtimeBase:
@@ -94,10 +94,13 @@ metricsFormat: application/json
 eventProtocol: sse
 eventSchema: analytics-event.schema.json
 # No faceGallery/faceEnrollment/faceGroup HTTP routes: biometric writes never cross the
-# unauthenticated pod-proxy surface. The gallery is delivered through desired state
-# (config.face_gallery, control-plane-owned) and enrollment capture is just another
-# event on the existing /events stream (application: face_enrollment, event_type:
-# enrollment_capture_event) — see analytics-event.schema.json.
+# unauthenticated pod-proxy surface. The edge holds no face gallery at all — it only
+# extracts and emits normalized embeddings as events on the existing /events stream
+# (application: face_recognition, event_type: face_detection_event; application:
+# face_enrollment, event_type: enrollment_capture_event). Matching those embeddings
+# against known people and auto-enrolling new ones both happen centrally, over the
+# control plane's own vector DB — see analytics-event.schema.json and
+# docs/contracts/tvt-identity-v1/CV-PIPELINE-HANDOFF.md.
 process:
   uid: 10001
   gid: 10001

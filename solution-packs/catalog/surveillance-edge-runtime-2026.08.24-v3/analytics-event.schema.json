@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://apexfabric.local/schemas/v1/surveillance-analytics-event.json",
   "title": "ApexFabric Surveillance Analytics Event V1",
-  "description": "First analytics-event contract for the surveillance-edge-runtime pack. Only face_recognition and face_enrollment are specified here; reid/intrusion/people_counting have no event contract yet and are intentionally left out of the event_type enum below until whoever implements them defines one. Never emit embeddings, raw base64 face crops, or other biometric templates in payload — subject.bbox plus a cropped snapshot_assets entry is the only evidence a client needs.",
+  "description": "Analytics-event contract for the surveillance-edge-runtime pack. Only face_recognition and face_enrollment are specified here; reid/intrusion/people_counting have no event contract yet and are intentionally left out of the event_type enum below until whoever implements them defines one. The edge never assigns a person_id and never carries a local face gallery — it only extracts and emits normalized embeddings; identity resolution (matching against previously seen people, and auto-enrolling new ones) is entirely a central-plane responsibility over the vector DB. Embeddings in this payload are for that internal central-plane store only: never copy them into metrics, logs, or alert payloads (see LLD_PLAN.md section 14 and section 17 on treating faces/embeddings as sensitive business data confined to this versioned, access-controlled event path). Raw base64 face/body crops and other non-embedding biometric templates must still never appear in payload — subject.bbox plus a cropped snapshot_assets entry is the only visual evidence a client needs.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "event_id", "timestamp", "camera_id", "solution_pack", "application", "event_type", "payload"],
@@ -13,11 +13,11 @@
     "camera_id": {"type": "string", "minLength": 1},
     "solution_pack": {"const": "surveillance"},
     "application": {"enum": ["face_recognition", "face_enrollment"]},
-    "event_type": {"enum": ["face_match_event", "face_unmatched_event", "enrollment_capture_event"]},
+    "event_type": {"enum": ["face_detection_event", "enrollment_capture_event"]},
     "payload": {
       "type": "object",
       "properties": {
-        "identity": {"$ref": "#/$defs/identity"},
+        "embeddings": {"$ref": "#/$defs/embeddings"},
         "subject": {"$ref": "#/$defs/detection"},
         "quality": {"$ref": "#/$defs/quality"},
         "location": {"$ref": "#/$defs/location"},
@@ -34,24 +34,15 @@
   },
   "allOf": [
     {
-      "if": {"properties": {"event_type": {"const": "face_match_event"}}},
+      "if": {"properties": {"event_type": {"const": "face_detection_event"}}},
       "then": {
         "properties": {
           "application": {"const": "face_recognition"},
           "payload": {
-            "required": ["identity", "subject", "snapshot_ref", "snapshot_url", "snapshot_content_type", "snapshot_assets"]
-          }
-        }
-      }
-    },
-    {
-      "if": {"properties": {"event_type": {"const": "face_unmatched_event"}}},
-      "then": {
-        "properties": {
-          "application": {"const": "face_recognition"},
-          "payload": {
-            "required": ["subject", "snapshot_ref", "snapshot_url", "snapshot_content_type", "snapshot_assets"],
-            "not": {"required": ["identity"]}
+            "required": ["embeddings", "subject", "snapshot_ref", "snapshot_url", "snapshot_content_type", "snapshot_assets"],
+            "properties": {
+              "embeddings": {"required": ["face", "body"]}
+            }
           }
         }
       }
@@ -62,21 +53,31 @@
         "properties": {
           "application": {"const": "face_enrollment"},
           "payload": {
-            "required": ["subject", "quality", "snapshot_ref", "snapshot_url", "snapshot_content_type", "snapshot_assets"],
-            "not": {"required": ["identity"]}
+            "required": ["embeddings", "subject", "quality", "snapshot_ref", "snapshot_url", "snapshot_content_type", "snapshot_assets"],
+            "properties": {
+              "embeddings": {
+                "required": ["face"],
+                "not": {"required": ["body"]}
+              }
+            }
           }
         }
       }
     }
   ],
   "$defs": {
-    "identity": {
+    "embedding_vector": {
+      "type": "array",
+      "minItems": 16,
+      "items": {"type": "number"},
+      "description": "L2-normalized (unit-norm) float embedding so the control plane can treat cosine similarity as a plain dot product. Dimension is fixed by the deployed model version and must be identical across every camera feeding the same deployment's vector DB; the control plane rejects (does not silently truncate or pad) any vector whose length does not match the dimension already established for this deployment."
+    },
+    "embeddings": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["person_id", "match_score"],
       "properties": {
-        "person_id": {"type": "string", "minLength": 1},
-        "match_score": {"type": "number", "minimum": 0, "maximum": 1}
+        "face": {"$ref": "#/$defs/embedding_vector", "description": "Face embedding for the cropped subject.bbox region."},
+        "body": {"$ref": "#/$defs/embedding_vector", "description": "Whole-person re-identification embedding for the same tracked subject, used by central-plane matching when the face is briefly occluded or angled away; only emitted by face_recognition, never by face_enrollment."}
       }
     },
     "bbox": {
@@ -104,7 +105,7 @@
     "quality": {
       "type": "object",
       "additionalProperties": true,
-      "description": "Kiosk-assist guidance only. The edge scores candidate frames so an operator can pick the best one in the control-plane UI; it never picks a frame or assigns a person_id itself.",
+      "description": "Capture-quality signal for the emitted embedding. The central plane may prefer a higher-quality observation when merging repeated sightings of the same resolved person, but it never blocks matching or auto-enrollment on these scores alone.",
       "properties": {
         "sharpness": {"type": "number", "minimum": 0, "maximum": 1},
         "pose_score": {"type": "number", "minimum": 0, "maximum": 1},

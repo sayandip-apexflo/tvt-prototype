@@ -6,9 +6,12 @@
     "camera_id": "gate-2-face",
     "solution_pack": "surveillance",
     "application": "face_recognition",
-    "event_type": "face_match_event",
+    "event_type": "face_detection_event",
     "payload": {
-      "identity": {"person_id": "emp-4471", "match_score": 0.89},
+      "embeddings": {
+        "face": [0.19291, -0.13876, 0.509351, 0.011845, -0.370591, 0.236907, 0.087994, -0.297826, 0.148913, 0.345208, -0.055842, 0.272443, -0.165835, 0.076149, 0.31644, -0.204756],
+        "body": [0.074899, 0.358052, -0.133356, 0.23383, -0.104127, 0.3818, -0.33613, 0.113261, 0.031056, -0.264885, 0.425643, -0.014614, 0.199121, -0.348918, 0.138836, 0.2795]
+      },
       "subject": {"type": "face", "confidence": 0.97, "bbox": {"x1": 512, "y1": 140, "x2": 601, "y2": 244}},
       "location": {"id": "gate-2-face_entry", "name": "gate_2_face_entry", "type": "zone"},
       "snapshot_ref": "snapshots/gate-2-face/face-8891.jpg",
@@ -24,6 +27,11 @@
           "ref": "snapshots/gate-2-face/face-8891.jpg",
           "url": "/snapshots/gate-2-face/face-8891.jpg",
           "content_type": "image/jpeg"
+        },
+        "body_crop": {
+          "ref": "snapshots/gate-2-face/body-8891.jpg",
+          "url": "/snapshots/gate-2-face/body-8891.jpg",
+          "content_type": "image/jpeg"
         }
       }
     }
@@ -32,25 +40,34 @@
     "schema_version": "1.0",
     "event_id": "a91e4d7b-8c3f-4e11-9a5b-0e2c7f4d6b83",
     "timestamp": "2026-09-16T09:14:47Z",
-    "camera_id": "restricted-3-face",
+    "camera_id": "back-exit-face",
     "solution_pack": "surveillance",
     "application": "face_recognition",
-    "event_type": "face_unmatched_event",
+    "event_type": "face_detection_event",
     "payload": {
+      "embeddings": {
+        "face": [0.362061, 0.03032, -0.256831, 0.162303, 0.456589, -0.11058, 0.014268, -0.354927, 0.237212, -0.083827, 0.321039, 0.046372, -0.376329, 0.176572, 0.114147, -0.272883],
+        "body": [-0.208363, 0.156272, 0.373937, -0.066974, 0.277197, -0.422307, 0.035347, 0.199061, -0.107902, 0.321846, -0.007442, 0.401843, -0.239989, 0.076276, -0.349752, 0.171155]
+      },
       "subject": {"type": "face", "confidence": 0.94, "bbox": {"x1": 300, "y1": 205, "x2": 378, "y2": 298}},
-      "location": {"id": "restricted-3-face_zone", "name": "restricted_area_3", "type": "zone"},
-      "snapshot_ref": "snapshots/restricted-3-face/face-2210.jpg",
-      "snapshot_url": "/snapshots/restricted-3-face/face-2210.jpg",
+      "location": {"id": "back-exit-face_exit", "name": "back_exit_face_exit", "type": "zone"},
+      "snapshot_ref": "snapshots/back-exit-face/face-2210.jpg",
+      "snapshot_url": "/snapshots/back-exit-face/face-2210.jpg",
       "snapshot_content_type": "image/jpeg",
       "snapshot_assets": {
         "event_frame": {
-          "ref": "snapshots/restricted-3-face/face-2210-frame.jpg",
-          "url": "/snapshots/restricted-3-face/face-2210-frame.jpg",
+          "ref": "snapshots/back-exit-face/face-2210-frame.jpg",
+          "url": "/snapshots/back-exit-face/face-2210-frame.jpg",
           "content_type": "image/jpeg"
         },
         "face_crop": {
-          "ref": "snapshots/restricted-3-face/face-2210.jpg",
-          "url": "/snapshots/restricted-3-face/face-2210.jpg",
+          "ref": "snapshots/back-exit-face/face-2210.jpg",
+          "url": "/snapshots/back-exit-face/face-2210.jpg",
+          "content_type": "image/jpeg"
+        },
+        "body_crop": {
+          "ref": "snapshots/back-exit-face/body-2210.jpg",
+          "url": "/snapshots/back-exit-face/body-2210.jpg",
           "content_type": "image/jpeg"
         }
       }
@@ -60,25 +77,28 @@
     "schema_version": "1.0",
     "event_id": "6b0d2f4e-1a9c-4b6d-8e2a-3f7c9d1b5a44",
     "timestamp": "2026-09-16T09:20:11Z",
-    "camera_id": "kiosk-1-enroll",
+    "camera_id": "main-entrance-1-face",
     "solution_pack": "surveillance",
     "application": "face_enrollment",
     "event_type": "enrollment_capture_event",
     "payload": {
+      "embeddings": {
+        "face": [0.145272, -0.254698, 0.432044, 0.026413, -0.181119, 0.345258, -0.098106, 0.275452, -0.379218, 0.071693, 0.205645, -0.315071, 0.115086, 0.366011, -0.043393, -0.222625]
+      },
       "subject": {"type": "face", "confidence": 0.99, "bbox": {"x1": 402, "y1": 118, "x2": 560, "y2": 300}},
       "quality": {"sharpness": 0.91, "pose_score": 0.88, "liveness_score": 0.95},
-      "snapshot_ref": "snapshots/kiosk-1-enroll/capture-0451.jpg",
-      "snapshot_url": "/snapshots/kiosk-1-enroll/capture-0451.jpg",
+      "snapshot_ref": "snapshots/main-entrance-1-face/capture-0451.jpg",
+      "snapshot_url": "/snapshots/main-entrance-1-face/capture-0451.jpg",
       "snapshot_content_type": "image/jpeg",
       "snapshot_assets": {
         "event_frame": {
-          "ref": "snapshots/kiosk-1-enroll/capture-0451-frame.jpg",
-          "url": "/snapshots/kiosk-1-enroll/capture-0451-frame.jpg",
+          "ref": "snapshots/main-entrance-1-face/capture-0451-frame.jpg",
+          "url": "/snapshots/main-entrance-1-face/capture-0451-frame.jpg",
           "content_type": "image/jpeg"
         },
         "face_crop": {
-          "ref": "snapshots/kiosk-1-enroll/capture-0451.jpg",
-          "url": "/snapshots/kiosk-1-enroll/capture-0451.jpg",
+          "ref": "snapshots/main-entrance-1-face/capture-0451.jpg",
+          "url": "/snapshots/main-entrance-1-face/capture-0451.jpg",
           "content_type": "image/jpeg"
         }
       }

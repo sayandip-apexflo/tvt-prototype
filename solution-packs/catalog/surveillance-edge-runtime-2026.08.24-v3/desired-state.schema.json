@@ -42,7 +42,7 @@
                     "type": "array",
                     "minItems": 1,
                     "items": {"$ref": "#/$defs/identity_zone"},
-                    "description": "Optional. Omit for whole-frame face matching. Configure when either (a) matches/misses should only count inside a restricted area, or (b) the zone pairs with another face_recognition zone at a gate to derive attendance direction. For (b), name each zone '<gate>_entry' / '<gate>_exit' — the control plane infers direction from which zone id a face_match/face_unmatched event's location.id names, there is no separate direction field."
+                    "description": "Optional. Omit for whole-frame face detection. Configure when either (a) embedding capture should only run inside a restricted area, or (b) the zone pairs with another face_recognition zone at a gate to derive attendance direction. For (b), name each zone '<gate>_entry' / '<gate>_exit' — the control plane infers direction from which zone id a face_detection_event's location.id names, there is no separate direction field. The edge never matches these embeddings against an identity itself; it only tags the event with which zone produced it."
                   }
                 }
               },
@@ -55,19 +55,6 @@
                     "minItems": 1,
                     "items": {"$ref": "#/$defs/countingLine"}
                   }
-                }
-              },
-              "face_gallery": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["source", "revision"],
-                "description": "Control-plane-owned identity gallery. The edge never extracts embeddings for enrollment or assigns a person_id itself; it only loads the bundle the control plane already built and pushes down through desired state.",
-                "properties": {
-                  "source": {
-                    "type": "string",
-                    "pattern": "^file:/run/secrets/apexfabric/face-gallery/[A-Za-z0-9._-]+\\.bundle$"
-                  },
-                  "revision": {"type": "integer", "minimum": 1}
                 }
               }
             }
