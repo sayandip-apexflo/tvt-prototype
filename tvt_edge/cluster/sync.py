@@ -77,21 +77,44 @@ class AppliedState:
     cameras: tuple[WorkCamera, ...]
 
 
-class CrictlImagePuller:
-    """Preflight immutable images through the K3s/containerd namespace."""
+class NodeImagePreflight:
+    """Verify an immutable catalog image digest is already cached on a node.
 
-    def __init__(self, command: tuple[str, ...] = ("k3s", "crictl"), timeout: int = 300):
-        self.command = command
-        self.timeout = timeout
+    ``tvt-camera-sync`` runs as the unprivileged ``tvt-edge`` service
+    account, which has no path to the k3s containerd socket or crictl config
+    (both are root-only, and granting that access — via sudo or a Linux
+    capability — would widen this hardened service's privileges just for a
+    preflight check). Every Node object's ``status.images`` already lists
+    what containerd has cached, populated by kubelet directly from the
+    runtime, and it's readable through the same RBAC-scoped kubeconfig this
+    worker already uses for every other kubectl call (``list nodes`` is
+    already granted; see ``install-tvt-kubeconfig``).
+
+    Catalog images are pulled into containerd by the root-run
+    ``tvt-pipeline-image-sync`` service ahead of cataloging, so by the time a
+    deployment can be committed the digest is normally already present. If
+    it somehow isn't, this fails fast here — matching the previous
+    preflight's fail-fast intent — rather than leaving a Pod stuck in
+    ImagePullBackOff with no clear signal. Kubelet's own
+    ``imagePullPolicy: IfNotPresent`` remains the actual pull mechanism once
+    the bundle is applied; this class only ever reads, never pulls.
+    """
+
+    def __init__(self, kubectl: Kubectl):
+        self.kubectl = kubectl
 
     def __call__(self, image_reference: str) -> None:
-        subprocess.run(
-            [*self.command, "pull", image_reference],
-            text=True,
-            capture_output=True,
-            check=True,
-            timeout=self.timeout,
-        )
+        result = self.kubectl.run("get", "nodes", "-o", "json")
+        nodes = json.loads(result.stdout)
+        for node in nodes.get("items", []):
+            names = {
+                name
+                for image in node.get("status", {}).get("images", [])
+                for name in image.get("names", [])
+            }
+            if image_reference in names:
+                return
+        raise RuntimeError(f"image {image_reference} is not yet cached on any node")
 
 
 def build_rtsp_url(camera: WorkCamera, credential: dict[str, Any] | None) -> str:

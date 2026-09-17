@@ -91,4 +91,24 @@ describe("edge management UI", () => {
     expect(screen.getByRole("button", { name: "Preview bundle" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Commit preview" })).toBeDisabled();
   });
+
+  it("pre-selects the catalog's declared default app when a camera is picked", async () => {
+    responses["/api/v1/solutions"] = [{
+      catalog_id: "traffic-edge-runtime:2026.08.21-v4", solution_name: "traffic-edge-runtime",
+      version: "2026.08.21-v4", hardware_profile: "intel-285h", architectures: ["amd64"], status: "available",
+      image: { registry: "127.0.0.1:5000", repository: "apexfabric/traffic-edge-runtime", tag: "intel-285h-2026.08.21-v4", digest: `sha256:${"1".repeat(64)}`, reference: `127.0.0.1:5000/apexfabric/traffic-edge-runtime@sha256:${"1".repeat(64)}` },
+      contract: { ui: { camera: { defaultApp: "anpr" } } },
+    }];
+    responses["/api/v1/cameras"] = [{
+      camera_id: "camera-01", friendly_name: "Main entrance", configured: true, enabled: true,
+      credentials_configured: true, identifiers: [], created_at: "2026-09-03T00:00:00Z", updated_at: "2026-09-03T00:00:00Z",
+    }];
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Plant 01 · edge-01")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Solutions/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Deploy solution/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Main entrance/i }));
+    expect(screen.getByRole("checkbox", { name: "Anpr" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Vehicle Counting" })).not.toBeChecked();
+  });
 });

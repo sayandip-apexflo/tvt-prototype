@@ -7,11 +7,14 @@ Use only the release-bundle entry points for a production host:
 ```bash
 sudo ./prepare-tvt-edge-host.sh --bundle /media/tvt/release --mode offline
 sudo reboot
-sudo ./prepare-tvt-edge-host.sh --bundle /media/tvt/release --mode offline
 sudo ./install-tvt-edge-host.sh \
   --bundle /media/tvt/release \
-  --site-config /media/tvt/site.yaml
+  --site-config /media/tvt/site.yaml \
+  --prepare-mode offline
 ```
+
+The application installer automatically runs the second preparation pass
+after the reboot; do not run `prepare-tvt-edge-host.sh` a second time.
 
 Online host package/driver preparation is available with `--mode online`.
 K3s still defaults to the reviewed bundled installer and binary; authorize its
@@ -109,6 +112,8 @@ sudo ./scripts/tvt-edge-operations.sh install-k3s-single-node \
 ```
 
 This performs the same installation without downloading either executable.
+
+### 5. Verify the installed image digests
 
 ```bash
 sudo k3s crictl images --digests --no-trunc

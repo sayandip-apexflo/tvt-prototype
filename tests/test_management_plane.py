@@ -4,7 +4,6 @@ import tempfile
 import unittest
 from datetime import timedelta
 from pathlib import Path
-from unittest.mock import patch
 
 import yaml
 import httpx
@@ -16,7 +15,7 @@ from tvt_edge.api import create_app
 from tvt_edge.cli import parser as edge_parser
 from tvt_edge.observability.metrics import DEFAULT_ROUTES
 from tvt_edge.cluster import ClusterStatusReader
-from tvt_edge.cluster.sync import CrictlImagePuller, SyncWorker
+from tvt_edge.cluster.sync import NodeImagePreflight, SyncWorker
 from apexfabric.solution_management.renderer import render
 from tvt_edge.db.models import (
     Base,
@@ -394,17 +393,34 @@ class ManagementPlaneTests(unittest.TestCase):
         self.assertEqual(pulls, [f"127.0.0.1:5000/apexfabric/traffic-edge-runtime@{CATALOG_DIGEST}"])
         self.assertTrue(client.calls)
 
-    def test_production_preflight_uses_k3s_crictl_pull(self):
+    def test_node_image_preflight_passes_when_digest_is_cached_on_a_node(self):
         reference = f"127.0.0.1:5000/apexfabric/traffic-edge-runtime@{CATALOG_DIGEST}"
-        with patch("tvt_edge.cluster.sync.subprocess.run") as run:
-            CrictlImagePuller(timeout=17)(reference)
-        run.assert_called_once_with(
-            ["k3s", "crictl", "pull", reference],
-            text=True,
-            capture_output=True,
-            check=True,
-            timeout=17,
-        )
+
+        class CachedImageKubectl:
+            def run(self, *arguments, input_text=None, check=True):
+                assert arguments == ("get", "nodes", "-o", "json")
+
+                class Result:
+                    stdout = json.dumps(
+                        {"items": [{"status": {"images": [{"names": [reference]}]}}]}
+                    )
+
+                return Result()
+
+        NodeImagePreflight(CachedImageKubectl())(reference)
+
+    def test_node_image_preflight_fails_fast_when_digest_is_not_cached(self):
+        reference = f"127.0.0.1:5000/apexfabric/traffic-edge-runtime@{CATALOG_DIGEST}"
+
+        class UncachedImageKubectl:
+            def run(self, *arguments, input_text=None, check=True):
+                class Result:
+                    stdout = json.dumps({"items": [{"status": {"images": []}}]})
+
+                return Result()
+
+        with self.assertRaises(RuntimeError):
+            NodeImagePreflight(UncachedImageKubectl())(reference)
 
     def test_catalog_pull_failure_preserves_applied_state_without_kubernetes_writes(self):
         _service, _request, _preview, _committed = self.prepare_catalog_deployment()

@@ -13,7 +13,7 @@ from alembic import command
 from alembic.config import Config
 
 from tvt_edge.api import create_app
-from tvt_edge.cluster import ClusterStatusReader, CrictlImagePuller, SyncWorker
+from tvt_edge.cluster import ClusterStatusReader, NodeImagePreflight, SyncWorker
 from tvt_edge.db.session import build_engine, build_session_factory
 from tvt_edge.legacy import import_sqlite_lifecycle
 from tvt_edge.observability import configure_json_logging
@@ -208,13 +208,14 @@ def main(argv: list[str] | None = None) -> int:
             limit_concurrency=64,
         )
         return 0
+    sync_kubectl = kubectl_client(settings.kubeconfig)
     sync_worker = SyncWorker(
         sessions,
         keyring,
-        kubectl_client(settings.kubeconfig),
+        sync_kubectl,
         worker_id=settings.sync_worker_id,
         rollout_timeout=settings.rollout_timeout,
-        image_puller=CrictlImagePuller(timeout=settings.rollout_timeout),
+        image_puller=NodeImagePreflight(sync_kubectl),
     )
     while True:
         had_error = False
