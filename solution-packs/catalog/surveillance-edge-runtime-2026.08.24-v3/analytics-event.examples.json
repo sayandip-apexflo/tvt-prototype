@@ -1,0 +1,87 @@
+[
+  {
+    "schema_version": "1.0",
+    "event_id": "f3a6c1e2-2b39-4a34-9b7a-6c1d9a5e2f10",
+    "timestamp": "2026-09-16T09:12:03Z",
+    "camera_id": "gate-2-face",
+    "solution_pack": "surveillance",
+    "application": "face_recognition",
+    "event_type": "face_match_event",
+    "payload": {
+      "identity": {"person_id": "emp-4471", "match_score": 0.89},
+      "subject": {"type": "face", "confidence": 0.97, "bbox": {"x1": 512, "y1": 140, "x2": 601, "y2": 244}},
+      "location": {"id": "gate-2-face_entry", "name": "gate_2_face_entry", "type": "zone"},
+      "snapshot_ref": "snapshots/gate-2-face/face-8891.jpg",
+      "snapshot_url": "/snapshots/gate-2-face/face-8891.jpg",
+      "snapshot_content_type": "image/jpeg",
+      "snapshot_assets": {
+        "event_frame": {
+          "ref": "snapshots/gate-2-face/face-8891-frame.jpg",
+          "url": "/snapshots/gate-2-face/face-8891-frame.jpg",
+          "content_type": "image/jpeg"
+        },
+        "face_crop": {
+          "ref": "snapshots/gate-2-face/face-8891.jpg",
+          "url": "/snapshots/gate-2-face/face-8891.jpg",
+          "content_type": "image/jpeg"
+        }
+      }
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "event_id": "a91e4d7b-8c3f-4e11-9a5b-0e2c7f4d6b83",
+    "timestamp": "2026-09-16T09:14:47Z",
+    "camera_id": "restricted-3-face",
+    "solution_pack": "surveillance",
+    "application": "face_recognition",
+    "event_type": "face_unmatched_event",
+    "payload": {
+      "subject": {"type": "face", "confidence": 0.94, "bbox": {"x1": 300, "y1": 205, "x2": 378, "y2": 298}},
+      "location": {"id": "restricted-3-face_zone", "name": "restricted_area_3", "type": "zone"},
+      "snapshot_ref": "snapshots/restricted-3-face/face-2210.jpg",
+      "snapshot_url": "/snapshots/restricted-3-face/face-2210.jpg",
+      "snapshot_content_type": "image/jpeg",
+      "snapshot_assets": {
+        "event_frame": {
+          "ref": "snapshots/restricted-3-face/face-2210-frame.jpg",
+          "url": "/snapshots/restricted-3-face/face-2210-frame.jpg",
+          "content_type": "image/jpeg"
+        },
+        "face_crop": {
+          "ref": "snapshots/restricted-3-face/face-2210.jpg",
+          "url": "/snapshots/restricted-3-face/face-2210.jpg",
+          "content_type": "image/jpeg"
+        }
+      }
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "event_id": "6b0d2f4e-1a9c-4b6d-8e2a-3f7c9d1b5a44",
+    "timestamp": "2026-09-16T09:20:11Z",
+    "camera_id": "kiosk-1-enroll",
+    "solution_pack": "surveillance",
+    "application": "face_enrollment",
+    "event_type": "enrollment_capture_event",
+    "payload": {
+      "subject": {"type": "face", "confidence": 0.99, "bbox": {"x1": 402, "y1": 118, "x2": 560, "y2": 300}},
+      "quality": {"sharpness": 0.91, "pose_score": 0.88, "liveness_score": 0.95},
+      "snapshot_ref": "snapshots/kiosk-1-enroll/capture-0451.jpg",
+      "snapshot_url": "/snapshots/kiosk-1-enroll/capture-0451.jpg",
+      "snapshot_content_type": "image/jpeg",
+      "snapshot_assets": {
+        "event_frame": {
+          "ref": "snapshots/kiosk-1-enroll/capture-0451-frame.jpg",
+          "url": "/snapshots/kiosk-1-enroll/capture-0451-frame.jpg",
+          "content_type": "image/jpeg"
+        },
+        "face_crop": {
+          "ref": "snapshots/kiosk-1-enroll/capture-0451.jpg",
+          "url": "/snapshots/kiosk-1-enroll/capture-0451.jpg",
+          "content_type": "image/jpeg"
+        }
+      }
+    }
+  }
+]

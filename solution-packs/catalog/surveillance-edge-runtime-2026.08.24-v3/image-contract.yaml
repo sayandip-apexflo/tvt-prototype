@@ -14,6 +14,15 @@ ui:
       face_recognition:
         label: Face recognition
         symbol: FR
+        geometry:
+          kind: zone
+          label: Face match/attendance zone
+          configPath: zones.face_recognition
+          required: false
+          nameTemplate: "{app}_zone"
+      face_enrollment:
+        label: Face enrollment kiosk
+        symbol: FE
       intrusion:
         label: Intrusion detection
         symbol: IN
@@ -81,11 +90,14 @@ endpoints:
   metrics: /metrics
   events: /events
   snapshots: /snapshots/<state-relative-path>
-  faceGallery: /api/face_gallery
-  faceEnrollment: /api/enrollment
-  faceGroup: /api/face_group
 metricsFormat: application/json
 eventProtocol: sse
+eventSchema: analytics-event.schema.json
+# No faceGallery/faceEnrollment/faceGroup HTTP routes: biometric writes never cross the
+# unauthenticated pod-proxy surface. The gallery is delivered through desired state
+# (config.face_gallery, control-plane-owned) and enrollment capture is just another
+# event on the existing /events stream (application: face_enrollment, event_type:
+# enrollment_capture_event) — see analytics-event.schema.json.
 process:
   uid: 10001
   gid: 10001

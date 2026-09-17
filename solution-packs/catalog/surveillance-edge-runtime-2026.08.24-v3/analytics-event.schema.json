@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apexfabric.local/schemas/v1/surveillance-analytics-event.json",
+  "title": "ApexFabric Surveillance Analytics Event V1",
+  "description": "First analytics-event contract for the surveillance-edge-runtime pack. Only face_recognition and face_enrollment are specified here; reid/intrusion/people_counting have no event contract yet and are intentionally left out of the event_type enum below until whoever implements them defines one. Never emit embeddings, raw base64 face crops, or other biometric templates in payload — subject.bbox plus a cropped snapshot_assets entry is the only evidence a client needs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_id", "timestamp", "camera_id", "solution_pack", "application", "event_type", "payload"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "event_id": {"type": "string", "minLength": 1},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "camera_id": {"type": "string", "minLength": 1},
+    "solution_pack": {"const": "surveillance"},
+    "application": {"enum": ["face_recognition", "face_enrollment"]},
+    "event_type": {"enum": ["face_match_event", "face_unmatched_event", "enrollment_capture_event"]},
+    "payload": {
+      "type": "object",
+      "properties": {
+        "identity": {"$ref": "#/$defs/identity"},
+        "subject": {"$ref": "#/$defs/detection"},
+        "quality": {"$ref": "#/$defs/quality"},
+        "location": {"$ref": "#/$defs/location"},
+        "snapshot_ref": {"type": "string", "minLength": 1},
+        "snapshot_url": {"type": "string", "pattern": "^/snapshots/"},
+        "snapshot_content_type": {"type": "string", "minLength": 1},
+        "snapshot_assets": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/snapshot_asset"}
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"event_type": {"const": "face_match_event"}}},
+      "then": {
+        "properties": {
+          "application": {"const": "face_recognition"},
+          "payload": {
+            "required": ["identity", "subject", "snapshot_ref", "snapshot_url", "snapshot_content_type", "snapshot_assets"]
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "face_unmatched_event"}}},
+      "then": {
+        "properties": {
+          "application": {"const": "face_recognition"},
+          "payload": {
+            "required": ["subject", "snapshot_ref", "snapshot_url", "snapshot_content_type", "snapshot_assets"],
+            "not": {"required": ["identity"]}
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "enrollment_capture_event"}}},
+      "then": {
+        "properties": {
+          "application": {"const": "face_enrollment"},
+          "payload": {
+            "required": ["subject", "quality", "snapshot_ref", "snapshot_url", "snapshot_content_type", "snapshot_assets"],
+            "not": {"required": ["identity"]}
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["person_id", "match_score"],
+      "properties": {
+        "person_id": {"type": "string", "minLength": 1},
+        "match_score": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "bbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x1", "y1", "x2", "y2"],
+      "properties": {
+        "x1": {"type": "number", "minimum": 0},
+        "y1": {"type": "number", "minimum": 0},
+        "x2": {"type": "number", "exclusiveMinimum": 0},
+        "y2": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "detection": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "bbox"],
+      "properties": {
+        "type": {"const": "face"},
+        "bbox": {"$ref": "#/$defs/bbox"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "track_id": {}
+      }
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Kiosk-assist guidance only. The edge scores candidate frames so an operator can pick the best one in the control-plane UI; it never picks a frame or assigns a person_id itself.",
+      "properties": {
+        "sharpness": {"type": "number", "minimum": 0, "maximum": 1},
+        "pose_score": {"type": "number", "minimum": 0, "maximum": 1},
+        "liveness_score": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "name": {"type": "string"},
+        "type": {"const": "zone"}
+      }
+    },
+    "snapshot_asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "url", "content_type"],
+      "properties": {
+        "ref": {"type": "string", "minLength": 1},
+        "url": {"type": "string", "pattern": "^/snapshots/"},
+        "content_type": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
