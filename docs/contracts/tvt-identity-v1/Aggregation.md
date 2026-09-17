@@ -65,9 +65,12 @@ that assigns a `person_id`; the edge never does (`CV-PIPELINE-HANDOFF.md`).
 
 ### Storage
 
-Embedded vector DB (sqlite-vec) colocated with the control plane's existing
-per-concern sqlite files (`telemetry.sqlite3`, `catalog.sqlite3`,
-`device-registry.sqlite3`), as a new `identity.sqlite3`:
+**Implementation note (2026-09-17, post-implementation): this section
+originally specified a separate `identity.sqlite3` file. It is implemented
+in the same `telemetry.sqlite3` file as `alerts.py`'s tables instead — see
+"Concurrency" below for why that isn't just a filing preference.** Embedded
+vector DB (sqlite-vec), two `vec0` tables rather than one shared table plus
+a `kind` column (avoids filtering a mixed-kind table inside a KNN query):
 
 ```sql
 CREATE TABLE persons (
@@ -80,26 +83,37 @@ CREATE TABLE persons (
   enrollment_source_event_id TEXT NOT NULL
 );
 
--- sqlite-vec virtual table; rows are addressed by rowid, so a companion
--- table carries the metadata a plain vec0 table cannot.
-CREATE VIRTUAL TABLE person_embeddings USING vec0(embedding float[EMBED_DIM]);
-
-CREATE TABLE person_embedding_meta (
-  rowid INTEGER PRIMARY KEY,  -- same rowid as the matching person_embeddings row
-  person_id TEXT NOT NULL REFERENCES persons(person_id),
-  embedding_kind TEXT NOT NULL CHECK(embedding_kind IN ('face', 'body')),
-  source_event_id TEXT NOT NULL,
-  captured_at REAL NOT NULL
+-- one vec0 table + one rowid-keyed meta table per embedding kind
+CREATE VIRTUAL TABLE person_face_embeddings USING vec0(embedding float[FACE_DIM] distance_metric=cosine);
+CREATE TABLE person_face_embedding_meta (
+  rowid INTEGER PRIMARY KEY, person_id TEXT NOT NULL REFERENCES persons(person_id),
+  source_event_id TEXT NOT NULL, captured_at REAL NOT NULL
 );
-CREATE INDEX person_embedding_meta_person ON person_embedding_meta(person_id, embedding_kind);
+CREATE VIRTUAL TABLE person_body_embeddings USING vec0(embedding float[BODY_DIM] distance_metric=cosine);
+CREATE TABLE person_body_embedding_meta (
+  rowid INTEGER PRIMARY KEY, person_id TEXT NOT NULL REFERENCES persons(person_id),
+  source_event_id TEXT NOT NULL, captured_at REAL NOT NULL
+);
 ```
 
-`EMBED_DIM` is fixed per deployment by the model actually baked into the
-running `surveillance-edge-runtime` image (see `CV-PIPELINE-HANDOFF.md`'s
-"Embeddings" section) and set once when `identity.sqlite3` is created. A
-vector arriving with a different length is a hard rejection at ingest, not a
-silent pad/truncate — logged with camera ID and event ID, never with the
-embedding itself.
+`FACE_DIM`/`BODY_DIM` are fixed per deployment by the model actually baked
+into the running `surveillance-edge-runtime` image (see
+`CV-PIPELINE-HANDOFF.md`'s "Embeddings" section), read from
+`APEXFABRIC_FACE_EMBEDDING_DIM`/`APEXFABRIC_BODY_EMBEDDING_DIM`/
+`APEXFABRIC_FACE_MATCH_THRESHOLD`. Identity resolution is **opt-in**: a
+deployment with no `face_recognition`/`face_enrollment` cameras (e.g.
+traffic-only) has no reason to set these and is not forced to — leaving all
+three unset disables the feature entirely (no vector tables, no-op
+resolution). Setting some but not all of them is treated as a
+misconfiguration and rejected at startup, not silently guessed at. A vector
+arriving with the wrong length is a hard rejection at ingest, not a silent
+pad/truncate — logged with camera ID and event ID, never with the embedding
+itself.
+
+`distance_metric=cosine` is a `vec0` column option; the `MATCH ... ORDER BY
+distance` query it enables returns cosine *distance*
+(`1 - cosine_similarity`), not similarity directly — convert before
+comparing against the configured threshold.
 
 Storage is **append-only**: every accepted sighting adds a new reference
 vector for its resolved person rather than overwriting a single "canonical"
@@ -120,50 +134,53 @@ different people is far less discriminative than face similarity, and wiring
 it into the match step without addressing that would silently merge distinct
 people who happen to be dressed alike.
 
-`resolve_identity(connection, event_id, camera_id, embeddings, received_at)`:
+`resolve_identity(connection, event_id, deployment_id, payload, policy, received_at)`:
 
 1. Only act on `event_type in ("face_detection_event", "enrollment_capture_event")`.
 2. Reject outright (log camera ID + event ID, never the vector) if
-   `len(embeddings.face) != EMBED_DIM` or the vector's L2 norm is not ~1
-   within tolerance — a non-normalized vector corrupts every similarity score
-   computed against it, including other people's already-correct entries.
-3. Run a cosine-similarity nearest-neighbor query (`person_embeddings MATCH
-   embeddings.face` filtered to `embedding_kind = 'face'` via the meta table,
-   ordered by distance) and take the best match.
-4. If the best match's similarity is at or above the configured threshold
-   (a control-plane setting, tuned per deployed model — not hardcoded in this
-   contract): reuse that `person_id`. Insert this sighting's `face` vector
-   (and `body` vector, if present) into `person_embeddings`/
-   `person_embedding_meta` under that `person_id`; update `persons.last_seen`.
-5. Otherwise, this is the race-prone path — **auto-enrollment must happen
-   inside one `BEGIN IMMEDIATE` transaction**, not just the final insert:
-   1. Re-run the exact same nearest-neighbor query from step 3 now that the
-      write lock is held. Another writer may have committed a matching
-      vector for this same physical person (seen at a different gate a
-      moment earlier) between step 3's read and this transaction acquiring
-      the lock.
-   2. If that re-check now clears the threshold, treat it as a match (step
-      4's handling) — do **not** create a new person.
-   3. Only if it still doesn't clear the threshold: `INSERT INTO persons`
-      with a freshly generated `person_id`, `status = 'auto_enrolled'`,
-      `display_name = NULL`; insert the `face` (and `body`, if present)
-      vector under it.
-   4. Commit. A second concurrent auto-enrollment attempt for the same
-      not-yet-enrolled person blocks on the write lock during this whole
-      sequence (sqlite is single-writer), then re-runs its own step-3-style
-      search after this commits and finds the just-inserted vector — landing
-      in step 4 (match), not step 5.3 (new person). This is the mechanism
-      that prevents one human from getting two `person_id`s from two
-      near-simultaneous sightings at two different gates.
-6. Store the resolved `person_id` alongside the raw event row (a new
-   `resolved_person_id` column on the events table, populated for these two
-   event types only) so attendance aggregation below never needs to re-run a
-   vector search.
-7. Idempotency: this function must not run twice for the same `event_id`.
-   It sits inside the same `if inserted:` guard as every other
-   `evaluate_*()` (see "Shared mechanics"), so a retried SSE event with an
-   identical `event_id` never gets resolved a second time — a retry reuses
-   whatever `resolved_person_id` the first successful ingest already wrote.
+   `len(embeddings.face) != policy.face_dim` or the vector's L2 norm is not
+   ~1 within tolerance — a non-normalized vector corrupts every similarity
+   score computed against it, including other people's already-correct
+   entries. Same check for `embeddings.body` against `policy.body_dim` when
+   present.
+3. Run `SELECT rowid, distance FROM person_face_embeddings WHERE embedding
+   MATCH ? ORDER BY distance LIMIT 1` and take the best match, converting
+   distance to similarity (`1 - distance`, see above).
+4. If similarity is at or above `policy.match_threshold`: reuse that
+   `person_id` (joined through `person_face_embedding_meta`). Otherwise
+   auto-enroll a fresh `person_id` (`status='auto_enrolled'`,
+   `display_name=NULL`). Either way, insert this sighting's face vector (and
+   body vector, if present) under the resolved `person_id`; update
+   `persons.last_seen`.
+5. Return the resolved `person_id`.
+
+### Concurrency
+
+No `BEGIN IMMEDIATE` re-check transaction, contrary to what an earlier draft
+of this section specified. `TelemetryStore.ingest()` already serializes
+**every** caller in this process through one `threading.RLock()`
+(`self.lock`) around the entire insert-events-row +
+`evaluate_alerts(...)`-and-friends block — the same reason `alerts.py`'s
+tables live in `telemetry.sqlite3` rather than their own file, so
+`evaluate_alerts` can reuse that one open connection/transaction. Putting
+`resolve_identity` in that same call chain, in the same file, means there is
+never a second writer for it to race against inside this process — the
+scenario the original design worried about (two near-simultaneous unmatched
+sightings of the same not-yet-enrolled person at two different gates both
+deciding "new person") cannot happen, because the second `ingest()` call
+simply blocks on `self.lock` until the first one (embedding insert included)
+has fully committed, then runs its own nearest-neighbor search and finds the
+vector the first call just inserted. Verified directly: firing 24 concurrent
+`ingest()` calls carrying the same embedding from 8 threads resolves to
+exactly one `person_id` (`tests/test_identity.py`,
+`test_concurrent_unmatched_sightings_of_the_same_person_resolve_to_one_person_id`).
+This guarantee is specific to this single-process deployment model — it
+would not hold if `telemetry.sqlite3` were ever written from more than one
+OS process.
+
+Idempotency: `resolve_identity` sits inside the same `if inserted:` guard as
+every other `evaluate_*()` (see "Shared mechanics"), so a retried SSE event
+with an identical `event_id` never gets resolved a second time.
 
 Auto-enrollment applies uniformly to sightings from any of the five
 `face_recognition` cameras and the dedicated `face_enrollment` camera — see

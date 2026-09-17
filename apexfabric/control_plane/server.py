@@ -36,7 +36,7 @@ DEFAULT_STATE_DIR = Path(os.getenv("APEXFABRIC_STATE_DIR", ROOT / ".apexfabric")
 DEPLOYMENT_ID_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?")
 IMAGE_RE = re.compile(r"[^@\s]+")
 TRAFFIC_APPS = {"anpr", "wrong_way", "vehicle_counting", "pedestrian_counting", "illegal_parking"}
-SURVEILLANCE_APPS = {"reid", "face_recognition", "intrusion", "people_counting"}
+SURVEILLANCE_APPS = {"reid", "face_recognition", "face_enrollment", "intrusion", "people_counting"}
 CAMERA_INVENTORY_CONFIG_MAP = "apexfabric-camera-inventory"
 CAMERA_INVENTORY_SECRET = "apexfabric-camera-sources"
 TRAFFIC_INFERENCE_MODES = {
@@ -82,6 +82,8 @@ class Controller:
         self.telemetry = TelemetryStore(self.state_dir / "telemetry")
         from .alerts import AlertStore
         self.alerts = AlertStore(self.telemetry)
+        from .identity import PersonStore
+        self.persons = PersonStore(self.telemetry)
         self.telemetry_stop = threading.Event()
         self.telemetry_targets: set[str] = set()
         self.telemetry_collectors: set[str] = set()
@@ -110,6 +112,7 @@ class Controller:
         if start_background:
             threading.Thread(target=self._telemetry_supervisor, name="telemetry-supervisor", daemon=True).start()
             threading.Thread(target=self._storage_failover_supervisor, name="storage-failover-supervisor", daemon=True).start()
+            threading.Thread(target=self._session_sweep_supervisor, name="session-sweep-supervisor", daemon=True).start()
 
     def _storage_failover_supervisor(self) -> None:
         interval = max(10, int(os.getenv("APEXFABRIC_STORAGE_FAILOVER_INTERVAL_SECONDS", "30")))
@@ -120,6 +123,19 @@ class Controller:
                     self.audit("storage:failover", "succeeded", action)
             except Exception as error:
                 print(f"storage failover reconciliation failed: {error}", file=sys.stderr, flush=True)
+
+    def _session_sweep_supervisor(self) -> None:
+        from .reporting import sweep_stale_sessions
+        interval = max(60, int(os.getenv("APEXFABRIC_SESSION_SWEEP_INTERVAL_SECONDS", "3600")))
+        stale_after = max(60, int(os.getenv("APEXFABRIC_SESSION_STALE_AFTER_SECONDS", str(18 * 60 * 60))))
+        while not self.telemetry_stop.wait(interval):
+            try:
+                with self.telemetry.lock, self.telemetry._connect() as connection:
+                    result = sweep_stale_sessions(connection, time.time() - stale_after)
+                if result["attendance_forced_closed"] or result["vehicle_forced_closed"]:
+                    self.audit("reporting:sweep", "succeeded", result)
+            except Exception as error:
+                print(f"session sweep failed: {error}", file=sys.stderr, flush=True)
 
     def kubectl(self, *arguments: str, check: bool = True, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
         command = ["k3s", "kubectl", *arguments]
@@ -1362,12 +1378,24 @@ class Handler(BaseHTTPRequestHandler):
             path = "/site"
         elif path.startswith("/apexfabricdashboard/"):
             path = path[len("/apexfabricdashboard"):]
+        elif path in {"/dashboard/customer", "/dashboard/customer/"}:
+            path = "/customer"
+        elif path in {"/dashboard/alerts.js", "/dashboard/customer.js", "/dashboard/reports.js", "/dashboard/site.css"}:
+            path = path[len("/dashboard"):]
         if path == "/site":
             self.respond(HTTPStatus.OK, (ROOT / "apexfabric/control_plane/static/site.html").read_bytes(), "text/html; charset=utf-8")
         elif path == "/site.js":
             self.respond(HTTPStatus.OK, (ROOT / "apexfabric/control_plane/static/site.js").read_bytes(), "text/javascript; charset=utf-8")
         elif path == "/site.css":
             self.respond(HTTPStatus.OK, (ROOT / "apexfabric/control_plane/static/site.css").read_bytes(), "text/css; charset=utf-8")
+        elif path in {"/customer", "/customer/"}:
+            self.respond(HTTPStatus.OK, (ROOT / "apexfabric/control_plane/static/customer.html").read_bytes(), "text/html; charset=utf-8")
+        elif path == "/alerts.js":
+            self.respond(HTTPStatus.OK, (ROOT / "apexfabric/control_plane/static/alerts.js").read_bytes(), "text/javascript; charset=utf-8")
+        elif path == "/customer.js":
+            self.respond(HTTPStatus.OK, (ROOT / "apexfabric/control_plane/static/customer.js").read_bytes(), "text/javascript; charset=utf-8")
+        elif path == "/reports.js":
+            self.respond(HTTPStatus.OK, (ROOT / "apexfabric/control_plane/static/reports.js").read_bytes(), "text/javascript; charset=utf-8")
         elif path == "/" or path in {"/dashboard", "/deployments", "/deployments/new", "/infrastructure/nodes", "/infrastructure/cluster", "/operations", "/events"} or path.startswith("/deployments/") or path.startswith("/infrastructure/nodes/"):
             self.respond(HTTPStatus.OK, (ROOT / "apexfabric/control_plane/static/index.html").read_bytes(), "text/html; charset=utf-8")
         elif path == "/enhancements.js":
@@ -1410,6 +1438,23 @@ class Handler(BaseHTTPRequestHandler):
                 self.json_response(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         elif path == "/api/telemetry/storage":
             self.json_response(HTTPStatus.OK, self.controller.telemetry.stats())
+        elif path == "/api/reports/attendance":
+            from .reporting import attendance_report
+            query = parse_qs(parsed.query)
+            person_id = query.get("person_id", [None])[0]
+            date = query.get("date", [None])[0]
+            with self.controller.telemetry._connect() as connection:
+                self.json_response(HTTPStatus.OK, attendance_report(connection, person_id, date))
+        elif path == "/api/reports/vehicle-traffic":
+            from .reporting import vehicle_traffic_report
+            query = parse_qs(parsed.query)
+            date = query.get("date", [None])[0]
+            gate = query.get("gate", [None])[0]
+            with self.controller.telemetry._connect() as connection:
+                self.json_response(HTTPStatus.OK, vehicle_traffic_report(connection, date, gate))
+        elif path == "/api/persons":
+            status = parse_qs(parsed.query).get("status", [None])[0]
+            self.json_response(HTTPStatus.OK, {"persons": self.controller.persons.list(status)})
         elif path.startswith("/api/telemetry/snapshots/"):
             snapshot_id = path.rsplit("/", 1)[-1]
             snapshot = self.controller.telemetry.snapshot(snapshot_id)
@@ -1479,6 +1524,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(request.get("id"), str):
                     raise ValueError("alert ID is required")
                 self.controller.alerts.acknowledge(request["id"])
+                self.json_response(HTTPStatus.OK, {"ok": True}); return
+            elif path == "/api/persons/rename":
+                if not isinstance(request.get("person_id"), str):
+                    raise ValueError("person_id is required")
+                self.controller.persons.rename(request["person_id"], request.get("display_name"))
                 self.json_response(HTTPStatus.OK, {"ok": True}); return
             elif path == "/api/bundles/generate":
                 self.json_response(HTTPStatus.OK, self.controller.generate_bundle(request)); return

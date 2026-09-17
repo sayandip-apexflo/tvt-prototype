@@ -3,10 +3,7 @@
 This directory stages the schema changes needed for face recognition, face
 enrollment, ANPR-based entry/exit direction, attendance reporting, and daily
 vehicle entry/exit reporting. It follows the same shape as ApexFabric-k3s's
-`docs/contracts/sporada-secure-v1/` staging area: changes land here first,
-then get promoted into a real `solution-packs/catalog/<pack>-<version>/`
-directory once accepted — the same lifecycle `sporada-secure-v1` went through
-before `solution-packs/catalog/sporada-secure-2026.09.16-v6/` existed.
+
 
 ## Revision note (2026-09-17)
 

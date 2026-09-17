@@ -5,6 +5,18 @@ from __future__ import annotations
 import logging
 
 from .alerts import SCHEMA as ALERT_SCHEMA, evaluate as evaluate_alerts
+from .identity import (
+    SCHEMA as IDENTITY_SCHEMA,
+    IdentityPolicy,
+    ensure_vector_tables,
+    load_extension as load_identity_extension,
+    resolve_identity,
+)
+from .reporting import (
+    SCHEMA as REPORTING_SCHEMA,
+    evaluate_attendance,
+    evaluate_vehicle_traffic,
+)
 
 import hashlib
 import json
@@ -76,11 +88,17 @@ def snapshot_urls(payload: Any) -> list[str]:
 
 
 class TelemetryStore:
-    def __init__(self, root: Path, policy: RetentionPolicy | None = None):
+    def __init__(
+        self,
+        root: Path,
+        policy: RetentionPolicy | None = None,
+        identity_policy: IdentityPolicy | None = None,
+    ):
         self.root = root
         self.snapshot_root = root / "snapshots"
         self.database = root / "telemetry.sqlite3"
         self.policy = policy or RetentionPolicy.from_environment()
+        self.identity_policy = identity_policy or IdentityPolicy.from_environment()
         self.root.mkdir(parents=True, exist_ok=True)
         self.snapshot_root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
@@ -114,11 +132,18 @@ class TelemetryStore:
             """)
 
             connection.executescript(ALERT_SCHEMA)
+            connection.executescript(IDENTITY_SCHEMA)
+            connection.executescript(REPORTING_SCHEMA)
+            if self.identity_policy is not None:
+                load_identity_extension(connection)
+                ensure_vector_tables(connection, self.identity_policy)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
+        if self.identity_policy is not None:
+            load_identity_extension(connection)
         return connection
 
     @staticmethod
@@ -152,6 +177,11 @@ class TelemetryStore:
             ).rowcount
             if inserted:
                 evaluate_alerts(connection, event_id, deployment_id, payload, received_at)
+                resolved_person_id = resolve_identity(
+                    connection, event_id, deployment_id, payload, self.identity_policy, received_at
+                )
+                evaluate_attendance(connection, event_id, deployment_id, payload, resolved_person_id, received_at)
+                evaluate_vehicle_traffic(connection, event_id, deployment_id, payload, received_at)
         if inserted and fetch_snapshot:
             urls = snapshot_urls(payload)
             for source_url in urls[:self.policy.maximum_snapshots_per_event]:

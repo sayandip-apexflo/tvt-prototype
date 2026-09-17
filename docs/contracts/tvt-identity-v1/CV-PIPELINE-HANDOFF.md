@@ -235,10 +235,10 @@ The image is acceptable only when all checks pass:
    `traffic-edge-runtime-2026.08.21-v4/analytics-event.schema.json` is
    unchanged — this work must not touch that vendored file.
 8. (Control plane, not edge, but blocking promotion of this directory as a
-   whole per `Aggregation.md`): the identity-resolution transaction rejects
-   a concurrency test that fires two unmatched sightings of the same
-   embedding at two different gates within the same instant without
-   producing two `person_id`s.
+   whole per `Aggregation.md`): a concurrency test that fires two unmatched
+   sightings of the same embedding at two different gates within the same
+   instant produces exactly one `person_id`, not two — implemented as
+   `tests/test_identity.py::IdentityResolutionTests::test_concurrent_unmatched_sightings_of_the_same_person_resolve_to_one_person_id`.
 
 Any failed item blocks promoting `docs/contracts/tvt-identity-v1/` into a
 real `solution-packs/catalog/` entry.
