@@ -33,6 +33,10 @@ command -v openssl >/dev/null 2>&1 || { echo "openssl is required" >&2; exit 1; 
   echo "missing installed TVT alert dispatcher: ${VENV}" >&2
   exit 1
 }
+[[ -x "${VENV}/bin/tvt-anpr-report" ]] || {
+  echo "missing installed TVT ANPR report service: ${VENV}" >&2
+  exit 1
+}
 [[ -x "${VENV}/bin/tvt-k3s-watchdog" ]] || {
   echo "missing installed TVT K3s watchdog: ${VENV}" >&2
   exit 1
@@ -51,10 +55,18 @@ if ! id tvt-alert >/dev/null 2>&1; then
   useradd --system --gid tvt-alert --home-dir /var/lib/tvt-alert \
     --shell /usr/sbin/nologin tvt-alert
 fi
+if ! getent group tvt-report >/dev/null; then
+  groupadd --system tvt-report
+fi
+if ! id tvt-report >/dev/null 2>&1; then
+  useradd --system --gid tvt-report --home-dir /var/lib/tvt-reporting \
+    --shell /usr/sbin/nologin tvt-report
+fi
 # Both service accounts need search permission here; sensitive descendants stay restricted.
 install -d -o root -g root -m 0755 /etc/tvt
 install -d -o tvt-edge -g tvt-edge -m 0750 /var/lib/tvt
 install -d -o tvt-alert -g tvt-alert -m 0750 /var/lib/tvt-alert
+install -d -o tvt-report -g tvt-report -m 0750 /var/lib/tvt-reporting
 install -d -o root -g tvt-edge -m 0750 /etc/tvt/credential-keys
 install -d -o root -g root -m 0755 "${TARGET_CATALOG}"
 for filename in \
@@ -85,6 +97,11 @@ if [[ ! -f /etc/tvt/alert-dispatcher.env ]]; then
   install -o root -g tvt-alert -m 0640 \
     "${REPO_ROOT}/deploy/host/tvt-alert-dispatcher.env.example" \
     /etc/tvt/alert-dispatcher.env
+fi
+if [[ ! -f /etc/tvt/anpr-report.env ]]; then
+  install -o root -g tvt-report -m 0640 \
+    "${REPO_ROOT}/deploy/host/tvt-anpr-report.env.example" \
+    /etc/tvt/anpr-report.env
 fi
 if [[ ! -f /etc/tvt/alertmanager-webhook.token ]]; then
   temporary_token="$(mktemp /etc/tvt/.alertmanager-webhook.token.XXXXXX)"
@@ -159,6 +176,15 @@ install -o root -g root -m 0644 \
   "${REPO_ROOT}/deploy/systemd/tvt-alert-dispatcher.service" \
   /etc/systemd/system/tvt-alert-dispatcher.service
 install -o root -g root -m 0644 \
+  "${REPO_ROOT}/deploy/systemd/tvt-anpr-report-collector.service" \
+  /etc/systemd/system/tvt-anpr-report-collector.service
+install -o root -g root -m 0644 \
+  "${REPO_ROOT}/deploy/systemd/tvt-anpr-report.service" \
+  /etc/systemd/system/tvt-anpr-report.service
+install -o root -g root -m 0644 \
+  "${REPO_ROOT}/deploy/systemd/tvt-anpr-report.timer" \
+  /etc/systemd/system/tvt-anpr-report.timer
+install -o root -g root -m 0644 \
   "${REPO_ROOT}/deploy/systemd/tvt-k3s-watchdog.service" \
   /etc/systemd/system/tvt-k3s-watchdog.service
 install -o root -g root -m 0644 \
@@ -166,8 +192,8 @@ install -o root -g root -m 0644 \
   /etc/systemd/system/tvt-k3s-watchdog.timer
 systemctl daemon-reload
 echo "PostgreSQL and TVT host service configuration are installed."
-echo "Review /etc/tvt/edge.env and /etc/tvt/alert-dispatcher.env, install the"
-echo "SendGrid key, initialize the site and notification policies, then enable services."
+echo "Review /etc/tvt/edge.env, /etc/tvt/alert-dispatcher.env and /etc/tvt/anpr-report.env."
+echo "Install the protected SendGrid keys, initialize site/notification policies, then enable services."
 
 )
 

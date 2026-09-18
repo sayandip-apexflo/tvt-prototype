@@ -568,6 +568,22 @@ links. It must not contain camera credentials, direct RTSP URLs, faces,
 embeddings, people, plates, Kubernetes Secret values, raw logs, or stack traces.
 The dispatcher is not the automated daily business-report mailer.
 
+### 10.3 Daily ANPR report boundary
+
+The separate `tvt-anpr-report` component uses SendGrid but does not reuse the
+operational-alert webhook, policy, outbox, reminders, recovery notifications,
+or metrics. Its non-persistent systemd timer has one firing at 18:30
+Asia/Kolkata and its per-date row permits one delivery attempt only. A failed
+daily report is recorded as a bounded failure code and JSON error log; it is
+not retried or sent late.
+
+Collector and delivery logs may state only lifecycle/result/error-code facts.
+They must not include plate text, event bodies, recipient addresses, SMTP
+responses, or exception messages outside the existing application redactor.
+The emailed CSV also uses opaque vehicle references rather than plates. Report
+counts, duration totals, and send state are business-report data and must not be
+added as Prometheus labels.
+
 ## 11. Structured JSON logging
 
 ### 11.1 Output contract

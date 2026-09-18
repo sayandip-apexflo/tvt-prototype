@@ -1,6 +1,6 @@
 # TVT prototype: sample low-level design plan
 
-**Status:** Design updated; implementation pending
+**Status:** Current architecture documented; daily ANPR report implemented
 **Scope:** Single physical server, single-node K3s, five initially installed cameras with a design ceiling of eight  
 **Reference implementation:** `../k3s-prototype`  
 **Related TVT documents:** `README.md`, `HLD.md`, `MONITORING.md`, `APEXFABRIC_ARCHITECTURE.md`
@@ -30,6 +30,22 @@ configuration into K3s.
 V1 includes the approved host alert-dispatcher service for durable alert
 email. `HLD.md` and `MONITORING.md` define the matching SendGrid SMTP,
 outbox, retry, acknowledgement, and recovery-email contracts.
+
+### 1.1 Current host ownership (supersedes the original camera-plane plan)
+
+The project now has two host control services. `apexfabric-control.service` is
+authoritative for the camera inventory, camera credentials, operator console,
+and bounded analytics/snapshot retention. `tvt-edge.service` no longer owns
+camera CRUD or live feeds. `tvt-camera-sync.service` copies a non-secret camera
+projection from Apex into management PostgreSQL only so TVT deployments can be
+reconciled. Consequently, the older camera/API/database details in sections
+6-10 are retained as background design but must not be implemented as a second
+camera authority.
+
+The daily ANPR report is a TVT-owned consumer of the Apex loopback telemetry
+API. It is neither an Apex reporting-table extension nor an operational-alert
+dispatcher feature. The source feed and polling are explicitly loss-tolerant
+in this version.
 
 This plan deliberately excludes:
 
@@ -69,6 +85,7 @@ path, or credentials are not known.
 | Reconciliation | Copy the reference bundle schema, semantic validator, camera-locality logic, renderer, field manager, ownership labels, Namespace output, prune rules, and tests unchanged | Preserves the proven K3s-plane behavior and one Solution Pack implementation |
 | Monitoring | Follow `MONITORING.md`: Prometheus metrics, JSON logs, Alloy, Loki, Alertmanager | Keeps monitoring contracts separate from business data |
 | Alert email | Host `tvt-alert-dispatcher.service` with authenticated webhooks, PostgreSQL outbox, and SendGrid SMTP over STARTTLS | Preserves delivery/audit state and can report K3s outages without depending on an in-cluster sender |
+| Daily ANPR email | TVT collector + dedicated SQLite aggregate + a non-persistent 18:30 Asia/Kolkata timer | Keeps plate/business data out of the management DB and separates once-daily reporting from operational-alert retry/reminder semantics |
 
 There is no stream gateway in V1. When several deployments use one camera,
 each deployment opens a separate physical RTSP session. Field acceptance must
@@ -198,6 +215,12 @@ tvt-prototype/
       emergency_spool.py
       email_sender.py
       templates/
+    reporting/
+      settings.py
+      collector.py
+      database.py
+      email_report.py
+      cli.py
     runtime.py
     settings.py
   apexfabric/
@@ -667,6 +690,55 @@ must not silently become the business/evidence database. Until retention,
 privacy, backup/restore, schema migration, and deletion requirements are
 approved, those workloads are integration stubs rather than restart-safe
 product features.
+
+### 12.5 Implemented daily ANPR duration report
+
+The daily ANPR report is the first narrow business-data exception to the stub
+status above. Its implementation is intentionally independent of management
+PostgreSQL and the frozen Solution Pack plane:
+
+1. `tvt-anpr-report-collector.service` requests
+   `GET http://127.0.0.1:8088/api/telemetry/events?limit=1000` every three
+   seconds. It accepts only `application=anpr`, `plate_read_event`, and an
+   explicitly configured camera ID. Poll/SSE reconnect loss and ingestion loss
+   are accepted; the component does not promise source replay.
+2. Event IDs are inserted into `consumed_events` for deduplication. A valid
+   plate is NFKC-normalized, uppercased, and stripped of spaces/hyphens before
+   exact matching. The store keeps raw plate text only in its local business
+   table, uses a SHA-256 key for matching, and assigns an unrelated random
+   per-day vehicle reference for email.
+3. Events are converted to `Asia/Kolkata` and only timestamps in the half-open
+   interval `[09:00, 18:00)` are aggregated. For each local date and plate the
+   row holds `MIN(occurred_at)`, `MAX(occurred_at)`, cameras at those extrema,
+   and read count. Duration is `MAX - MIN`; one read produces zero seconds.
+4. The report total is the sum of all per-plate spans. Multiple visits by the
+   same plate are merged and can overstate actual occupancy; this follows the
+   requested first/last rule and is labelled “observed duration.”
+5. `/var/lib/tvt-reporting/reporting.sqlite3` holds deduplication keys, compact
+   aggregates, an immutable CSV snapshot, and the one-attempt send state.
+   Ninety-day retention is the default. It stores no snapshots or raw event
+   bodies.
+6. `tvt-anpr-report.timer` uses
+   `OnCalendar=*-*-* 18:30:00 Asia/Kolkata`, `AccuracySec=1s`, and
+   `Persistent=false`. A stopped host therefore misses that day's send instead
+   of producing an unexpected late email.
+7. The oneshot creates at most one report row per date and assigns a
+   deterministic `Message-ID`. State moves from `pending` to either `sent` or
+   terminal `failed`; there is no reminder, retry timer, or second same-day
+   send. SMTP acceptance followed by a lost response remains the usual
+   unavoidable ambiguity.
+8. SendGrid is used through SMTP port 587 with STARTTLS certificate validation,
+   username `apikey`, and a root-managed key readable by `tvt-report`. The
+   report mail has summary counts/total and a CSV of opaque vehicle references,
+   first/last timestamps, duration, count, and camera IDs. Plate text, images,
+   credentials, and event bodies are excluded from email and observability.
+
+The reporting OS account has write access only to its state directory. The
+collector unit can reach loopback only; the delivery oneshot is the sole
+reporting process allowed outbound network access. Operators configure the two
+camera IDs, verified sender, and recipient in `/etc/tvt/anpr-report.env`, place
+the SendGrid key in `/etc/tvt/anpr-report-sendgrid-key` with owner
+`root:tvt-report` and mode `0640`, then enable the collector and timer.
 
 ## 13. Camera assignment
 

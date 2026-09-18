@@ -216,6 +216,28 @@ curl --fail --silent --show-error \
   http://127.0.0.1:8089/api/v1/solutions | python3 -m json.tool
 ```
 
+The same bootstrap installs the disabled daily ANPR reporting units. After
+reviewing `/etc/tvt/anpr-report.env`, setting the two camera IDs/sender/
+recipient, and installing the SendGrid key with protected ownership, enable
+only the collector and the once-daily timer:
+
+```bash
+sudo install -o root -g tvt-report -m 0640 /path/to/sendgrid-key \
+  /etc/tvt/anpr-report-sendgrid-key
+sudo systemctl enable --now tvt-anpr-report-collector.service \
+  tvt-anpr-report.timer
+systemctl list-timers tvt-anpr-report.timer
+```
+
+The timer is fixed at 18:30 Asia/Kolkata and is non-persistent. Use the
+following read-only checks; do not manually start the mail service in
+production because that consumes the date's sole delivery attempt:
+
+```bash
+systemctl status tvt-anpr-report-collector.service tvt-anpr-report.timer
+journalctl -u tvt-anpr-report-collector.service --since today
+```
+
 Run refresh only after image synchronization succeeds. The entry becomes
 `available` only when `Docker-Content-Digest` equals the SHA-256 of the returned
 manifest bytes. These catalog calls do not register or alter deployments.

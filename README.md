@@ -97,8 +97,8 @@ are documented in [docs/MESHCENTRAL-NATIVE-INSTALL.md](docs/MESHCENTRAL-NATIVE-I
 
 ## Current implementation
 
-The first five slices are implemented from the approved
-`k3s-prototype` commit `bcb58030f89b22b14ff1dbd0a68c5806d2f6a002`.
+The reference plane is the exact approved copy from `k3s-prototype` commit
+`5ada504fbb3a5fc3c15e08428c6e996eeb6fbd44`.
 It includes:
 
 - the unchanged `solution-packs/` schema and Traffic pack files;
@@ -112,8 +112,11 @@ It includes:
 - pinned single-node K3s installation and registry-mirror tooling;
 - digest-pinned publication and installation of the node-management images;
   and
-- a host-local PostgreSQL management plane with an encrypted camera inventory,
-  immutable desired revisions, lifecycle operations, audit, and retention;
+- an ApexFabric control service which owns camera onboarding, credentials, the
+  operator console, and bounded recent telemetry/snapshots;
+- a host-local PostgreSQL TVT management plane with a non-secret Apex camera
+  projection, immutable desired revisions, lifecycle operations, audit, and
+  retention;
 - a loopback-only `tvt-edge` API and CLI; and
 - a leased reconciliation worker which materializes camera Secrets only in
   memory, applies them server-side, invokes the unchanged renderer, waits for
@@ -121,6 +124,9 @@ It includes:
 - an authenticated Alertmanager receiver with durable alert state,
   acknowledgement-aware notification policy, a persistent SMTP retry outbox,
   redacted delivery history, and a separate host dispatcher service; and
+- a separate daily ANPR collector and business store that aggregates first/last
+  reads across two configured cameras and makes one SendGrid delivery attempt
+  at 18:30 Asia/Kolkata; and
 - bounded `prometheus_client` metrics, redacting single-line JSON logs, and a
   single-node monitoring deployment profile under `deploy/monitoring/`; and
 - a manual, fail-closed Traffic v4 qualification runner that validates pinned
@@ -128,9 +134,8 @@ It includes:
   persistent state, runtime metrics/events, reboot invariants, and rollback
   invariants into private verifiable evidence reports.
 
-The web UI, active ONVIF/RTSP probing, host emergency alert spool, fleet
-heartbeat/event senders, and production dashboard tuning are intentionally
-deferred.
+Host emergency alert spool, fleet heartbeat/event senders, and production
+dashboard tuning are intentionally deferred.
 
 ### Local runtime
 
@@ -369,6 +374,27 @@ sudo systemctl enable --now tvt-alert-dispatcher.service
 The management API exposes `GET /api/v1/alerts`, acknowledgement at
 `POST /api/v1/alerts/{alert_id}/acknowledge`, and redacted outbox history at
 `GET /api/v1/alerts/{alert_id}/notifications`.
+
+The bootstrap also installs, but does not enable,
+`tvt-anpr-report-collector.service` and `tvt-anpr-report.timer`. Edit
+`/etc/tvt/anpr-report.env` to set the two Apex camera IDs, a SendGrid-verified
+sender, and the recipient. Install the restricted SendGrid key separately:
+
+```bash
+sudo install -o root -g tvt-report -m 0640 /path/to/sendgrid-key \
+  /etc/tvt/anpr-report-sendgrid-key
+sudo systemctl enable --now tvt-anpr-report-collector.service \
+  tvt-anpr-report.timer
+systemctl list-timers tvt-anpr-report.timer
+```
+
+The collector polls Apex on loopback and stores its compact aggregate in
+`/var/lib/tvt-reporting/reporting.sqlite3`. The report window is 09:00 inclusive
+to 18:00 exclusive. The non-persistent timer fires once at 18:30
+Asia/Kolkata—there is no late catch-up or same-day retry. The email reports the
+total observed duration and attaches per-vehicle rows using opaque references;
+raw number plates stay in the local business store and are not emailed or
+logged.
 
 New K3s installs enable `secretbox` datastore encryption automatically. The
 management database stores camera credentials only as AES-256-GCM ciphertext;

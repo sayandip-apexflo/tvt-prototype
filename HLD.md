@@ -17,10 +17,12 @@ stream concurrently. The initial use cases from `README.md` are:
 - daily vehicle entry and exit reporting; and
 - automated daily reports by email.
 
-A small host management plane remains available when K3s is unavailable. It
-discovers cameras, validates RTSP connectivity, records camera inventory in
-PostgreSQL, reports host and K3s health, serves the React management UI, and
-delivers durable operational alert email through a separate host dispatcher.
+ApexFabric control is now the camera and operator-facing host plane. It owns
+camera discovery/configuration, the React console on loopback port 8088, and
+the bounded telemetry/snapshot store. The TVT host plane mirrors only the
+non-secret camera inventory needed for deployment synchronization into
+PostgreSQL. Operational alert mail remains a separate TVT dispatcher. Daily
+ANPR business mail is a third, isolated TVT reporting component.
 
 This design extends the node reporting, Solution Pack reconciliation,
 scheduling, probe, and failure-recovery model described in
@@ -33,7 +35,8 @@ scheduling, probe, and failure-recovery model described in
 - One Linux server acting as both the K3s server and its only compute node.
 - Five to eight IP cameras on a LAN reachable from the server.
 - Discovery of previously unknown cameras.
-- Persistent inventory of discovered cameras in a host PostgreSQL database.
+- Persistent authoritative camera inventory in ApexFabric control, with a
+  non-secret deployment-sync projection in host PostgreSQL.
 - Operator entry of camera credentials and selection of an RTSP profile/path.
 - Authenticated RTSP validation and continuous camera-health reporting.
 - A host-served React UI that remains available during a K3s outage.
@@ -45,6 +48,8 @@ scheduling, probe, and failure-recovery model described in
 - Alerts displayed in the local UI.
 - Durable, auditable firing, reminder, and recovery email for configured
   operational alerts.
+- A loss-tolerant adapter that aggregates ANPR reads from two configured
+  cameras and sends one daily duration report at 18:30 Asia/Kolkata.
 - On-site access to the management UI from a dedicated management network.
 
 ### 2.2 Out of scope for this version
@@ -55,48 +60,36 @@ scheduling, probe, and failure-recovery model described in
   approved SMTP relay.
 - Detection of a total server, power, or site-network outage from outside the
   box.
-- Durable retention of video, snapshots, CV events, attendance data, or
-  generated reports.
+- Durable retention of video, snapshots, or the complete CV event stream.
 - Final camera sizing, GPU sizing, codec selection, resolution, or frame-rate
   guarantees.
 
-Camera inventory is operational configuration and is persisted in PostgreSQL.
-The statement that CV data need not survive locally does not apply to that
-inventory. Face enrollment and daily reporting will eventually require a
-defined durable data store. Face enrollment, recognition, ANPR, attendance,
-vehicle history, and business-reporting components are therefore integration
-stubs until application images and a durable business-data design are supplied;
-their records are not required to survive restart in V1. Operational alert and
-email-delivery records are management-plane data and remain durable.
+Camera inventory is operational configuration and is authoritative in
+ApexFabric control. PostgreSQL contains a non-secret mirror used by the TVT
+deployment synchronizer, not the authoritative credential record. Apex's
+bounded telemetry store is deliberately not lossless. The reporting adapter
+therefore polls frequently and persists a compact per-day/per-plate aggregate
+in `/var/lib/tvt-reporting/reporting.sqlite3`; it does not turn the management
+PostgreSQL database into a business-event store. Operational alert and
+email-delivery records remain management-plane data in PostgreSQL.
 
 ## 3. Architecture decisions
 
-### 3.1 Keep an independent host management service
+### 3.1 Separate ApexFabric control from the TVT host adapter
 
-A separate host process is required because the camera and outage UI must work
-when the Kubernetes API or all cluster workloads are unavailable. Python is an
-implementation choice, not a reliability requirement. A packaged Python
-virtual environment managed by `systemd` is suitable for the first version.
-
-The service is called the **edge management service** in this document. It:
-
-- serves the compiled React application and a management API;
-- discovers cameras only on explicitly configured LAN subnets;
-- stores camera identity, configuration, and last-known status in PostgreSQL;
-- validates camera RTSP access;
-- observes host, PostgreSQL, K3s API, Node, and workload health;
-- synchronizes approved camera configuration into K3s using narrowly scoped
-  credentials; and
-- records and displays local alerts and recovery actions.
-
-It does not run inference, act as a general-purpose root daemon, or continuously
-restart K3s. `systemd` remains responsible for ordinary process lifecycle.
+`apexfabric-control.service` serves the compiled React application and camera
+management API, owns the camera inventory and credential workflow, and retains
+a bounded recent analytics stream. `tvt-edge.service` remains the TVT health,
+catalog, audit, and deployment API. `tvt-camera-sync.service` reads the local
+Apex camera API and maintains the PostgreSQL projection used to reconcile
+camera assignments. Neither service runs inference or acts as a general-purpose
+root daemon; `systemd` owns ordinary process lifecycle.
 
 ### 3.2 Keep PostgreSQL outside K3s
 
 PostgreSQL runs as a host `systemd` service and listens only on a Unix socket or
-loopback interface. Keeping it outside the cluster allows camera inventory and
-the management UI to remain useful while K3s is down.
+loopback interface. Keeping it outside the cluster allows TVT deployment,
+audit, and operational-alert state to remain useful while K3s is down.
 
 This PostgreSQL instance stores management-plane data only. It is not the
 application database for recognition, attendance, ANPR, or report history.
@@ -166,6 +159,32 @@ and TLS using the site's certificate or installer-managed local CA. V1 has one
 administrator role; additional roles or identity-provider integration require
 a later access-control design.
 
+### 3.7 Isolate the once-daily ANPR business report
+
+`tvt-anpr-report-collector.service` polls the loopback Apex telemetry endpoint
+every three seconds. Loss during polling, service interruption, or source
+retention is accepted for this version; neither SSE replay nor a lossless event
+bus is introduced. It accepts only `plate_read_event` records from the two
+configured camera IDs, deduplicates by event ID, normalizes the plate for exact
+matching, and updates one compact observation row per local date and plate.
+
+For the half-open daily window `[09:00, 18:00)` in `Asia/Kolkata`, a vehicle's
+observed duration is `last_seen - first_seen` across both cameras. Repeated
+reads do not create multiple rows, a single read has zero duration, and the
+daily total is the sum of the per-vehicle durations. This is an observation
+span, not a direction-aware entry/exit session; separate visits by the same
+plate in one day are intentionally merged by the stated rule.
+
+`tvt-anpr-report.timer` invokes a oneshot at exactly 18:30 Asia/Kolkata. The
+timer is non-persistent, so a stopped host does not send a late catch-up mail.
+A unique report-date row and deterministic message ID prevent a second logical
+send after success. There is one delivery attempt; failure is recorded locally
+and is not retried later that day. SendGrid is reached through certificate-
+verified SMTP/STARTTLS using a protected key file. The email contains summary
+counts, the total duration, and a CSV keyed by opaque vehicle references; raw
+number plates remain in the local business store and never enter email, logs,
+metrics, or operational alerts.
+
 ## 4. System context
 
 ```mermaid
@@ -175,10 +194,14 @@ flowchart TB
 
     subgraph Host[Single Linux edge server]
         Systemd[systemd]
-        UI[React UI]
-        Edge[Edge management service<br/>Python runtime]
+        Apex[ApexFabric control<br/>camera UI and telemetry API]
+        Edge[TVT edge service<br/>health, catalog and audit]
+        CameraSync[TVT camera inventory sync]
         Dispatcher[Alert dispatcher<br/>systemd service]
-        DB[(Host PostgreSQL<br/>camera inventory and alerts)]
+        ReportCollector[ANPR report collector]
+        DailyMailer[18:30 daily report oneshot]
+        ReportDB[(Reporting SQLite<br/>daily aggregate)]
+        DB[(Host PostgreSQL<br/>TVT management data)]
         Watchdog[K3s health watchdog]
 
         subgraph Cluster[Single-node K3s cluster]
@@ -196,14 +219,19 @@ flowchart TB
 
     SMTP[SendGrid SMTP relay]
 
-    Operator --> UI
-    UI --> Edge
+    Operator --> Apex
+    Apex -->|discovery and RTSP validation| Cameras
+    Apex -->|bounded recent events| ReportCollector
+    CameraSync -->|non-secret inventory API| Apex
+    CameraSync <--> DB
     Edge <--> DB
-    Edge -->|discovery and RTSP validation| Cameras
     Edge -->|validated secret inputs for Apply| Reconciler
     Edge -->|health reads| API
     Edge -->|host alerts| Dispatcher
     Systemd --> Edge
+    Systemd --> Apex
+    Systemd --> ReportCollector
+    Systemd --> DailyMailer
     Systemd --> Dispatcher
     Systemd --> DB
     Systemd --> API
@@ -221,20 +249,26 @@ flowchart TB
     Alertmanager -->|authenticated webhook| Dispatcher
     Dispatcher <--> DB
     Dispatcher -->|STARTTLS email| SMTP
+    ReportCollector --> ReportDB
+    DailyMailer --> ReportDB
+    DailyMailer -->|one daily STARTTLS email| SMTP
 ```
 
-The React UI is built as static assets and served by the edge management
-service. It must not depend on an in-cluster ingress controller, Service, DNS,
-or database.
+The operator-facing React UI and authoritative camera inventory are served by
+ApexFabric control. TVT components consume its loopback APIs and do not depend
+on an in-cluster ingress controller or Service.
 
 ## 5. Component responsibilities
 
 | Component | Runs where | Responsibilities | Explicitly not responsible for |
 |---|---|---|---|
-| React UI | Host management plane | Camera onboarding, live status, K3s status, alert acknowledgement and delivery status | Inference or direct Kubernetes access |
-| Edge management service | Host `systemd` service | Discovery, inventory, RTSP validation, UI API, health aggregation, camera-config sync | CV processing, Node labels, unrestricted cluster administration |
+| ApexFabric control | Host `systemd` service | Camera onboarding, credential handling, React UI, recent event/snapshot retention | TVT reporting retention or SendGrid delivery |
+| TVT edge service | Host `systemd` service | Health, catalog, deployment lifecycle, audit, and operational-alert views | Authoritative camera credentials or CV processing |
+| Camera inventory sync | Host `systemd` service | Mirror non-secret Apex inventory into PostgreSQL for deployment synchronization | Camera discovery or credential ownership |
 | Alert dispatcher | Host `systemd` service | Authenticated alert ingestion, durable outbox, acknowledgement-aware reminders, recovery email, SMTP retry and delivery audit | PromQL evaluation, business-report email, arbitrary templates or recipients from alert payloads |
-| Management PostgreSQL | Host `systemd` service | Camera records, status history, operational alerts, notification outbox and audit metadata | CV event, video, attendance, ANPR, or business-report retention |
+| ANPR report collector/mailer | Host `systemd` service and timer | Loss-tolerant event polling, daily aggregation, immutable report, one 18:30 SendGrid attempt | Source replay, snapshots, operational alert mail, or plate data in observability/email |
+| Reporting SQLite | Host filesystem | Deduplication, compact plate observations, report/send state | Camera inventory, snapshots, operational alerts, or complete raw event retention |
+| Management PostgreSQL | Host `systemd` service | Deployment-sync camera projection, operational alerts, notification outbox and audit metadata | CV event, video, ANPR, or business-report retention |
 | K3s health watchdog | Host `systemd` timer/service | Detect sustained API failure and perform bounded recovery | General cluster orchestration |
 | Node reporter | K3s DaemonSet Pod | Report host capabilities through `ApexNodeStatus` | Active camera discovery or Node labelling |
 | Node-status controller | K3s | Validate reports and own scheduling labels | Camera inventory or Solution Pack deployment |
@@ -247,6 +281,12 @@ consume the same physical camera. Each such consumer creates its own camera
 session.
 
 ## 6. Camera discovery and onboarding
+
+This section specifies camera behavior, but ownership has moved to
+`apexfabric-control.service`. TVT consumes the resulting loopback inventory API;
+the older references below to the edge service as the camera authority should
+be read as ApexFabric control and do not authorize duplicating camera secrets
+in PostgreSQL.
 
 ### 6.1 Discovery boundary
 
@@ -553,14 +593,16 @@ Camera inventory, alert/outbox/audit records, the local OCI registry, and
 retained monitoring data must survive OS reinstallation through an encrypted
 backup on operator-provided external USB storage or an approved network share.
 Installation and upgrade procedures verify a backup before destructive work,
-and a quarterly restore test validates the recovery procedure. CV stub data,
-video, faces, plates, attendance, and generated business reports are not part
-of this V1 backup set. The approved UPS must signal the OS and provide enough
-runtime for an orderly PostgreSQL checkpoint and filesystem shutdown.
+and a quarterly restore test validates the recovery procedure. Raw CV events,
+video, snapshots, faces, and attendance data are not part of this V1 backup
+set. The daily ANPR aggregate has local 90-day retention; backup/restore of that
+business store remains a site data-policy decision. The approved UPS must
+signal the OS and provide enough runtime for orderly database checkpoints and
+filesystem shutdown.
 
 ## 12. Security boundaries
 
-- The management UI binds only to the on-site management interface, requires
+- The Apex management UI binds only to the on-site management interface, requires
   the local administrator authentication controls in section 3.6, and is not
   exposed on the public WAN or camera VLAN.
 - Discovery is limited to configured interfaces and subnets and is rate
@@ -589,6 +631,13 @@ Host services are enabled at boot with these dependencies:
 
 ```text
 network-online.target
+  -> apexfabric-control.service
+  -> tvt-anpr-report-collector.service
+
+timers.target
+  -> tvt-anpr-report.timer (18:30 Asia/Kolkata, non-persistent)
+
+network-online.target
   -> postgresql.service
   -> edge-management.service
 
@@ -612,7 +661,8 @@ scheduler flow.
 
 ## 14. Frozen V1 implementation profile
 
-- Reference baseline: `k3s-prototype` commit `bcb58030f89b`.
+- Reference baseline: `k3s-prototype` commit
+  `5ada504fbb3a5fc3c15e08428c6e996eeb6fbd44`.
 - Hardware/OS: Intel Core Ultra 9 285H-class server, 64 GiB RAM, 1 TiB NVMe,
   and Ubuntu 24.04 LTS.
 - Runtime baseline: Python 3.12, PostgreSQL 16, and K3s
@@ -632,8 +682,11 @@ scheduler flow.
   deferred.
 - Alert transport: host dispatcher and SendGrid SMTP with durable PostgreSQL
   outbox and the bounded emergency path defined in `LLD_PLAN.md`.
-- CV/business functions: non-durable integration stubs until images and data
-  contracts are supplied.
+- ANPR daily report: Apex loopback polling into a separate SQLite business
+  store, `[09:00, 18:00)` observation-span aggregation, and one non-persistent
+  18:30 Asia/Kolkata SendGrid timer. Source-event loss is accepted.
+- Other CV/business functions remain integration stubs until their images and
+  data contracts are supplied.
 
 ## 15. Acceptance criteria
 
@@ -662,6 +715,14 @@ The first implementation of this design is accepted when it demonstrates that:
     after connectivity returns without duplicating the logical transition.
 12. A full host shutdown is clearly documented as undetectable until external
     monitoring is introduced.
+13. Reads for the same normalized plate from either configured ANPR camera
+    produce one daily row whose duration is the difference between the earliest
+    and latest in-window occurrence, and duplicate event IDs do not alter it.
+14. At 18:30 Asia/Kolkata the report is attempted once; a second invocation for
+    the date cannot send a second logical email, and a missed timer has no late
+    catch-up delivery.
+15. The email contains total duration and an opaque-reference CSV but contains
+    no raw plate text, image, RTSP URL, credential, or SendGrid key.
 
 ## 16. References
 

@@ -1,0 +1,39 @@
+[Unit]
+Description=TVT ANPR daily-report telemetry collector
+After=apexfabric-control.service
+Wants=apexfabric-control.service
+
+[Service]
+Type=simple
+User=tvt-report
+Group=tvt-report
+EnvironmentFile=/etc/tvt/anpr-report.env
+ExecStart=/opt/tvt/venv/bin/tvt-anpr-report collect
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectHome=true
+ProtectHostname=true
+ProtectSystem=strict
+ProtectKernelLogs=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+ReadWritePaths=/var/lib/tvt-reporting
+IPAddressDeny=any
+IPAddressAllow=localhost
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
