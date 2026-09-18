@@ -1,6 +1,6 @@
 import React,{useEffect,useState,useRef} from 'react';
-import {api,base} from './api';
-export {api};
+import {api,base,formatIST,formatISTTime} from './api';
+export {api,formatIST,formatISTTime};
 export function useSite(){
  const [data,setData]=useState(null),[error,setError]=useState('');
  const busy=useRef(false);
@@ -15,7 +15,7 @@ export function useTheme(){const [theme,setTheme]=useState(document.documentElem
 export function Feed({cameraId}){
  const [image,setImage]=useState(null),[error,setError]=useState(''),[time,setTime]=useState('');
  useEffect(()=>{let stopped=false,url=null,busy=false;const controller=new AbortController();
- async function frame(){if(busy||document.hidden)return;busy=true;try{const r=await fetch(`${base}/api/cameras/snapshot?camera_id=${encodeURIComponent(cameraId)}`,{signal:controller.signal});if(!r.ok)throw Error('Camera frame unavailable');const blob=await r.blob();if(stopped)return;if(url)URL.revokeObjectURL(url);url=URL.createObjectURL(blob);setImage(url);setTime(new Date().toLocaleTimeString());setError('')}catch(e){if(!stopped){setError(e.message);setImage(null)}}finally{busy=false}}
+ async function frame(){if(busy||document.hidden)return;busy=true;try{const r=await fetch(`${base}/api/cameras/snapshot?camera_id=${encodeURIComponent(cameraId)}`,{signal:controller.signal});if(!r.ok)throw Error('Camera frame unavailable');const blob=await r.blob();if(stopped)return;if(url)URL.revokeObjectURL(url);url=URL.createObjectURL(blob);setImage(url);setTime(formatISTTime(new Date()));setError('')}catch(e){if(!stopped){setError(e.message);setImage(null)}}finally{busy=false}}
  setImage(null);frame();const timer=setInterval(frame,5000);return()=>{stopped=true;controller.abort();clearInterval(timer);if(url)URL.revokeObjectURL(url)}},[cameraId]);
  return <div className="real-feed">{image?<img src={image} alt={`Camera ${cameraId}`}/>:<div className="feed-empty">{error||'Connecting to camera…'}</div>}<span>{image?`Latest frame ${time} · refreshes every 5 seconds`:error}</span></div>
 }

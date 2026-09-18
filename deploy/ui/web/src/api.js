@@ -19,3 +19,6 @@ export async function job(path, body, report=()=>{}) {
 export const eventName = event => (event.payload?.event_type || 'Event').replaceAll('_',' ');
 export const stamp = event => event.occurred_at || new Date(event.received_at*1000).toISOString();
 export const snapshotUrl = snapshot => /^\/api\/telemetry\/snapshots\/[a-f0-9]{64}$/.test(snapshot?.url||'') ? base+snapshot.url : null;
+const IST = 'Asia/Kolkata';
+export const formatIST = value => value ? `${new Intl.DateTimeFormat('en-IN',{timeZone:IST,dateStyle:'medium',timeStyle:'medium'}).format(new Date(value))} IST` : '—';
+export const formatISTTime = value => value ? `${new Intl.DateTimeFormat('en-IN',{timeZone:IST,timeStyle:'medium'}).format(new Date(value))} IST` : '—';

@@ -38,7 +38,7 @@ const pages: Array<{ group: string; items: Array<{ id: Page; label: string; icon
   { group: "System", items: [{ id: "settings", label: "Settings", icon: "settings" }] },
 ];
 
-const fmt = (value?: string | null) => value ? new Date(value).toLocaleString() : "—";
+const fmt = (value?: string | null) => value ? `${new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "medium" }).format(new Date(value))} IST` : "—";
 const relative = (value?: string | null) => {
   if (!value) return "Never";
   const seconds = Math.round((Date.now() - new Date(value).getTime()) / 1000);
