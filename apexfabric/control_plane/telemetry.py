@@ -183,32 +183,48 @@ class TelemetryStore:
                 evaluate_attendance(connection, event_id, deployment_id, payload, resolved_person_id, received_at)
                 evaluate_vehicle_traffic(connection, event_id, deployment_id, payload, received_at)
         if inserted and fetch_snapshot:
-            urls = snapshot_urls(payload)
-            for source_url in urls[:self.policy.maximum_snapshots_per_event]:
-                try:
-                    content, content_type = fetch_snapshot(source_url, self.policy.maximum_snapshot_bytes)
-                    if len(content) > self.policy.maximum_snapshot_bytes:
-                        raise ValueError("snapshot exceeds maximum size")
-                    snapshot_id = hashlib.sha256(content).hexdigest()
-                    suffix = ".jpg" if content_type in {"image/jpeg", "image/jpg"} else ".bin"
-                    relative = f"{snapshot_id[:2]}/{snapshot_id}{suffix}"
-                    target = self.snapshot_root / relative
-                    with self.lock, self._connect() as connection:
-                        if not connection.execute("SELECT 1 FROM events WHERE event_id=?", (event_id,)).fetchone():
-                            break
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        if not target.exists():
-                            temporary = target.with_suffix(target.suffix + ".tmp")
-                            temporary.write_bytes(content)
-                            os.replace(temporary, target)
-                        connection.execute("INSERT OR IGNORE INTO snapshots VALUES (?, ?, ?, ?, ?)",
-                                           (snapshot_id, relative, content_type, len(content), received_at))
-                        connection.execute("INSERT OR IGNORE INTO event_snapshots VALUES (?, ?, ?)",
-                                           (event_id, snapshot_id, source_url))
-                except Exception:
-                    logging.getLogger(__name__).warning("Snapshot unavailable for event %s; event and alerts retained", event_id)
+            self.attach_snapshots(event_id, payload, fetch_snapshot)
         self.enforce_retention()
         return event_id
+
+    def attach_snapshots(
+        self,
+        event_id: str,
+        payload: dict[str, Any],
+        fetch_snapshot: Callable[[str, int], tuple[bytes, str]],
+    ) -> None:
+        """Fetch and store any snapshots an already-ingested event references.
+
+        Split out of ingest() so callers on a latency-sensitive path (the SSE
+        collector) can insert the event row immediately and hand this slower,
+        subprocess-driven work off to a background worker instead of blocking
+        on it per event.
+        """
+        received_at = time.time()
+        urls = snapshot_urls(payload)
+        for source_url in urls[:self.policy.maximum_snapshots_per_event]:
+            try:
+                content, content_type = fetch_snapshot(source_url, self.policy.maximum_snapshot_bytes)
+                if len(content) > self.policy.maximum_snapshot_bytes:
+                    raise ValueError("snapshot exceeds maximum size")
+                snapshot_id = hashlib.sha256(content).hexdigest()
+                suffix = ".jpg" if content_type in {"image/jpeg", "image/jpg"} else ".bin"
+                relative = f"{snapshot_id[:2]}/{snapshot_id}{suffix}"
+                target = self.snapshot_root / relative
+                with self.lock, self._connect() as connection:
+                    if not connection.execute("SELECT 1 FROM events WHERE event_id=?", (event_id,)).fetchone():
+                        break
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if not target.exists():
+                        temporary = target.with_suffix(target.suffix + ".tmp")
+                        temporary.write_bytes(content)
+                        os.replace(temporary, target)
+                    connection.execute("INSERT OR IGNORE INTO snapshots VALUES (?, ?, ?, ?, ?)",
+                                       (snapshot_id, relative, content_type, len(content), received_at))
+                    connection.execute("INSERT OR IGNORE INTO event_snapshots VALUES (?, ?, ?)",
+                                       (event_id, snapshot_id, source_url))
+            except Exception:
+                logging.getLogger(__name__).warning("Snapshot unavailable for event %s; event and alerts retained", event_id)
 
     def _logical_bytes(self, connection: sqlite3.Connection) -> int:
         event_bytes = connection.execute("SELECT COALESCE(SUM(payload_bytes), 0) FROM events").fetchone()[0]

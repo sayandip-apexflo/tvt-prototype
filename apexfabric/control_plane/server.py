@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import concurrent.futures
 import json
 import os
 import re
@@ -87,6 +88,12 @@ class Controller:
         self.telemetry_stop = threading.Event()
         self.telemetry_targets: set[str] = set()
         self.telemetry_collectors: set[str] = set()
+        # Snapshot fetches shell out to `kubectl` per image; running them inline in the
+        # SSE readline loop throttles ingestion to that subprocess's latency. Fetching
+        # them here instead lets the collector keep draining the stream at line speed.
+        self.telemetry_snapshot_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="telemetry-snapshot",
+        )
         configured_registry = os.getenv("APEXFABRIC_REGISTRY_ADDRESS")
         registry = (configured_registry or "127.0.0.1:5000").rstrip("/")
         self.catalog = SolutionCatalog(self.state_dir / "catalog.sqlite3")
@@ -1206,18 +1213,28 @@ class Controller:
                     while process.poll() is None and not self.telemetry_stop.is_set():
                         line = process.stdout.readline() if process.stdout else ""
                         if not line:
+                            print(f"telemetry collector for {name!r} disconnected; reconnecting", file=sys.stderr, flush=True)
                             break
                         line = line.rstrip("\r\n")
                         if not line:
                             if data_lines:
                                 payload = json.loads("\n".join(data_lines))
                                 if isinstance(payload, dict):
-                                    self.telemetry.ingest(name, payload, lambda url, maximum: self._fetch_snapshot(name, url, maximum))
+                                    # Snapshot fetches shell out to kubectl and must not
+                                    # block draining the SSE pipe, or ingestion falls
+                                    # behind the live stream. Insert the event inline
+                                    # (fast, DB-only) and fetch its snapshots in the
+                                    # background.
+                                    event_id = self.telemetry.ingest(name, payload)
+                                    self.telemetry_snapshot_executor.submit(
+                                        self.telemetry.attach_snapshots, event_id, payload,
+                                        lambda url, maximum: self._fetch_snapshot(name, url, maximum),
+                                    )
                                 data_lines.clear()
                         elif line.startswith("data:"):
                             data_lines.append(line[5:].lstrip())
-                except (CommandError, ValueError, json.JSONDecodeError, OSError):
-                    pass
+                except (CommandError, ValueError, json.JSONDecodeError, OSError) as error:
+                    print(f"telemetry collector for {name!r} reconnecting after error: {error}", file=sys.stderr, flush=True)
                 finally:
                     if process and process.poll() is None:
                         process.terminate()
