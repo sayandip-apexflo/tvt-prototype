@@ -47,7 +47,10 @@ MemoryDenyWriteExecute=true
 RemoveIPC=true
 SystemCallArchitectures=native
 IPAddressDeny=any
-IPAddressAllow=localhost
+# Camera RTSP snapshot captures (ffmpeg) connect to whatever LAN address the
+# camera is on, not localhost; allow private ranges but keep public internet
+# egress blocked even if this process were compromised.
+IPAddressAllow=localhost 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
 UMask=0027
 
 [Install]

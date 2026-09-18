@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
 import time
+import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, Header, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -32,6 +35,13 @@ from tvt_edge.security import CredentialKeyring, redact_text
 from tvt_edge.service import ManagementService
 from tvt_edge.status import aggregate_health
 from tvt_edge.watchdog import STATE_PATH, WatchdogStatusReader
+
+# apexfabric-control (an optional, separately-installed add-on) owns SSE event
+# collection and snapshot caching for ApexFabric-managed workloads; this API
+# reverse-proxies its telemetry so the browser never needs a second tunnel.
+APEXFABRIC_CONTROL_BASE_URL = "http://127.0.0.1:8088"
+LIVE_FEED_TIMEOUT_SECONDS = 5
+SNAPSHOT_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class StrictModel(BaseModel):
@@ -481,6 +491,48 @@ def create_app(
         actor, request_id = identity(request, x_tvt_actor)
         service.delete_camera(camera_id, actor, request_id)
         return Response(status_code=204)
+
+    @app.get("/api/v1/cameras/{camera_id}/live-feed")
+    def camera_live_feed(camera_id: str, limit: int = 50) -> dict[str, Any]:
+        workload_names = service.camera_workload_names(camera_id)
+        if not workload_names:
+            return {"available": False, "error": "camera has no active deployment assignment", "events": []}
+        events: list[dict[str, Any]] = []
+        error = ""
+        for name in workload_names:
+            url = (
+                f"{APEXFABRIC_CONTROL_BASE_URL}/api/telemetry/events"
+                f"?deployment_id={quote(name)}&limit={int(limit)}"
+            )
+            try:
+                with urllib.request.urlopen(url, timeout=LIVE_FEED_TIMEOUT_SECONDS) as response:
+                    body = json.loads(response.read())
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as caught:
+                error = f"apexfabric-control is unavailable: {caught}"
+                continue
+            for item in body.get("events", []):
+                if item.get("payload", {}).get("camera_id") != camera_id:
+                    continue
+                for snapshot in item.get("snapshots", []):
+                    snapshot["url"] = f"/api/v1/live-feed/snapshots/{snapshot['snapshot_id']}"
+                events.append(item)
+        events.sort(key=lambda item: item.get("received_at", 0), reverse=True)
+        return {"available": bool(events) or not error, "error": error, "events": events[: int(limit)]}
+
+    @app.get("/api/v1/live-feed/snapshots/{snapshot_id}")
+    def live_feed_snapshot(snapshot_id: str) -> Response:
+        if not SNAPSHOT_ID_PATTERN.fullmatch(snapshot_id):
+            return Response(status_code=404, content=b"")
+        url = f"{APEXFABRIC_CONTROL_BASE_URL}/api/telemetry/snapshots/{snapshot_id}"
+        try:
+            with urllib.request.urlopen(url, timeout=LIVE_FEED_TIMEOUT_SECONDS) as response:
+                content = response.read()
+                content_type = response.headers.get("Content-Type", "application/octet-stream")
+        except urllib.error.HTTPError as caught:
+            return Response(status_code=caught.code, content=b"")
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return Response(status_code=503, content=b"")
+        return Response(content=content, media_type=content_type)
 
     @app.post("/internal/v1/deployments/bundles", status_code=201)
     def register_trusted_bundle(

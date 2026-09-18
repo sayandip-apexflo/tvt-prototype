@@ -46,6 +46,17 @@ export interface Camera {
   updated_at: string;
 }
 
+export interface LiveFeedSnapshot { snapshot_id: string; source_url: string; url: string }
+export interface LiveFeedEvent {
+  event_id: string;
+  deployment_id: string;
+  occurred_at?: string | null;
+  received_at: number;
+  payload: { camera_id?: string; event_type?: string; [key: string]: unknown };
+  snapshots: LiveFeedSnapshot[];
+}
+export interface LiveFeedResponse { available: boolean; error?: string; events: LiveFeedEvent[] }
+
 export interface Deployment {
   deployment_id: string;
   solution_id: string;

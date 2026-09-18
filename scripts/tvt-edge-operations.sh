@@ -679,6 +679,22 @@ save_registry_image() {
   mv -f -- "${temporary_archive}" "${staging}/images/registry.tar"
 }
 
+# deploy/ui/Dockerfile is a frozen, exact copy (AGENTS.md §6) and must not be
+# edited to fix a TVT problem. It COPYs deploy/ui/web/dist/ with no explicit
+# mode, so the static files inherit the build host's umask; under
+# deploy/single-box/ui.yaml's non-root securityContext (uid/gid 101) that can
+# leave them unreadable by nginx (403 on every request). Apply the fix as a
+# TVT-owned layer on top of the already-built frozen image instead.
+fix_ui_image_static_permissions() {
+  local image="$1" fixup_context
+  shift
+  fixup_context="$(mktemp -d)"
+  printf 'FROM %s\nRUN chmod 0644 /etc/nginx/nginx.conf && chmod -R a+rX /usr/share/nginx/html\n' \
+    "${image}" >"${fixup_context}/Dockerfile"
+  "$@" build --pull=false -f "${fixup_context}/Dockerfile" -t "${image}" "${fixup_context}"
+  rm -rf "${fixup_context}"
+}
+
 build_control_image() {
   local component="$1" source_directory="$2" image architecture temporary_archive
   image="apexfabric/${component}:${NODE_MANAGEMENT_IMAGE_VERSION}"
@@ -700,6 +716,7 @@ build_ui_image() {
   "${docker_command[@]}" build --pull=false --provenance=false --platform linux/amd64 \
     -f "${REPO_ROOT}/deploy/ui/Dockerfile" \
     -t "${image}" "${REPO_ROOT}"
+  fix_ui_image_static_permissions "${image}" "${docker_command[@]}"
   architecture="$("${docker_command[@]}" image inspect --format '{{.Architecture}}' "${image}")"
   [[ ${architecture} == amd64 ]] || fail "${image} architecture is ${architecture}, not amd64"
   temporary_archive="$(mktemp "${staging}/images/.ui.tar.XXXXXX")"
@@ -1670,6 +1687,34 @@ k3s kubectl get namespace apexfabric >/dev/null 2>&1 || {
   exit 1
 }
 
+# Camera snapshots (POST /api/cameras/snapshot) shell out to ffmpeg on the
+# control-plane host; only this opt-in dashboard needs it, so install it here
+# rather than in every base install.
+command -v ffmpeg >/dev/null 2>&1 || apt-get install -y ffmpeg
+
+# deploy/k8s/apexfabric-foundation.yaml is a frozen, exact copy (AGENTS.md §6)
+# and must not be edited to fix a TVT problem. It never grants the node-agent
+# ServiceAccount get on pods/proxy, so the telemetry supervisor's SSE proxy to
+# a workload's /events endpoint is always rejected with 403 Forbidden (the
+# collector swallows this and retries forever, silently). Grant it via a
+# separate, additive Role/RoleBinding instead of touching the frozen manifest.
+k3s kubectl apply -f - <<'YAML'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: tvt-node-agent-proxy-reader, namespace: apexfabric}
+rules:
+  - apiGroups: [""]
+    resources: ["pods/proxy"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: tvt-node-agent-proxy-reader, namespace: apexfabric}
+subjects:
+  - {kind: ServiceAccount, name: node-agent, namespace: apexfabric}
+roleRef: {kind: Role, name: tvt-node-agent-proxy-reader, apiGroup: rbac.authorization.k8s.io}
+YAML
+
 install -o root -g root -m 0644 \
   "${REPO_ROOT}/deploy/systemd/apexfabric-control.service" \
   /etc/systemd/system/apexfabric-control.service
@@ -1695,7 +1740,12 @@ if ! k3s kubectl get secret apexfabric-ui-admin-auth -n apexfabric >/dev/null 2>
     --from-file=admin.htpasswd="${temporary_htpasswd}" -n apexfabric
   rm -f "${temporary_htpasswd}"
   trap - EXIT
-  install -d -o root -g root -m 0700 /etc/tvt
+  # /etc/tvt is shared with tvt-camera-sync.service and apexfabric-control.service,
+  # both of which run as a non-root user and need to traverse into it to reach their
+  # own tighter-permissioned files (e.g. kubeconfig, this password file). install -d
+  # re-chmods an already-existing directory, so 0700 here would silently break their
+  # traversal; match install-tvt-kubeconfig's 0755 instead.
+  install -d -o root -g root -m 0755 /etc/tvt
   temporary_password="$(mktemp /etc/tvt/.apexfabric-ui-admin-password.XXXXXX)"
   printf '%s\n' "${password}" >"${temporary_password}"
   chmod 0600 "${temporary_password}"
@@ -2875,6 +2925,22 @@ cd "${REPO_ROOT}"
 # shellcheck source=config/platform.env
 source "${REPO_ROOT}/config/platform.env"
 
+# deploy/ui/Dockerfile is a frozen, exact copy (AGENTS.md §6) and must not be
+# edited to fix a TVT problem. It COPYs deploy/ui/web/dist/ with no explicit
+# mode, so the static files inherit the build host's umask; under
+# deploy/single-box/ui.yaml's non-root securityContext (uid/gid 101) that can
+# leave them unreadable by nginx (403 on every request). Apply the fix as a
+# TVT-owned layer on top of the already-built frozen image instead.
+fix_ui_image_static_permissions() {
+  local image="$1" fixup_context
+  shift
+  fixup_context="$(mktemp -d)"
+  printf 'FROM %s\nRUN chmod 0644 /etc/nginx/nginx.conf && chmod -R a+rX /usr/share/nginx/html\n' \
+    "${image}" >"${fixup_context}/Dockerfile"
+  "$@" build --pull=false -f "${fixup_context}/Dockerfile" -t "${image}" "${fixup_context}"
+  rm -rf "${fixup_context}"
+}
+
 REGISTRY=""
 SCHEME="http"
 LOCK_OUTPUT="${REPO_ROOT}/build/ui-image.lock.json"
@@ -2938,6 +3004,7 @@ else
     -f "${REPO_ROOT}/deploy/ui/Dockerfile" \
     -t "${image}" "${REPO_ROOT}"
 fi
+fix_ui_image_static_permissions "${image}" "${DOCKER[@]}"
 "${DOCKER[@]}" push "${image}"
 echo "Published ${image}"
 

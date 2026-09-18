@@ -446,6 +446,40 @@ class ManagementService:
             camera = self._camera(session, camera_key)
             return self._camera_view(session, camera)
 
+    def camera_workload_names(self, camera_key: str) -> list[str]:
+        """K8s Deployment names (deployment_key-app_name) currently serving this camera."""
+        with self.sessions() as session:
+            camera = self._camera(session, camera_key)
+            rows = session.execute(
+                select(DeploymentAssignmentSet, SolutionDeployment)
+                .join(
+                    CameraDeploymentAssignment,
+                    CameraDeploymentAssignment.assignment_set_id
+                    == DeploymentAssignmentSet.id,
+                )
+                .join(
+                    DeploymentSyncState,
+                    DeploymentSyncState.desired_assignment_set_id
+                    == DeploymentAssignmentSet.id,
+                )
+                .join(
+                    SolutionDeployment,
+                    SolutionDeployment.id == DeploymentAssignmentSet.deployment_id,
+                )
+                .where(CameraDeploymentAssignment.camera_id == camera.id)
+                .distinct()
+            ).all()
+            names: list[str] = []
+            for assignment_set, deployment in rows:
+                revision = session.get(
+                    SolutionBundleRevision, assignment_set.bundle_revision_id
+                )
+                if revision is None:
+                    continue
+                app_name = revision.canonical_bundle["applications"][0]["name"]
+                names.append(f"{deployment.deployment_key}-{app_name}")
+            return names
+
     @staticmethod
     def _camera(session: Session, camera_key: str) -> Camera:
         camera = session.scalar(

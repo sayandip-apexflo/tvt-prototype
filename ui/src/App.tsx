@@ -6,7 +6,7 @@ import {
 } from "./components";
 import type {
   AlertItem, AuditItem, Camera, ClusterResponse, Deployment,
-  DeploymentPreview, HealthResponse, NodeView, NotificationItem, Site,
+  DeploymentPreview, HealthResponse, LiveFeedResponse, NodeView, NotificationItem, Site,
   SolutionCatalog, TelemetryResponse,
 } from "./types";
 
@@ -100,6 +100,30 @@ function CameraCreateModal({ close, mutate }: { close: () => void; mutate: Mutat
   })}><Field label="Camera ID"><input name="camera_id" pattern="[a-z0-9][a-z0-9.-]*" placeholder="camera-01" required /></Field><Field label="Friendly name"><input name="friendly_name" placeholder="Main entrance entry" required /></Field><Field label="RTSP URL" wide hint="rtsp://host:554/path — no credentials in the URL"><input name="rtsp_url" type="text" placeholder="rtsp://192.168.20.11:554/live/main" pattern="rtsps?://.+" /></Field><Field label="Manufacturer"><input name="manufacturer" placeholder="Optional" /></Field><Field label="Model"><input name="model" placeholder="Optional" /></Field><FormActions><button type="button" className="button secondary" onClick={close}>Cancel</button><button className="button" type="submit">Add camera</button></FormActions></form></Modal>;
 }
 
+function LiveFeedPanel({ cameraId }: { cameraId: string }) {
+  const [feed, setFeed] = useState<LiveFeedResponse | null>(null);
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      const result = await safeGet<LiveFeedResponse>(`/api/v1/cameras/${encodeURIComponent(cameraId)}/live-feed`, { available: false, events: [] });
+      if (active) setFeed(result);
+    };
+    void load();
+    const timer = window.setInterval(() => void load(), 5000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [cameraId]);
+  if (!feed) return <div className="drawer-loading">Loading live feed…</div>;
+  return <>
+    {!feed.available && <div className="callout warning"><Icon name="warning" /><div><strong>Live feed unavailable</strong><p>{feed.error || "apexfabric-control is not reachable."}</p></div></div>}
+    {feed.available && !feed.events.length && <EmptyState icon="camera" title="No events yet" description="Vehicle-count and ANPR events will appear here as the camera detects traffic." />}
+    <div className="live-feed-list">{feed.events.map((event) => <div className="line-item live-feed-item" key={event.event_id}>
+      <div className="live-feed-row"><StatusPill value="healthy" label={title(event.payload.event_type || "event")} /><span>{fmt(event.occurred_at)}</span></div>
+      {event.snapshots.length > 0 && <div className="live-feed-snapshots">{event.snapshots.map((snapshot) => <img key={snapshot.snapshot_id} src={snapshot.url} alt={title(event.payload.event_type || "event")} loading="lazy" />)}</div>}
+      <JsonView value={(event.payload.payload as Record<string, unknown>) ?? event.payload} />
+    </div>)}</div>
+  </>;
+}
+
 function CameraDetail({ cameraId, close, mutate }: { cameraId: string; close: () => void; mutate: Mutate }) {
   const [camera, setCamera] = useState<Camera | null>(null);
   const [tab, setTab] = useState("overview");
@@ -111,8 +135,9 @@ function CameraDetail({ cameraId, close, mutate }: { cameraId: string; close: ()
   return <div className="drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && close()}><aside className="drawer">{!camera ? <div className="drawer-loading">Loading camera…</div> : <>
     <header className="drawer-head"><div className="camera-title"><span className="camera-glyph large"><Icon name="camera" size={23} /></span><div><span>{camera.camera_id}</span><h2>{camera.friendly_name}</h2></div></div><button className="icon-button" onClick={close}><Icon name="close" /></button></header>
     <div className="drawer-summary"><StatusPill {...cameraStatus(camera)} /><span>{camera.manufacturer || "Unknown vendor"} {camera.model || ""}</span><span>Updated {relative(camera.updated_at)}</span></div>
-    <nav className="tabs">{["overview", "stream", "credentials"].map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{title(item)}</button>)}</nav>
+    <nav className="tabs">{["overview", "live", "stream", "credentials"].map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{title(item)}</button>)}</nav>
     <div className="drawer-body">
+      {tab === "live" && <LiveFeedPanel cameraId={camera.camera_id} />}
       {tab === "overview" && <><div className="detail-grid"><div><span>Enabled</span><strong>{camera.enabled ? "Yes" : "No"}</strong></div><div><span>Stream</span><strong>{camera.configured ? "Configured" : "Not configured"}</strong></div><div><span>Credentials</span><strong>{camera.credentials_configured ? "Configured" : "Not configured"}</strong></div></div><div className="button-row"><button className="button secondary" onClick={() => void action(send(`/api/v1/cameras/${encodeURIComponent(camera.camera_id)}/enabled`, "PATCH", { enabled: !camera.enabled }), camera.enabled ? "Camera disabled" : "Camera enabled")}>{camera.enabled ? "Disable" : "Enable"}</button></div><h3>Identifiers</h3><div className="tag-list">{camera.identifiers.map((item) => <span key={`${item.kind}-${item.value}`}>{item.kind}: {item.value}</span>)}{!camera.identifiers.length && <span>No strong identifiers</span>}</div><h3>Assignments</h3>{camera.assignments?.length ? camera.assignments.map((item) => <div className="line-item" key={item.deployment_id}><strong>{item.deployment_id}</strong><span>{item.apps.join(", ")} · {item.fps} FPS</span></div>) : <p className="muted">No active assignments.</p>}</>}
       {tab === "stream" && <form className="form-grid" onSubmit={(event) => submitForm(event, async (form) => { await action(send(`/api/v1/cameras/${encodeURIComponent(camera.camera_id)}/stream`, "PUT", { scheme: form.get("scheme"), host: form.get("host"), port: Number(form.get("port")), path: form.get("path"), profile_token: form.get("profile_token"), transport: form.get("transport"), codec: form.get("codec") || null, width: form.get("width") ? Number(form.get("width")) : null, height: form.get("height") ? Number(form.get("height")) : null, fps: form.get("fps") ? Number(form.get("fps")) : null }), "Stream configuration saved"); })}><Field label="Scheme"><select name="scheme" defaultValue={camera.selected_profile?.scheme || "rtsp"}><option>rtsp</option><option>rtsps</option></select></Field><Field label="Transport"><select name="transport" defaultValue={camera.selected_profile?.transport || "tcp"}><option>tcp</option><option>udp</option></select></Field><Field label="Host" wide><input name="host" defaultValue={camera.selected_profile?.host || ""} placeholder="192.168.20.11" required /></Field><Field label="Port"><input name="port" type="number" defaultValue={camera.selected_profile?.port || 554} required /></Field><Field label="Profile token"><input name="profile_token" defaultValue={camera.selected_profile?.profile_token || "main"} required /></Field><Field label="Path" wide><input name="path" defaultValue={camera.selected_profile?.path || "/live/main"} required /></Field><Field label="Codec"><input name="codec" defaultValue={camera.selected_profile?.codec || ""} placeholder="h264" /></Field><Field label="FPS"><input name="fps" type="number" step="0.1" defaultValue={camera.selected_profile?.fps || ""} /></Field><Field label="Width"><input name="width" type="number" defaultValue={camera.selected_profile?.width || ""} /></Field><Field label="Height"><input name="height" type="number" defaultValue={camera.selected_profile?.height || ""} /></Field><FormActions><button className="button" type="submit">Save stream</button></FormActions></form>}
       {tab === "credentials" && <><div className="security-note"><Icon name="eye" /><span>Credentials are write-only. Existing values are never returned to this browser.</span></div><form className="form-grid" autoComplete="off" onSubmit={(event) => { const formElement = event.currentTarget; submitForm(event, async (form) => { if (await action(send(`/api/v1/cameras/${encodeURIComponent(camera.camera_id)}/credentials`, "PUT", { username: form.get("username") || null, password: form.get("password") || null, query: {} }), "Credentials replaced")) formElement.reset(); }); }}><Field label="Username" wide><input name="username" autoComplete="off" /></Field><Field label="Password" wide><input name="password" type="password" autoComplete="new-password" /></Field><FormActions><button className="button" type="submit">Replace credentials</button>{camera.credentials_configured && <ConfirmButton message="Permanently destroy the stored camera credentials?" onConfirm={() => { void action(send(`/api/v1/cameras/${encodeURIComponent(camera.camera_id)}/credentials`, "DELETE"), "Credentials cleared"); }}>Clear credentials</ConfirmButton>}</FormActions></form></>}

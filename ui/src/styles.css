@@ -203,6 +203,11 @@ td strong { color: #202b42; font-weight: 600; }
 .tag-list span { padding: 4px 7px; border-radius: 6px; color: #5060bb; background: #eef0ff; font-size: 9px; }
 .line-item { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #edf0f4; }
 .line-item:last-child { border: 0; }
+.live-feed-list { display: flex; flex-direction: column; }
+.live-feed-item { flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 8px; padding: 14px 0; }
+.live-feed-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 10px; color: var(--muted); }
+.live-feed-snapshots { display: flex; flex-wrap: wrap; gap: 8px; }
+.live-feed-snapshots img { width: 96px; height: 72px; object-fit: cover; border-radius: 7px; border: 1px solid #edf0f4; }
 .security-note { padding: 12px 14px; border-radius: 9px; color: #855d1d; background: #fff7e8; font-size: 10px; line-height: 1.55; }
 
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; }
