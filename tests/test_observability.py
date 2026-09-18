@@ -46,11 +46,11 @@ class MetricsTests(unittest.TestCase):
             "camera-01", 0.2, result="RTSP_AUTH_FAILED"
         )
         metrics.http_started()
-        metrics.http_finished("GET", "/api/v1/cameras/{camera_id}", 200, 0.01)
+        metrics.http_finished("GET", "/api/v1/deployments", 200, 0.01)
         body, content_type = render_metrics(metrics.registry)
         rendered = body.decode()
         self.assertIn(
-            'http_requests_total{method="GET",route="/api/v1/cameras/{camera_id}",service="edge-management",status_class="2xx"} 1.0',
+            'http_requests_total{method="GET",route="/api/v1/deployments",service="edge-management",status_class="2xx"} 1.0',
             rendered,
         )
         self.assertIn(

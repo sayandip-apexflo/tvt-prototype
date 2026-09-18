@@ -13,7 +13,12 @@ from alembic import command
 from alembic.config import Config
 
 from tvt_edge.api import create_app
-from tvt_edge.cluster import ClusterStatusReader, NodeImagePreflight, SyncWorker
+from tvt_edge.cluster import (
+    CameraInventorySyncWorker,
+    ClusterStatusReader,
+    NodeImagePreflight,
+    SyncWorker,
+)
 from tvt_edge.db.session import build_engine, build_session_factory
 from tvt_edge.legacy import import_sqlite_lifecycle
 from tvt_edge.observability import configure_json_logging
@@ -217,9 +222,13 @@ def main(argv: list[str] | None = None) -> int:
         rollout_timeout=settings.rollout_timeout,
         image_puller=NodeImagePreflight(sync_kubectl),
     )
+    camera_inventory_worker = CameraInventorySyncWorker(sessions, keyring, sync_kubectl)
     while True:
         had_error = False
-        for name, worker in (("sync", sync_worker),):
+        for name, worker in (
+            ("sync", sync_worker),
+            ("camera-inventory-sync", camera_inventory_worker),
+        ):
             try:
                 result = worker.run_once()
                 if result is not None:

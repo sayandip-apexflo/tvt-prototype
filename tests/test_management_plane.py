@@ -5,7 +5,6 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
-from urllib.error import URLError
 
 import yaml
 import httpx
@@ -604,16 +603,6 @@ class ManagementPlaneTests(unittest.TestCase):
             self.assertNotIn("camera-secret", json.dumps(attempt.safe_detail))
             self.assertIn("REDACTED_RTSP_URL", json.dumps(attempt.safe_detail))
 
-    def test_loopback_api_exposes_write_only_credential_route(self):
-        app = create_app(self.sessions, self.keyring)
-        routes = {(route.path, tuple(sorted(route.methods or ()))) for route in app.routes}
-        self.assertIn(
-            ("/api/v1/cameras/{camera_id}/credentials", ("PUT",)), routes
-        )
-        self.assertNotIn(
-            ("/api/v1/cameras/{camera_id}/credentials", ("GET",)), routes
-        )
-
     def test_audit_history_is_managed(self):
         self.service.create_site(
             "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"
@@ -630,25 +619,6 @@ class ManagementPlaneTests(unittest.TestCase):
         self.assertEqual(
             self.service.list_audit_events()[0]["action"], "camera.create"
         )
-
-    def test_edge_api_serves_packaged_react_application(self):
-        app = create_app(self.sessions, self.keyring)
-
-        async def exercise():
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(
-                transport=transport, base_url="http://127.0.0.1"
-            ) as client:
-                index = await client.get("/")
-                fallback = await client.get("/cluster")
-                missing_api = await client.get("/api/v1/not-a-route")
-            return index, fallback, missing_api
-
-        index, fallback, missing_api = asyncio.run(exercise())
-        self.assertEqual(index.status_code, 200)
-        self.assertIn('<div id="root"></div>', index.text)
-        self.assertEqual(fallback.text, index.text)
-        self.assertEqual(missing_api.status_code, 404)
 
     def test_api_rejects_untrusted_hosts_and_disables_schema_exposure(self):
         app = create_app(self.sessions, self.keyring)
@@ -677,7 +647,7 @@ class ManagementPlaneTests(unittest.TestCase):
                 transport=transport, base_url="http://127.0.0.1"
             ) as client:
                 return await client.post(
-                    "/api/v1/cameras",
+                    "/internal/v1/sites",
                     content=b"x",
                     headers={"Content-Length": str(1024 * 1024 + 1)},
                 )
@@ -711,138 +681,12 @@ class ManagementPlaneTests(unittest.TestCase):
         )
         self.assertEqual(health["components"]["k3s_api"]["status"], "healthy")
 
-    def test_camera_detail_is_bounded_and_non_secret(self):
-        self.commit()
-        app = create_app(self.sessions, self.keyring)
-        response = self.route_handler(app, "/api/v1/cameras/{camera_id}")(
-            "camera-01"
-        )
-        self.assertEqual(response["camera_id"], "camera-01")
-        self.assertNotIn("password", json.dumps(response))
-
     def test_camera_workload_names_reflects_the_running_bundle_application(self):
         self.commit()
         self.assertEqual(
             self.service.camera_workload_names("camera-01"),
             ["traffic-edge-intel-285h-runtime"],
         )
-
-    def test_camera_live_feed_proxies_and_scopes_to_the_requested_camera(self):
-        self.commit()
-        app = create_app(self.sessions, self.keyring)
-
-        class FakeJsonResponse:
-            def __init__(self, body):
-                self._body = json.dumps(body).encode()
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-            def read(self):
-                return self._body
-
-        upstream = {
-            "events": [
-                {
-                    "event_id": "d:1",
-                    "deployment_id": "traffic-edge-intel-285h-runtime",
-                    "occurred_at": "2026-01-01T00:00:00Z",
-                    "received_at": 2.0,
-                    "payload": {"camera_id": "camera-01", "event_type": "vehicle_count_event"},
-                    "snapshots": [{
-                        "snapshot_id": "a" * 64,
-                        "source_url": "/snapshots/x.jpg",
-                        "url": "/api/telemetry/snapshots/" + "a" * 64,
-                    }],
-                },
-                {
-                    "event_id": "d:2",
-                    "deployment_id": "traffic-edge-intel-285h-runtime",
-                    "occurred_at": "2026-01-01T00:00:01Z",
-                    "received_at": 1.0,
-                    "payload": {"camera_id": "some-other-camera", "event_type": "vehicle_count_event"},
-                    "snapshots": [],
-                },
-            ]
-        }
-        with patch(
-            "tvt_edge.api.app.urllib.request.urlopen",
-            return_value=FakeJsonResponse(upstream),
-        ) as mocked:
-            result = self.route_handler(
-                app, "/api/v1/cameras/{camera_id}/live-feed"
-            )("camera-01")
-        self.assertTrue(result["available"])
-        self.assertEqual(len(result["events"]), 1)
-        self.assertEqual(result["events"][0]["payload"]["camera_id"], "camera-01")
-        self.assertEqual(
-            result["events"][0]["snapshots"][0]["url"],
-            "/api/v1/live-feed/snapshots/" + "a" * 64,
-        )
-        self.assertIn(
-            "deployment_id=traffic-edge-intel-285h-runtime", mocked.call_args[0][0]
-        )
-
-    def test_camera_live_feed_degrades_when_apexfabric_control_is_unreachable(self):
-        self.commit()
-        app = create_app(self.sessions, self.keyring)
-        with patch(
-            "tvt_edge.api.app.urllib.request.urlopen",
-            side_effect=URLError("connection refused"),
-        ):
-            result = self.route_handler(
-                app, "/api/v1/cameras/{camera_id}/live-feed"
-            )("camera-01")
-        self.assertFalse(result["available"])
-        self.assertIn("apexfabric-control is unavailable", result["error"])
-        self.assertEqual(result["events"], [])
-
-    def test_camera_live_feed_reports_unavailable_for_a_camera_without_a_deployment(self):
-        self.service.create_site(
-            "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"
-        )
-        self.onboard()
-        app = create_app(self.sessions, self.keyring)
-        result = self.route_handler(
-            app, "/api/v1/cameras/{camera_id}/live-feed"
-        )("camera-01")
-        self.assertFalse(result["available"])
-        self.assertEqual(result["events"], [])
-
-    def test_live_feed_snapshot_proxies_bytes_and_rejects_malformed_ids(self):
-        app = create_app(self.sessions, self.keyring)
-
-        class FakeImageResponse:
-            def __init__(self, body, content_type):
-                self._body = body
-                self.headers = {"Content-Type": content_type}
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-            def read(self):
-                return self._body
-
-        with patch(
-            "tvt_edge.api.app.urllib.request.urlopen",
-            return_value=FakeImageResponse(b"\xff\xd8", "image/jpeg"),
-        ):
-            response = self.route_handler(
-                app, "/api/v1/live-feed/snapshots/{snapshot_id}"
-            )("a" * 64)
-        self.assertEqual(response.body, b"\xff\xd8")
-        self.assertEqual(response.media_type, "image/jpeg")
-
-        rejected = self.route_handler(
-            app, "/api/v1/live-feed/snapshots/{snapshot_id}"
-        )("not-a-hash")
-        self.assertEqual(rejected.status_code, 404)
 
     def test_cluster_reader_degrades_without_exposing_command_error(self):
         class FailedKubectl:

@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 import json
-import mimetypes
-import re
 import time
-import urllib.error
-import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Header, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -36,13 +32,6 @@ from tvt_edge.service import ManagementService
 from tvt_edge.status import aggregate_health
 from tvt_edge.watchdog import STATE_PATH, WatchdogStatusReader
 
-# apexfabric-control (an optional, separately-installed add-on) owns SSE event
-# collection and snapshot caching for ApexFabric-managed workloads; this API
-# reverse-proxies its telemetry so the browser never needs a second tunnel.
-APEXFABRIC_CONTROL_BASE_URL = "http://127.0.0.1:8088"
-LIVE_FEED_TIMEOUT_SECONDS = 5
-SNAPSHOT_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -53,53 +42,6 @@ class SiteCreate(StrictModel):
     edge_id: str
     display_name: str
     timezone: str = "UTC"
-
-
-class IdentifierInput(StrictModel):
-    kind: str
-    value: str
-    source: str = "operator"
-    confidence: str = "asserted"
-
-
-class CameraCreate(StrictModel):
-    camera_id: str
-    friendly_name: str
-    manufacturer: str | None = None
-    model: str | None = None
-    identifiers: list[IdentifierInput] = Field(default_factory=list)
-    rtsp_url: str | None = None
-
-
-class StreamInput(StrictModel):
-    scheme: str = "rtsp"
-    host: str
-    port: int = 554
-    path: str
-    profile_token: str
-    transport: str = "tcp"
-    codec: str | None = None
-    width: int | None = None
-    height: int | None = None
-    fps: float | None = None
-
-
-class CredentialInput(StrictModel):
-    username: str | None = None
-    password: str | None = None
-    query: dict[str, str] = Field(default_factory=dict)
-    path_suffix: str | None = None
-
-
-class CameraEnabledInput(StrictModel):
-    enabled: bool
-
-
-class CameraRoleInput(StrictModel):
-    role_key: str
-    display_name: str
-    direction: str = "unknown"
-    ordinal: int | None = None
 
 
 class DeploymentInput(StrictModel):
@@ -181,7 +123,6 @@ def create_app(
     allowed_namespace: str = "apexfabric",
     kubectl: Kubectl | None = None,
     watchdog_state_path: Path = STATE_PATH,
-    static_dir: Path | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="TVT edge management",
@@ -384,156 +325,6 @@ def create_app(
             "config_revision": site.config_revision,
         }
 
-    @app.post("/api/v1/cameras", status_code=201)
-    def create_camera(
-        body: CameraCreate,
-        request: Request,
-        x_tvt_actor: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        actor, request_id = identity(request, x_tvt_actor)
-        camera = service.create_camera(
-            camera_key=body.camera_id,
-            friendly_name=body.friendly_name,
-            manufacturer=body.manufacturer,
-            model=body.model,
-            identifiers=[item.model_dump() for item in body.identifiers],
-            rtsp_url=body.rtsp_url,
-            actor=actor,
-            request_id=request_id,
-        )
-        return {"camera_id": camera.camera_key}
-
-    @app.get("/api/v1/cameras")
-    def list_cameras() -> list[dict[str, Any]]:
-        return service.list_cameras()
-
-    @app.get("/api/v1/cameras/{camera_id}")
-    def get_camera(camera_id: str) -> dict[str, Any]:
-        return service.get_camera(camera_id)
-
-    @app.put("/api/v1/cameras/{camera_id}/stream")
-    def configure_stream(
-        camera_id: str,
-        body: StreamInput,
-        request: Request,
-        x_tvt_actor: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        actor, request_id = identity(request, x_tvt_actor)
-        profile = service.configure_stream(
-            camera_id, **body.model_dump(), actor=actor, request_id=request_id
-        )
-        return {"profile_id": str(profile.id), "selected": True}
-
-    @app.put("/api/v1/cameras/{camera_id}/credentials", status_code=204)
-    def rotate_credentials(
-        camera_id: str,
-        body: CredentialInput,
-        request: Request,
-        x_tvt_actor: str | None = Header(default=None),
-    ) -> Response:
-        actor, request_id = identity(request, x_tvt_actor)
-        service.rotate_credentials(
-            camera_id,
-            body.model_dump(exclude_none=True),
-            actor,
-            request_id,
-        )
-        return Response(status_code=204)
-
-    @app.delete("/api/v1/cameras/{camera_id}/credentials", status_code=204)
-    def clear_credentials(
-        camera_id: str,
-        request: Request,
-        x_tvt_actor: str | None = Header(default=None),
-    ) -> Response:
-        actor, request_id = identity(request, x_tvt_actor)
-        service.clear_credentials(camera_id, actor, request_id)
-        return Response(status_code=204)
-
-    @app.post("/api/v1/cameras/{camera_id}/roles", status_code=201)
-    def assign_role(
-        camera_id: str,
-        body: CameraRoleInput,
-        request: Request,
-        x_tvt_actor: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        actor, request_id = identity(request, x_tvt_actor)
-        assignment = service.assign_camera_role(
-            camera_id,
-            body.role_key,
-            body.display_name,
-            body.direction,
-            body.ordinal,
-            actor,
-            request_id,
-        )
-        return {"role_assignment_id": str(assignment.id)}
-
-    @app.patch("/api/v1/cameras/{camera_id}/enabled")
-    def set_camera_enabled(
-        camera_id: str,
-        body: CameraEnabledInput,
-        request: Request,
-        x_tvt_actor: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        actor, request_id = identity(request, x_tvt_actor)
-        camera = service.set_camera_enabled(
-            camera_id, body.enabled, actor, request_id
-        )
-        return {"camera_id": camera.camera_key, "enabled": camera.enabled}
-
-    @app.delete("/api/v1/cameras/{camera_id}", status_code=204)
-    def delete_camera(
-        camera_id: str,
-        request: Request,
-        x_tvt_actor: str | None = Header(default=None),
-    ) -> Response:
-        actor, request_id = identity(request, x_tvt_actor)
-        service.delete_camera(camera_id, actor, request_id)
-        return Response(status_code=204)
-
-    @app.get("/api/v1/cameras/{camera_id}/live-feed")
-    def camera_live_feed(camera_id: str, limit: int = 50) -> dict[str, Any]:
-        workload_names = service.camera_workload_names(camera_id)
-        if not workload_names:
-            return {"available": False, "error": "camera has no active deployment assignment", "events": []}
-        events: list[dict[str, Any]] = []
-        error = ""
-        for name in workload_names:
-            url = (
-                f"{APEXFABRIC_CONTROL_BASE_URL}/api/telemetry/events"
-                f"?deployment_id={quote(name)}&limit={int(limit)}"
-            )
-            try:
-                with urllib.request.urlopen(url, timeout=LIVE_FEED_TIMEOUT_SECONDS) as response:
-                    body = json.loads(response.read())
-            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as caught:
-                error = f"apexfabric-control is unavailable: {caught}"
-                continue
-            for item in body.get("events", []):
-                if item.get("payload", {}).get("camera_id") != camera_id:
-                    continue
-                for snapshot in item.get("snapshots", []):
-                    snapshot["url"] = f"/api/v1/live-feed/snapshots/{snapshot['snapshot_id']}"
-                events.append(item)
-        events.sort(key=lambda item: item.get("received_at", 0), reverse=True)
-        return {"available": bool(events) or not error, "error": error, "events": events[: int(limit)]}
-
-    @app.get("/api/v1/live-feed/snapshots/{snapshot_id}")
-    def live_feed_snapshot(snapshot_id: str) -> Response:
-        if not SNAPSHOT_ID_PATTERN.fullmatch(snapshot_id):
-            return Response(status_code=404, content=b"")
-        url = f"{APEXFABRIC_CONTROL_BASE_URL}/api/telemetry/snapshots/{snapshot_id}"
-        try:
-            with urllib.request.urlopen(url, timeout=LIVE_FEED_TIMEOUT_SECONDS) as response:
-                content = response.read()
-                content_type = response.headers.get("Content-Type", "application/octet-stream")
-        except urllib.error.HTTPError as caught:
-            return Response(status_code=caught.code, content=b"")
-        except (urllib.error.URLError, TimeoutError, OSError):
-            return Response(status_code=503, content=b"")
-        return Response(content=content, media_type=content_type)
-
     @app.post("/internal/v1/deployments/bundles", status_code=201)
     def register_trusted_bundle(
         body: DeploymentInput,
@@ -661,42 +452,5 @@ def create_app(
             deployment_id, body.bundle_sha256, actor, request_id
         )
         return {"desired_revision": value.desired_revision, "state": "pending"}
-
-    ui_root = static_dir or Path(__file__).resolve().parents[1] / "static"
-    ui_index = ui_root / "index.html"
-    assets = ui_root / "assets"
-    if ui_index.is_file():
-        ui_document = ui_index.read_bytes()
-        ui_assets = {
-            path.relative_to(assets).as_posix(): path.read_bytes()
-            for path in assets.rglob("*")
-            if path.is_file()
-        } if assets.is_dir() else {}
-
-        @app.get("/assets/{asset_path:path}", include_in_schema=False)
-        async def ui_asset(asset_path: str) -> Response:
-            content = ui_assets.get(asset_path)
-            if content is None:
-                return Response(
-                    content='{"detail":"not found"}',
-                    status_code=404,
-                    media_type="application/json",
-                )
-            media_type = mimetypes.guess_type(asset_path)[0] or "application/octet-stream"
-            return Response(content=content, media_type=media_type)
-
-        @app.get("/", include_in_schema=False)
-        async def ui_index_page() -> Response:
-            return Response(content=ui_document, media_type="text/html")
-
-        @app.get("/{ui_path:path}", include_in_schema=False)
-        async def ui_fallback(ui_path: str) -> Response:
-            if ui_path in {"docs", "redoc", "openapi.json", "metrics"} or ui_path.startswith(("api/", "internal/")):
-                return Response(
-                    content='{"detail":"not found"}',
-                    status_code=404,
-                    media_type="application/json",
-                )
-            return Response(content=ui_document, media_type="text/html")
 
     return app
