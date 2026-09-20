@@ -17,14 +17,13 @@ class InstallCatalogTests(unittest.TestCase):
     def setUp(self):
         self.selection = json.loads((ROOT / 'deploy/single-box/solution-packs.json').read_text())
         self.inventory = {'images': [
-            {'repository': 'apexfabric/traffic-edge-runtime', 'tag': 'intel-285h-2026.08.21-v4', 'digest': DIGEST},
-            {'repository': 'apexfabric/surveillance-edge-runtime', 'tag': 'intel-285h-2026.08.24-v3', 'digest': DIGEST},
+            {'repository': 'apexfabric/tvt-mills-pilot', 'tag': 'intel-285h-2026.09.18-v1', 'digest': DIGEST},
         ]}
         self.manifest = build_manifest(ROOT, self.selection, self.inventory)
 
     def test_bundle_requires_every_selected_image(self):
         with self.assertRaisesRegex(ValueError, 'missing'):
-            build_manifest(ROOT, self.selection, {'images': self.inventory['images'][:1]})
+            build_manifest(ROOT, self.selection, {'images': []})
 
     def test_manifest_rejects_changed_contracts_and_paths(self):
         changed = copy.deepcopy(self.manifest)
@@ -41,10 +40,10 @@ class InstallCatalogTests(unittest.TestCase):
             with patch('apexfabric.solution_management.install_catalog.resolve_registry_digest', return_value=DIGEST), patch('apexfabric.solution_management.catalog.resolve_registry_digest', return_value=DIGEST):
                 register(catalog, ROOT, self.manifest, '127.0.0.1:5000')
                 register(catalog, ROOT, self.manifest, '127.0.0.1:5000')
-            self.assertEqual(len(catalog.list()), 2)
-            self.assertEqual(len(verify(catalog, ROOT, self.manifest, '127.0.0.1:5000')), 2)
+            self.assertEqual(len(catalog.list()), 1)
+            self.assertEqual(len(verify(catalog, ROOT, self.manifest, '127.0.0.1:5000')), 1)
             with catalog._connect() as connection:
-                connection.execute("UPDATE solutions SET status='unavailable' WHERE name='traffic-edge-runtime'")
+                connection.execute("UPDATE solutions SET status='unavailable' WHERE name='tvt-mills-pilot'")
             with self.assertRaisesRegex(ValueError, 'not available'):
                 verify(catalog, ROOT, self.manifest, '127.0.0.1:5000')
 
@@ -63,7 +62,7 @@ class InstallCatalogTests(unittest.TestCase):
             manifest_path.write_text(json.dumps(manifest))
             with patch.dict('os.environ', {'APEXFABRIC_CATALOG_MANIFEST': str(manifest_path)}, clear=True):
                 controller = Controller(Path(directory) / 'control')
-            self.assertEqual([x['name'] for x in controller.catalog.list()], ['traffic-edge-runtime'])
+            self.assertEqual([x['name'] for x in controller.catalog.list()], ['tvt-mills-pilot'])
 
 
 if __name__ == '__main__':

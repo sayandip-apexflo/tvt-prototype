@@ -1,22 +1,22 @@
 api_version: apexfabric.com/v1alpha1
 kind: DeploymentBundle
-deployment_id: traffic-edge-intel-285h
+deployment_id: tvt-mills-edge-intel-285h
 solution:
-  solution_id: traffic-edge
-  version: 2026.8.20
+  solution_id: tvt-mills-edge
+  version: 2026.9.18
 applications:
   - name: runtime
     image:
-      repository: __APEXFABRIC_REGISTRY__/apexfabric/traffic-edge-runtime
-      tag: intel-285h-2026.08.21-v4
+      repository: __APEXFABRIC_REGISTRY__/apexfabric/tvt-mills-pilot
+      tag: intel-285h-2026.09.18-v1
       pull_policy: IfNotPresent
     replicas: 1
     lifecycle:
       desired_state: Running
       termination_grace_period_seconds: 60
     resources:
-      cpu: {request: "8", limit: "16"}
-      memory: {request: "16Gi", limit: "32Gi"}
+      cpu: {request: "4", limit: "16"}
+      memory: {request: "8Gi", limit: "24Gi"}
       accelerators: {decoder: 0, metis: 0}
       camera_streams: 2
     cameras: [cam4, cam5]
@@ -26,10 +26,10 @@ applications:
       required_for_readiness: false
       scheduling_mode: runtime-connectivity
     configuration:
-      desired_state_config_map: traffic-edge-intel-285h-desired-state
+      desired_state_config_map: tvt-mills-edge-intel-285h-desired-state
       desired_state_key: desired_state.json
       models_delivery: baked-in
-      models_root: /models/traffic/openvino
+      models_root: /models/tvt-mills
       inference_mode: cpu-compatible
     placement:
       runtime_profile: intel-285h-gpu-npu
@@ -45,18 +45,18 @@ applications:
         read_only: true
         source:
           type: secret
-          name: traffic-edge-intel-285h-camera-sources
+          name: tvt-mills-edge-intel-285h-camera-sources
           key: cam4.rtsp
       - name: cam5-source
         mount_path: /run/secrets/apexfabric/cam5.rtsp
         read_only: true
         source:
           type: secret
-          name: traffic-edge-intel-285h-camera-sources
+          name: tvt-mills-edge-intel-285h-camera-sources
           key: cam5.rtsp
     plan_compiler:
       type: edge-agent-v1
-      desired_state_config_map: traffic-edge-intel-285h-desired-state
+      desired_state_config_map: tvt-mills-edge-intel-285h-desired-state
       desired_state_key: desired_state.json
     health:
       startup: {path: /readyz, port: management, period_seconds: 5, timeout_seconds: 4, failure_threshold: 60}
@@ -68,15 +68,12 @@ applications:
       metrics: {path: /metrics, port: management, format: json}
       events: {path: /events, port: management, protocol: sse}
     environment:
-      SOLUTION_PACK: traffic
-      VEHICLE_DEVICE: CPU
-      PLATE_DEVICE: CPU
-      OCR_DEVICE: CPU
+      SOLUTION_PACK: tvt-mills-pilot
 configuration:
   edge_id: intel-box-01
   deployment_mode: two-camera-demo
   runtime_plan_is_compiled_by_init_container: true
   image_contract: apexfabric-v1
-  secret_input_contract: traffic-runtime-v1
+  secret_input_contract: tvt-mills-pilot-runtime-v1
   models_delivery: baked-in
   inference_mode: cpu-compatible

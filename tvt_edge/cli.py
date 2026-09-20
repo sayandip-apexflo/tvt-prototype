@@ -73,7 +73,7 @@ def parser() -> argparse.ArgumentParser:
         type=Path,
         default=(
             ROOT
-            / "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
+            / "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
         ),
     )
     seed_solutions.add_argument("--registry", default="127.0.0.1:5000")

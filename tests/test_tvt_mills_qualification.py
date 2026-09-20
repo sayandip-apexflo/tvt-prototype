@@ -9,17 +9,17 @@ from tvt_edge.delivery_metadata import load_delivery_metadata
 from tvt_edge.qualification import (
     CATALOG_ID,
     QualificationOptions,
-    TrafficQualifier,
+    TvtMillsQualifier,
     atomic_write_report,
     parse_sse_events,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DELIVERY = ROOT / "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
+DELIVERY = ROOT / "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
 DIGEST = "sha256:" + "1" * 64
 BUNDLE_SHA = "2" * 64
-IMAGE = f"127.0.0.1:5000/apexfabric/traffic-edge-runtime@{DIGEST}"
+IMAGE = f"127.0.0.1:5000/apexfabric/tvt-mills-pilot@{DIGEST}"
 
 
 class FakeApi:
@@ -31,7 +31,7 @@ class FakeApi:
         if path == "/api/v1/deployments":
             return [
                 {
-                    "deployment_id": "traffic-v4",
+                    "deployment_id": "tvt-mills-v1",
                     "catalog_id": CATALOG_ID,
                     "sync_state": "applied",
                     "desired_revision": 4,
@@ -62,7 +62,7 @@ class FakeApi:
                     ]
                 }
             }
-        if path == "/api/v1/cluster/workloads/traffic-v4-runtime/telemetry":
+        if path == "/api/v1/cluster/workloads/tvt-mills-v1-runtime/telemetry":
             return {
                 "available": True,
                 "health": {"status": "ok"},
@@ -71,7 +71,7 @@ class FakeApi:
                     {
                         "format": "application/json",
                         "runtime": {
-                            "solution_pack": "traffic",
+                            "solution_pack": "tvt-mills-pilot",
                             "edge_id": "edge-01",
                             "revision": 4,
                             "plan_loaded": True,
@@ -154,7 +154,7 @@ class FakeCommands:
                         "items": [
                             {
                                 "metadata": {
-                                    "name": "traffic-v4-runtime-state",
+                                    "name": "tvt-mills-v1-runtime-state",
                                     "uid": self.pvc_uid,
                                 },
                                 "status": {"phase": "Bound"},
@@ -208,19 +208,19 @@ class FakeCommands:
                             {
                                 "name": "desired-state",
                                 "secret": {
-                                    "secretName": "traffic-v4-desired-state"
+                                    "secretName": "tvt-mills-v1-desired-state"
                                 },
                             },
                             {
                                 "name": "camera-source",
                                 "secret": {
-                                    "secretName": "traffic-v4-camera-sources"
+                                    "secretName": "tvt-mills-v1-camera-sources"
                                 },
                             },
                             {
                                 "name": "state",
                                 "persistentVolumeClaim": {
-                                    "claimName": "traffic-v4-runtime-state"
+                                    "claimName": "tvt-mills-v1-runtime-state"
                                 },
                             },
                         ],
@@ -232,7 +232,7 @@ class FakeCommands:
     @staticmethod
     def pod():
         return {
-            "metadata": {"name": "traffic-v4-runtime-abc"},
+            "metadata": {"name": "tvt-mills-v1-runtime-abc"},
             "status": {
                 "phase": "Running",
                 "initContainerStatuses": [
@@ -252,7 +252,7 @@ class FakeCommands:
         }
 
 
-class TrafficQualificationTests(unittest.TestCase):
+class TvtMillsQualificationTests(unittest.TestCase):
     def qualifier(self, api=None, commands=None):
         metadata = load_delivery_metadata(DELIVERY)
         provenance = metadata["provenance"]
@@ -283,7 +283,7 @@ class TrafficQualificationTests(unittest.TestCase):
                 ],
             },
         }
-        return TrafficQualifier(
+        return TvtMillsQualifier(
             api or FakeApi(),
             commands or FakeCommands(),
             DELIVERY,
@@ -297,18 +297,18 @@ class TrafficQualificationTests(unittest.TestCase):
         metadata = load_delivery_metadata(DELIVERY)
         self.assertEqual(
             metadata["checksums"]["metrics.schema.json"],
-            "dae9f30aa893f96be7f030b1184245f8547bd2446928dad9ac61bd83a763a59c",
+            "d2be647575d7db4c43b17556ead25fb9103681eb6c946034e1329435f11b40fc",
         )
         self.assertEqual(
             metadata["checksums"]["analytics-event.schema.json"],
-            "a93247a681f717fe5e3609658270c9687ed4a978b4d60e964d98f4a659b15d2f",
+            "14250d446b377bf79c6ecf5ae40f168c9071edf2df5d4ac18ff6e8402c6ffde4",
         )
-        self.assertEqual(metadata["analytics_event_example"]["solution_pack"], "traffic")
+        self.assertEqual(metadata["analytics_event_example"]["solution_pack"], "surveillance")
 
     def test_full_qualification_validates_runtime_events_and_safe_invariants(self):
         commands = FakeCommands()
         report = self.qualifier(commands=commands).qualify(
-            QualificationOptions("traffic-v4", strict_events=True, wait_seconds=0)
+            QualificationOptions("tvt-mills-v1", strict_events=True, wait_seconds=0)
         )
         self.assertEqual(report["outcome"], "passed")
         self.assertEqual(report["summary"]["failed"], 0)
@@ -328,12 +328,12 @@ class TrafficQualificationTests(unittest.TestCase):
         api = FakeApi()
         request = {
             "catalog_id": CATALOG_ID,
-            "deployment_id": "traffic-v4",
+            "deployment_id": "tvt-mills-v1",
             "assignments": [{"camera_id": "camera-01", "apps": ["anpr"]}],
         }
         report = self.qualifier(api=api).qualify(
             QualificationOptions(
-                "traffic-v4",
+                "tvt-mills-v1",
                 deployment_request=request,
                 commit_preview=True,
                 wait_seconds=0,
@@ -348,7 +348,7 @@ class TrafficQualificationTests(unittest.TestCase):
         unsafe = {**request, "password": "do-not-store"}
         unsafe_report = self.qualifier(api=unsafe_api).qualify(
             QualificationOptions(
-                "traffic-v4",
+                "tvt-mills-v1",
                 deployment_request=unsafe,
                 commit_preview=True,
                 wait_seconds=0,
@@ -360,7 +360,7 @@ class TrafficQualificationTests(unittest.TestCase):
 
     def test_events_are_optional_unless_strict(self):
         optional = self.qualifier(commands=FakeCommands(events=False)).qualify(
-            QualificationOptions("traffic-v4", wait_seconds=0)
+            QualificationOptions("tvt-mills-v1", wait_seconds=0)
         )
         self.assertEqual(optional["outcome"], "passed")
         event_check = next(
@@ -368,7 +368,7 @@ class TrafficQualificationTests(unittest.TestCase):
         )
         self.assertEqual(event_check["status"], "skipped")
         strict = self.qualifier(commands=FakeCommands(events=False)).qualify(
-            QualificationOptions("traffic-v4", strict_events=True, wait_seconds=0)
+            QualificationOptions("tvt-mills-v1", strict_events=True, wait_seconds=0)
         )
         self.assertEqual(strict["outcome"], "failed")
 
@@ -377,17 +377,17 @@ class TrafficQualificationTests(unittest.TestCase):
         invalid_event = {"plate": private_value}
         report = self.qualifier(
             commands=FakeCommands(event_override=invalid_event)
-        ).qualify(QualificationOptions("traffic-v4", wait_seconds=0))
+        ).qualify(QualificationOptions("tvt-mills-v1", wait_seconds=0))
         self.assertEqual(report["outcome"], "failed")
         self.assertNotIn(private_value, json.dumps(report))
 
     def test_post_reboot_and_rollback_check_complete_invariants(self):
         baseline = self.qualifier().qualify(
-            QualificationOptions("traffic-v4", checkpoint="pre-reboot", wait_seconds=0)
+            QualificationOptions("tvt-mills-v1", checkpoint="pre-reboot", wait_seconds=0)
         )
         matching = self.qualifier().qualify(
             QualificationOptions(
-                "traffic-v4",
+                "tvt-mills-v1",
                 checkpoint="post-reboot",
                 baseline=baseline,
                 wait_seconds=0,
@@ -396,7 +396,7 @@ class TrafficQualificationTests(unittest.TestCase):
         self.assertEqual(matching["outcome"], "passed")
         changed = self.qualifier(commands=FakeCommands(pvc_uid="different-pvc")).qualify(
             QualificationOptions(
-                "traffic-v4",
+                "tvt-mills-v1",
                 checkpoint="post-rollback",
                 baseline=baseline,
                 rollback_bundle_sha256=BUNDLE_SHA,
@@ -411,12 +411,12 @@ class TrafficQualificationTests(unittest.TestCase):
 
     def test_rollback_must_exactly_match_a_passing_baseline(self):
         baseline = self.qualifier().qualify(
-            QualificationOptions("traffic-v4", checkpoint="pre-reboot", wait_seconds=0)
+            QualificationOptions("tvt-mills-v1", checkpoint="pre-reboot", wait_seconds=0)
         )
         with self.assertRaisesRegex(ValueError, "exactly match"):
             self.qualifier().qualify(
                 QualificationOptions(
-                    "traffic-v4",
+                    "tvt-mills-v1",
                     checkpoint="post-rollback",
                     baseline=baseline,
                     rollback_bundle_sha256="9" * 64,
@@ -427,7 +427,7 @@ class TrafficQualificationTests(unittest.TestCase):
 
     def test_report_is_atomic_private_and_redacted(self):
         report = self.qualifier().qualify(
-            QualificationOptions("traffic-v4", wait_seconds=0)
+            QualificationOptions("tvt-mills-v1", wait_seconds=0)
         )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "qualification.json"

@@ -89,6 +89,53 @@ class RollbackInput(StrictModel):
     bundle_sha256: str
 
 
+class EnrollmentStartInput(StrictModel):
+    camera_id: str
+    duration_seconds: int | None = None
+
+
+class EnrollmentStopInput(StrictModel):
+    window_id: str
+
+
+class CameraIdentifierInput(StrictModel):
+    kind: str
+    value: str
+
+
+class CameraCreate(StrictModel):
+    camera_id: str
+    friendly_name: str
+    manufacturer: str | None = None
+    model: str | None = None
+    identifiers: list[CameraIdentifierInput] = Field(default_factory=list)
+    rtsp_url: str | None = None
+
+
+class CameraEnabledInput(StrictModel):
+    enabled: bool
+
+
+class CameraStreamInput(StrictModel):
+    scheme: str
+    host: str
+    port: int
+    path: str
+    profile_token: str
+    transport: str
+    codec: str | None = None
+    width: int | None = None
+    height: int | None = None
+    fps: float | None = None
+
+
+class CameraCredentialsInput(StrictModel):
+    username: str | None = None
+    password: str | None = None
+    query: dict[str, str] = Field(default_factory=dict)
+    path_suffix: str | None = None
+
+
 MAX_API_REQUEST_BYTES = 1024 * 1024
 
 
@@ -325,6 +372,98 @@ def create_app(
             "config_revision": site.config_revision,
         }
 
+    @app.get("/api/v1/cameras")
+    def list_cameras() -> list[dict[str, Any]]:
+        return service.list_cameras()
+
+    @app.post("/api/v1/cameras", status_code=201)
+    def create_camera(
+        body: CameraCreate,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        service.create_camera(
+            camera_key=body.camera_id,
+            friendly_name=body.friendly_name,
+            manufacturer=body.manufacturer,
+            model=body.model,
+            identifiers=[item.model_dump() for item in body.identifiers],
+            rtsp_url=body.rtsp_url,
+            actor=actor,
+            request_id=request_id,
+        )
+        return service.get_camera(body.camera_id)
+
+    @app.get("/api/v1/cameras/{camera_id}")
+    def get_camera(camera_id: str) -> dict[str, Any]:
+        return service.get_camera(camera_id)
+
+    @app.patch("/api/v1/cameras/{camera_id}/enabled")
+    def set_camera_enabled(
+        camera_id: str,
+        body: CameraEnabledInput,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        service.set_camera_enabled(camera_id, body.enabled, actor, request_id)
+        return service.get_camera(camera_id)
+
+    @app.put("/api/v1/cameras/{camera_id}/stream")
+    def configure_stream(
+        camera_id: str,
+        body: CameraStreamInput,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        service.configure_stream(
+            camera_id,
+            scheme=body.scheme, host=body.host, port=body.port, path=body.path,
+            profile_token=body.profile_token, transport=body.transport, codec=body.codec,
+            width=body.width, height=body.height, fps=body.fps,
+            actor=actor, request_id=request_id,
+        )
+        return service.get_camera(camera_id)
+
+    @app.put("/api/v1/cameras/{camera_id}/credentials")
+    def rotate_credentials(
+        camera_id: str,
+        body: CameraCredentialsInput,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        document = {
+            key: value for key, value in body.model_dump().items()
+            if key != "query" and value is not None
+        }
+        if body.query:
+            document["query"] = body.query
+        service.rotate_credentials(camera_id, document, actor, request_id)
+        return service.get_camera(camera_id)
+
+    @app.delete("/api/v1/cameras/{camera_id}/credentials", status_code=204)
+    def clear_credentials(
+        camera_id: str,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> Response:
+        actor, request_id = identity(request, x_tvt_actor)
+        service.clear_credentials(camera_id, actor, request_id)
+        return Response(status_code=204)
+
+    @app.delete("/api/v1/cameras/{camera_id}", status_code=204)
+    def delete_camera(
+        camera_id: str,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> Response:
+        actor, request_id = identity(request, x_tvt_actor)
+        service.delete_camera(camera_id, actor, request_id)
+        return Response(status_code=204)
+
     @app.post("/internal/v1/deployments/bundles", status_code=201)
     def register_trusted_bundle(
         body: DeploymentInput,
@@ -452,5 +591,40 @@ def create_app(
             deployment_id, body.bundle_sha256, actor, request_id
         )
         return {"desired_revision": value.desired_revision, "state": "pending"}
+
+    @app.post("/api/v1/deployments/{deployment_id}/enrollment/start")
+    def start_enrollment(
+        deployment_id: str,
+        body: EnrollmentStartInput,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        return service.start_enrollment(
+            deployment_key=deployment_id,
+            camera_id=body.camera_id,
+            duration_seconds=body.duration_seconds,
+            actor=actor,
+            request_id=request_id,
+        )
+
+    @app.post("/api/v1/deployments/{deployment_id}/enrollment/stop")
+    def stop_enrollment(
+        deployment_id: str,
+        body: EnrollmentStopInput,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        return service.stop_enrollment(
+            deployment_key=deployment_id,
+            window_id=body.window_id,
+            actor=actor,
+            request_id=request_id,
+        )
+
+    @app.get("/api/v1/deployments/{deployment_id}/enrollment-windows")
+    def enrollment_windows(deployment_id: str) -> list[dict[str, Any]]:
+        return service.list_enrollment_windows(deployment_id)
 
     return app

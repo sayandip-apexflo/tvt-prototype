@@ -17,25 +17,21 @@ from typing import Any
 from urllib.parse import urlparse
 
 
-TRAFFIC_APPS = {
-    "anpr",
-    "illegal_parking",
-    "pedestrian_counting",
-    "vehicle_counting",
-    "wrong_way",
-}
-
-SURVEILLANCE_APPS = {
-    "reid",
+TVT_MILLS_APPS = {
     "face_recognition",
-    "intrusion",
-    "people_counting",
+    "face_enrollment",
+    "anpr",
 }
 
-_CONTRACTS = {
-    "traffic-runtime-v1": ("traffic", TRAFFIC_APPS),
-    "surveillance-runtime-v1": ("surveillance", SURVEILLANCE_APPS),
+# Shared with tvt_edge/bundles.py so both the K8s Secret/ConfigMap materializer
+# here and the DeploymentBundle instantiator there agree on which
+# secret_input_contract names exist and which apps each one allows.
+# tvt-mills-pilot is the single combined pack that replaced the old separate
+# surveillance/traffic packs -- see docs/contracts/tvt-mills-v1/README.md.
+RUNTIME_CONTRACTS = {
+    "tvt-mills-pilot-runtime-v1": ("tvt-mills-pilot", TVT_MILLS_APPS),
 }
+_CONTRACTS = RUNTIME_CONTRACTS
 
 
 def build_camera_secret_list(

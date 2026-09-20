@@ -1,0 +1,85 @@
+name: tvt-mills-pilot
+version: 2026.09.18-v1
+contractVersion: v1
+ui:
+  displayName: TVT Mills identity & vehicle analytics
+  description: >-
+    Combined face recognition, face enrollment, and ANPR analytics for the
+    TVT Mills pilot. One image runs all three apps; a camera is assigned any
+    combination of face_recognition/anpr, or exclusively face_enrollment.
+  camera:
+    defaultFps: 5
+    defaultApp: face_recognition
+    apps:
+      face_recognition:
+        label: Face recognition
+        symbol: FR
+        # No geometry block: the vendor image reads a flat per-camera `lines`
+        # array (config.lines), not an app-keyed one, so there is no single
+        # {app}-scoped configPath for the UI compiler's idTemplate/nameTemplate
+        # mechanism to target -- the same gap already recorded against the
+        # legacy traffic pack's `zones.anpr` (see docs/contracts/tvt-mills-v1/
+        # README.md). Gate lines are hand-authored in desired state (today via
+        # the JSON config editor in ui/src/App.tsx's CatalogDeploymentModal)
+        # using the `<gate>_entry`/`<gate>_exit` id convention until a
+        # role-aware geometry compiler lands.
+      face_enrollment:
+        label: Face enrollment (temporary)
+        symbol: FE
+      anpr:
+        label: ANPR
+        symbol: AN
+  deployment:
+    storageGi: 20
+    cpuRequest: 4
+    cpuLimit: 16
+    memoryRequestGi: 8
+    memoryLimitGi: 24
+    pullPolicy: IfNotPresent
+    inferenceMode: cpu-compatible
+architectures: [amd64]
+hardwareProfile: intel-285h
+models:
+  delivery: baked-in
+configuration:
+  desiredStatePath: /configs/desired_state.json
+secrets:
+  root: /run/secrets/apexfabric
+  referenceFormat: file:/run/secrets/apexfabric/<camera-id>.rtsp
+network:
+  port: 8080
+  hostNetworkRequired: false
+endpoints:
+  health: /healthz
+  readiness: /readyz
+  metrics: /metrics
+  events: /events
+  snapshots: /snapshots/<camera_id>/<file>
+metricsFormat: application/json
+eventProtocol: sse
+eventSchema: analytics-event.schema.json
+# No /api/enrollment, /api/face_gallery, or /api/face_group route -- matches
+# the accepted "no gallery on the edge, no biometric writes over the
+# unauthenticated pod-proxy surface" requirement. Embeddings travel only on
+# /events, which is the one access-controlled path for that data
+# (see docs/contracts/tvt-mills-v1/README.md).
+process:
+  uid: 10001
+  gid: 10001
+  readOnlyRootSupported: true
+resources:
+  cpuRequest: "4"
+  memoryRequest: 8Gi
+  maxCameraStreams: 5
+accelerators:
+  - intel-igpu
+  - intel-npu
+devices:
+  - /dev/dri
+  - /dev/accel
+storage:
+  persistentVolumes:
+    - mountPath: /state
+      purpose: event, crop, and snapshot storage
+  temporaryPaths: [/tmp/apexfabric]
+externalDependencies: []

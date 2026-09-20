@@ -36,7 +36,7 @@ class DeploymentStateTests(unittest.TestCase):
         cls.bundle = yaml.safe_load(
             (
                 ROOT
-                / "solution-packs/traffic/traffic-edge-runtime-intel-285h.yaml"
+                / "solution-packs/traffic/tvt-mills-pilot-intel-285h.yaml"
             ).read_text(encoding="utf-8")
         )
         replace_registry(cls.bundle, "registry.local:5000")
@@ -44,7 +44,7 @@ class DeploymentStateTests(unittest.TestCase):
             "desired_state": json.loads(
                 (
                     ROOT
-                    / "solution-packs/traffic/traffic.desired_state.example.json"
+                    / "solution-packs/traffic/tvt-mills-pilot.desired_state.example.json"
                 ).read_text(encoding="utf-8")
             ),
             "camera_sources": {
@@ -103,7 +103,7 @@ class DeploymentStateTests(unittest.TestCase):
                 "removed": [],
                 "observed": [
                     {
-                        "name": "traffic-edge-intel-285h-runtime",
+                        "name": "tvt-mills-edge-intel-285h-runtime",
                         "desired_replicas": 1,
                         "ready_replicas": 1,
                         "available_replicas": 1,
@@ -146,7 +146,7 @@ class DeploymentStateTests(unittest.TestCase):
                 item for item in result["desired_objects"]
                 if item["kind"] == "Deployment"
             )
-            self.assertEqual(deployment["name"], "traffic-edge-intel-285h-runtime")
+            self.assertEqual(deployment["name"], "tvt-mills-edge-intel-285h-runtime")
             self.assertEqual(
                 store.get_deployment(self.bundle["deployment_id"])["active_revision"],
                 active,
@@ -172,7 +172,7 @@ class DeploymentStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = DeploymentStore(Path(directory))
             store.record_failure(
-                "traffic-edge-intel-285h",
+                "tvt-mills-edge-intel-285h",
                 "apply",
                 "failed to open rtsp://user:password@192.0.2.14/live",
                 attempted_revision="f" * 64,

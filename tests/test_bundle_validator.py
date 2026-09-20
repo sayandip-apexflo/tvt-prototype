@@ -50,7 +50,7 @@ class BundleValidatorTests(unittest.TestCase):
         self.assertIn("requires a volume mounted at '/data'", errors)
 
     def test_intel_gpu_npu_runtime_bundle_is_valid_and_constrained(self):
-        bundle = yaml.safe_load((ROOT / "solution-packs/traffic/traffic-edge-runtime-intel-285h.yaml").read_text())
+        bundle = yaml.safe_load((ROOT / "solution-packs/traffic/tvt-mills-pilot-intel-285h.yaml").read_text())
         self.assertEqual(validate_bundle(bundle, self.schema), [])
 
         app = bundle["applications"][0]

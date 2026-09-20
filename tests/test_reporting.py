@@ -19,7 +19,7 @@ FACE_NEAR = normalized([0.999, 0.02, 0.0, 0.0])
 BODY = normalized([0.2, 0.3, 0.4, 0.5])
 
 
-def face_event(event_id, camera_id, face, zone_id=None):
+def face_event(event_id, camera_id, face, zone_id=None, line_id=None):
     payload = {
         "embeddings": {"face": face, "body": BODY},
         "subject": {"type": "face", "bbox": {"x1": 1, "y1": 1, "x2": 2, "y2": 2}},
@@ -27,6 +27,8 @@ def face_event(event_id, camera_id, face, zone_id=None):
     }
     if zone_id:
         payload["location"] = {"id": zone_id, "type": "zone"}
+    if line_id:
+        payload["line"] = {"id": line_id, "type": "line"}
     return {
         "schema_version": "1.0", "event_id": event_id, "timestamp": "2026-09-17T09:00:00Z",
         "camera_id": camera_id, "solution_pack": "surveillance", "application": "face_recognition",
@@ -34,7 +36,7 @@ def face_event(event_id, camera_id, face, zone_id=None):
     }
 
 
-def plate_event(event_id, camera_id, plate_text, zone_id=None, confidence=0.95):
+def plate_event(event_id, camera_id, plate_text, zone_id=None, line_id=None, confidence=0.95):
     payload = {
         "vehicle_ref": f"{camera_id}:1", "vehicle_track_id": 1,
         "plate": {"text": plate_text, "confidence": confidence},
@@ -42,6 +44,8 @@ def plate_event(event_id, camera_id, plate_text, zone_id=None, confidence=0.95):
     }
     if zone_id:
         payload["location"] = {"id": zone_id, "type": "zone"}
+    if line_id:
+        payload["line"] = {"id": line_id, "type": "line"}
     return {
         "schema_version": "1.0", "event_id": event_id, "timestamp": "2026-09-17T09:00:00Z",
         "camera_id": camera_id, "solution_pack": "traffic", "application": "anpr",
@@ -100,6 +104,18 @@ class AttendanceAggregationTests(unittest.TestCase):
             self.assertEqual(len(attendance_report(connection, date=today)["sessions"]), 1)
             self.assertEqual(len(attendance_report(connection, date=yesterday)["sessions"]), 0)
 
+    def test_line_crossing_convention_resolves_direction_like_a_zone(self):
+        """tvt-mills-pilot has no payload.location for face events -- only
+        payload.line, with the same _entry/_exit id suffix convention (see
+        docs/contracts/tvt-mills-v1/README.md)."""
+        self.store.ingest("dep1", face_event("e1", "main-1", FACE, line_id="gate-1-face_entry"))
+        time.sleep(0.02)
+        self.store.ingest("dep1", face_event("e2", "main-1", FACE_NEAR, line_id="gate-1-face_exit"))
+        rows = self.sessions()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "closed")
+        self.assertGreater(rows[0]["duration_seconds"], 0)
+
 
 class VehicleTrafficAggregationTests(unittest.TestCase):
     def setUp(self):
@@ -132,6 +148,13 @@ class VehicleTrafficAggregationTests(unittest.TestCase):
         self.store.ingest("dep1", plate_event("e1", "gate-2-anpr", "KA05MN7788", "gate-2-anpr_entry"))
         self.store.ingest("dep1", plate_event("e2", "gate-2-anpr", "KA05MN7788", "gate-2-anpr_entry"))
         self.assertEqual(len(self.sessions()), 1)
+
+    def test_line_crossing_convention_resolves_direction_like_a_zone(self):
+        self.store.ingest("dep1", plate_event("e1", "gate-2-anpr", "KA05MN7788", line_id="gate-2-anpr_entry"))
+        self.store.ingest("dep1", plate_event("e2", "gate-2-anpr", "KA05MN7788", line_id="gate-2-anpr_exit"))
+        rows = self.sessions()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "closed")
 
     def test_report_counts_entered_and_exited(self):
         self.store.ingest("dep1", plate_event("e1", "gate-2-anpr", "KA05MN7788", "gate-2-anpr_entry"))

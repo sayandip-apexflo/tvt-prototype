@@ -36,13 +36,34 @@ from apexfabric.control_plane.storage_failover import reconcile_local_storage_fa
 DEFAULT_STATE_DIR = Path(os.getenv("APEXFABRIC_STATE_DIR", ROOT / ".apexfabric"))
 DEPLOYMENT_ID_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?")
 IMAGE_RE = re.compile(r"[^@\s]+")
-TRAFFIC_APPS = {"anpr", "wrong_way", "vehicle_counting", "pedestrian_counting", "illegal_parking"}
-SURVEILLANCE_APPS = {"reid", "face_recognition", "face_enrollment", "intrusion", "people_counting"}
+TVT_MILLS_APPS = {"face_recognition", "face_enrollment", "anpr"}
 CAMERA_INVENTORY_CONFIG_MAP = "apexfabric-camera-inventory"
 CAMERA_INVENTORY_SECRET = "apexfabric-camera-sources"
 TRAFFIC_INFERENCE_MODES = {
     "cpu-compatible": {"VEHICLE_DEVICE": "CPU", "PLATE_DEVICE": "CPU", "OCR_DEVICE": "CPU"},
     "intel-gpu-npu": {"VEHICLE_DEVICE": "GPU", "PLATE_DEVICE": "NPU", "OCR_DEVICE": "MULTI:GPU,NPU"},
+}
+# One entry per catalog solution_pack generate_traffic_runtime_bundle can build a
+# DeploymentBundle for. tvt-mills-pilot is the single combined face_recognition +
+# face_enrollment + anpr image that replaced the old two-pack (surveillance/traffic)
+# architecture -- see docs/contracts/tvt-mills-v1/README.md. TRAFFIC_INFERENCE_MODES
+# and restrict_inference_modes/needs_persistent_volume stay generic (not deleted
+# outright) since a future pack may need the traffic-shaped branch again; nothing
+# currently sets restrict_inference_modes=True.
+PACK_PROFILES = {
+    "tvt-mills-pilot": {
+        "catalog_name": "tvt-mills-pilot",
+        "allowed_apps": TVT_MILLS_APPS,
+        "max_streams": 5,
+        "default_deployment": "tvt-mills-edge-intel-285h",
+        "default_tag": "intel-285h-2026.09.18-v1",
+        "default_version": "2026.09.18-v1",
+        "schema_directory": "tvt-mills-pilot-2026.09.18-v1",
+        "models_root": "/models/tvt-mills",
+        "needs_persistent_volume": True,
+        "restrict_inference_modes": False,
+        "required_camera_fields": ("config",),
+    },
 }
 ALLOWED_PACKAGES = {
     "fake-cv-test": ROOT / "examples" / "bundles" / "fake-cv-test.yaml",
@@ -104,8 +125,7 @@ class Controller:
             seed_manifest(self.catalog, ROOT, json.loads(Path(catalog_manifest).read_text()), registry)
         else:
             deliveries = (
-                ("traffic-edge-runtime-2026.08.21-v4", "traffic-edge-runtime"),
-                ("surveillance-edge-runtime-2026.08.24-v3", "surveillance-edge-runtime"),
+                ("tvt-mills-pilot-2026.09.18-v1", "tvt-mills-pilot"),
             )
             for directory_name, solution_name in deliveries:
                 delivery = ROOT / "solution-packs" / "catalog" / directory_name
@@ -143,6 +163,22 @@ class Controller:
                     self.audit("reporting:sweep", "succeeded", result)
             except Exception as error:
                 print(f"session sweep failed: {error}", file=sys.stderr, flush=True)
+            try:
+                self._revert_expired_enrollment_windows()
+            except Exception as error:
+                print(f"enrollment window sweep failed: {error}", file=sys.stderr, flush=True)
+
+    def _revert_expired_enrollment_windows(self) -> None:
+        from .enrollment_windows import expired_windows
+
+        with self.telemetry._connect() as connection:
+            expired = expired_windows(connection, time.time())
+        for window in expired:
+            try:
+                self.stop_enrollment({"log": []}, {"name": window["deployment_id"], "window_id": window["id"]})
+                self.audit("enrollment:auto-revert", "succeeded", {"window_id": window["id"], "camera_id": window["camera_id"]})
+            except Exception as error:
+                print(f"failed to auto-revert enrollment window {window['id']}: {error}", file=sys.stderr, flush=True)
 
     def kubectl(self, *arguments: str, check: bool = True, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
         command = ["k3s", "kubectl", *arguments]
@@ -392,10 +428,8 @@ class Controller:
     def generate_bundle(self, request: dict[str, Any]) -> dict[str, Any]:
         """Convert bounded product intent into a supported Solution Pack."""
         solution_type = request.get("solution_type", "intel-traffic-pilot")
-        if solution_type == "traffic-edge-runtime":
-            return self.generate_traffic_runtime_bundle(request)
-        if solution_type == "surveillance-edge-runtime":
-            return self.generate_traffic_runtime_bundle(request, solution_pack="surveillance")
+        if solution_type == "tvt-mills-pilot":
+            return self.generate_traffic_runtime_bundle(request, solution_pack="tvt-mills-pilot")
         if solution_type == "jetson-event-simulator":
             return self.generate_jetson_event_bundle(request)
         if solution_type != "intel-traffic-pilot":
@@ -569,15 +603,17 @@ class Controller:
             "summary": [{"kind": item["kind"], "name": item["metadata"]["name"]} for item in objects],
         }
 
-    def generate_traffic_runtime_bundle(self, request: dict[str, Any], solution_pack: str = "traffic") -> dict[str, Any]:
-        surveillance = solution_pack == "surveillance"
-        catalog_name = "surveillance-edge-runtime" if surveillance else "traffic-edge-runtime"
-        allowed_apps = SURVEILLANCE_APPS if surveillance else TRAFFIC_APPS
-        max_streams = 16 if surveillance else 26
-        default_deployment = "surveillance-edge-intel-285h" if surveillance else "traffic-edge-intel-285h"
+    def generate_traffic_runtime_bundle(self, request: dict[str, Any], solution_pack: str = "tvt-mills-pilot") -> dict[str, Any]:
+        if solution_pack not in PACK_PROFILES:
+            raise ValueError(f"solution_pack is unsupported: {solution_pack!r}")
+        profile = PACK_PROFILES[solution_pack]
+        catalog_name = profile["catalog_name"]
+        allowed_apps = profile["allowed_apps"]
+        max_streams = profile["max_streams"]
+        default_deployment = profile["default_deployment"]
         default_repository = f"192.168.10.217:5000/apexfabric/{catalog_name}"
-        default_tag = "intel-285h-2026.08.24-v3" if surveillance else "intel-285h-2026.08.21-v4"
-        default_version = "2026.08.24-v3" if surveillance else "2026.08.20-v2"
+        default_tag = profile["default_tag"]
+        default_version = profile["default_version"]
         contract_name = f"{solution_pack}-runtime-v1"
         deployment_id = self._dns_id(request.get("deployment_id", default_deployment), "deployment_id")
         if len(deployment_id) > 47:
@@ -644,6 +680,8 @@ class Controller:
                 if not isinstance(configured["config"], dict):
                     raise ValueError(f"camera_configuration[{index}].config must be an object")
                 desired_camera["config"] = configured["config"]
+            elif "config" in profile.get("required_camera_fields", ()):
+                desired_camera["config"] = {}
             desired_cameras.append(desired_camera)
             camera_ids.append(camera_id)
         if len(set(camera_ids)) != len(camera_ids):
@@ -656,7 +694,7 @@ class Controller:
         if cpu_request > cpu_limit or memory_request > memory_limit:
             raise ValueError("resource requests cannot exceed limits")
         inference_mode = request.get("inference_mode", "cpu-compatible")
-        if not surveillance and inference_mode not in TRAFFIC_INFERENCE_MODES:
+        if profile["restrict_inference_modes"] and inference_mode not in TRAFFIC_INFERENCE_MODES:
             raise ValueError("inference_mode is unsupported")
 
         desired_config_map = f"{deployment_id}-desired-state"
@@ -668,9 +706,7 @@ class Controller:
             "source": {"type": "secret", "name": camera_secret, "key": f"{camera_id}.rtsp"},
         } for index, camera_id in enumerate(camera_ids)]
         desired_state = {"edge_id": edge_id, "revision": desired_revision, "cameras": desired_cameras}
-        desired_schema_path = ROOT / "solution-packs" / "catalog" / (
-            "surveillance-edge-runtime-2026.08.24-v3" if surveillance else "traffic-edge-runtime-2026.08.21-v4"
-        ) / "desired-state.schema.json"
+        desired_schema_path = ROOT / "solution-packs" / "catalog" / profile["schema_directory"] / "desired-state.schema.json"
         try:
             jsonschema.Draft202012Validator(json.loads(desired_schema_path.read_text(encoding="utf-8"))).validate(desired_state)
         except jsonschema.ValidationError as error:
@@ -700,7 +736,7 @@ class Controller:
                 },
                 "configuration": {
                     "desired_state_config_map": desired_config_map, "desired_state_key": "desired_state.json",
-                    "models_delivery": "baked-in", "models_root": "/models/surveillance" if surveillance else "/models/traffic/openvino",
+                    "models_delivery": "baked-in", "models_root": profile["models_root"],
                     "inference_mode": inference_mode,
                 },
                 "placement": {
@@ -709,7 +745,7 @@ class Controller:
                     "characteristics": {"hardware-profile": "intel-285h"},
                 },
                 "external_mounts": external_mounts,
-                **({"persistent_volumes": [{"name": "state", "mount_path": "/state", "size": f"{self._positive_int(request.get('storage_gib', 20), 'storage_gib', 2048)}Gi", "storage_class": "local-path"}]} if surveillance else {}),
+                **({"persistent_volumes": [{"name": "state", "mount_path": "/state", "size": f"{self._positive_int(request.get('storage_gib', 20), 'storage_gib', 2048)}Gi", "storage_class": "local-path"}]} if profile["needs_persistent_volume"] else {}),
                 "plan_compiler": {
                     "type": "edge-agent-v1", "desired_state_config_map": desired_config_map,
                     "desired_state_key": "desired_state.json",
@@ -724,7 +760,7 @@ class Controller:
                     "metrics": {"path": "/metrics", "port": "management", "format": "json"},
                     "events": {"path": "/events", "port": "management", "protocol": "sse"},
                 },
-                "environment": {"SOLUTION_PACK": solution_pack, **({} if surveillance else TRAFFIC_INFERENCE_MODES[inference_mode])},
+                "environment": {"SOLUTION_PACK": solution_pack, **(TRAFFIC_INFERENCE_MODES[inference_mode] if profile["restrict_inference_modes"] else {})},
             }],
             "configuration": {
                 "edge_id": edge_id, "image_contract": "apexfabric-v1",
@@ -827,8 +863,7 @@ class Controller:
         configuration = bundle.get("configuration", {})
         input_contract = configuration.get("secret_input_contract")
         contract_specs = {
-            "traffic-runtime-v1": ("traffic", TRAFFIC_APPS),
-            "surveillance-runtime-v1": ("surveillance", SURVEILLANCE_APPS),
+            "tvt-mills-pilot-runtime-v1": ("tvt-mills-pilot", TVT_MILLS_APPS),
         }
         if input_contract not in contract_specs:
             if secret_inputs is not None:
@@ -971,8 +1006,7 @@ class Controller:
         old_state = current["desired_state"]
         packs = {camera.get("solution_pack") for camera in old_state.get("cameras", [])}
         schema_directories = {
-            "traffic": "traffic-edge-runtime-2026.08.21-v4",
-            "surveillance": "surveillance-edge-runtime-2026.08.24-v3",
+            "tvt-mills-pilot": "tvt-mills-pilot-2026.09.18-v1",
         }
         if len(packs) != 1 or next(iter(packs), None) not in schema_directories:
             raise ValueError("the deployed solution has an unsupported or mixed solution_pack")
@@ -1022,6 +1056,78 @@ class Controller:
         self.kubectl("apply", "-f", "-", input_text=json.dumps(resource))
         self.log(job, f"Applied desired-state revision {new_revision} to ConfigMap/{current['config_map']}")
         return {"name": current["name"], "config_map": current["config_map"], "revision": new_revision, "pod_restarted": False}
+
+    def start_enrollment(self, job: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+        """Temporarily switch a face_recognition camera to face_enrollment.
+
+        tvt-mills-pilot has no dedicated enrollment camera -- see
+        docs/contracts/tvt-mills-v1/README.md and
+        apexfabric/control_plane/enrollment_windows.py. Reverts explicitly
+        via stop_enrollment, or automatically once expires_at passes (see
+        _session_sweep_supervisor).
+        """
+        from .enrollment_windows import start_window
+
+        name = request.get("name")
+        camera_id = request.get("camera_id")
+        if not isinstance(camera_id, str) or not camera_id:
+            raise ValueError("camera_id is required")
+        duration_seconds = request.get("duration_seconds")
+        if duration_seconds is not None:
+            duration_seconds = self._positive_int(duration_seconds, "duration_seconds", 24 * 3600)
+        current = self.runtime_configuration(name)
+        old_state = current["desired_state"]
+        camera = next((item for item in old_state.get("cameras", []) if item.get("camera_id") == camera_id), None)
+        if camera is None:
+            raise ValueError(f"camera {camera_id!r} is not in this deployment's desired state")
+        apps = camera.get("apps", [])
+        if apps == ["face_enrollment"]:
+            raise ValueError(f"camera {camera_id!r} is already in enrollment mode")
+        if "face_recognition" not in apps:
+            raise ValueError(f"camera {camera_id!r} does not run face_recognition")
+        started_at = time.time()
+        with self.telemetry.lock, self.telemetry._connect() as connection:
+            window_id = start_window(
+                connection, name, camera_id, apps, camera.get("config", {}), started_at, duration_seconds,
+            )
+        new_state = json.loads(json.dumps(old_state))
+        new_camera = next(item for item in new_state["cameras"] if item["camera_id"] == camera_id)
+        new_camera["apps"] = ["face_enrollment"]
+        new_camera["config"] = {}
+        new_state["revision"] = old_state["revision"] + 1
+        result = self.update_runtime_configuration(job, {"name": name, "desired_state": new_state})
+        expires_at = started_at + duration_seconds if duration_seconds else None
+        return {**result, "window_id": window_id, "camera_id": camera_id, "expires_at": expires_at}
+
+    def stop_enrollment(self, job: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+        from .enrollment_windows import end_window, get_window
+
+        name = request.get("name")
+        window_id = request.get("window_id")
+        if not isinstance(window_id, str) or not window_id:
+            raise ValueError("window_id is required")
+        with self.telemetry.lock, self.telemetry._connect() as connection:
+            window = get_window(connection, window_id)
+            if window is None or window["status"] != "active":
+                raise ValueError(f"enrollment window {window_id!r} is not active")
+            end_window(connection, window_id, time.time())
+        current = self.runtime_configuration(name)
+        old_state = current["desired_state"]
+        new_state = json.loads(json.dumps(old_state))
+        camera = next((item for item in new_state["cameras"] if item["camera_id"] == window["camera_id"]), None)
+        if camera is None:
+            raise ValueError(f"camera {window['camera_id']!r} is not in this deployment's desired state")
+        camera["apps"] = window["prior_apps"]
+        camera["config"] = window["prior_config"]
+        new_state["revision"] = old_state["revision"] + 1
+        result = self.update_runtime_configuration(job, {"name": name, "desired_state": new_state})
+        return {**result, "window_id": window_id, "camera_id": window["camera_id"]}
+
+    def enrollment_windows_for(self, name: str | None) -> list[dict[str, Any]]:
+        from .enrollment_windows import list_windows
+
+        with self.telemetry._connect() as connection:
+            return list_windows(connection, name)
 
     def workload_telemetry(self, name: str) -> dict[str, Any]:
         context = self._workload_endpoint_context(name)
@@ -1472,6 +1578,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/persons":
             status = parse_qs(parsed.query).get("status", [None])[0]
             self.json_response(HTTPStatus.OK, {"persons": self.controller.persons.list(status)})
+        elif path == "/api/enrollment-windows":
+            name = parse_qs(parsed.query).get("name", [None])[0]
+            self.json_response(HTTPStatus.OK, {"windows": self.controller.enrollment_windows_for(name)})
         elif path.startswith("/api/telemetry/snapshots/"):
             snapshot_id = path.rsplit("/", 1)[-1]
             snapshot = self.controller.telemetry.snapshot(snapshot_id)
@@ -1566,6 +1675,10 @@ class Handler(BaseHTTPRequestHandler):
                 job_id = self.controller.submit("deploy", self.controller.deploy, request)
             elif path == "/api/runtime-configuration":
                 job_id = self.controller.submit("configuration:update", self.controller.update_runtime_configuration, request)
+            elif path == "/api/enrollment/start":
+                job_id = self.controller.submit("enrollment:start", self.controller.start_enrollment, request)
+            elif path == "/api/enrollment/stop":
+                job_id = self.controller.submit("enrollment:stop", self.controller.stop_enrollment, request)
             elif path == "/api/lifecycle-test":
                 scenario = request.get("scenario", "all")
                 if scenario not in {"all", "container", "pod", "readiness", "recovery", "resource", "update", "rollback"}:

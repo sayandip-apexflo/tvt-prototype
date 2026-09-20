@@ -1,8 +1,9 @@
 """TVT delivery metadata loader (Postgres catalog path).
 
-This preserves the pre-sync TVT implementation that validates the vendored
-Traffic delivery against ``provenance.json`` including the TVT-only files
-(``metrics.schema.json``, ``analytics-event.schema.json``,
+This preserves the pre-sync TVT implementation that validates a vendored
+delivery (originally Traffic, now the combined tvt-mills-pilot pack -- see
+docs/contracts/tvt-mills-v1/README.md) against ``provenance.json`` including
+the TVT-only files (``metrics.schema.json``, ``analytics-event.schema.json``,
 ``analytics-event.example.json``) which the user chose to keep.
 
 ``apexfabric/solution_management/catalog.py`` is now an exact copy of
@@ -38,7 +39,7 @@ def _sha256(path: Path) -> str:
         raise CatalogError(f"cannot read catalog metadata {path.name}: {error}") from error
 
 
-def load_delivery_metadata(directory: Path) -> dict[str, Any]:
+def load_delivery_metadata(directory: Path, expected_name: str = "tvt-mills-pilot") -> dict[str, Any]:
     """Load and verify a vendored delivery against its provenance document."""
 
     provenance = _read_json(directory / "provenance.json")
@@ -91,16 +92,16 @@ def load_delivery_metadata(directory: Path) -> dict[str, Any]:
     delivery = provenance.get("delivery") or {}
     archive = provenance.get("archive") or {}
     local_image = provenance.get("local_image") or {}
-    if contract.get("name") != "traffic-edge-runtime":
+    if contract.get("name") != expected_name:
         raise CatalogError("unexpected solution name in image contract")
     if str(contract.get("version")) != delivery.get("version"):
         raise CatalogError("image contract version disagrees with provenance")
     if contract.get("architectures") != ["amd64"]:
-        raise CatalogError("Traffic delivery must declare only amd64")
+        raise CatalogError(f"{expected_name} delivery must declare only amd64")
     if contract.get("hardwareProfile") != "intel-285h":
-        raise CatalogError("Traffic delivery hardware profile is not intel-285h")
+        raise CatalogError(f"{expected_name} delivery hardware profile is not intel-285h")
     if (contract.get("models") or {}).get("delivery") != "baked-in":
-        raise CatalogError("Traffic delivery must declare baked-in models")
+        raise CatalogError(f"{expected_name} delivery must declare baked-in models")
     if archive.get("loaded_image") != (
         f"localhost/{contract['name']}:intel-285h-{contract['version']}"
     ):

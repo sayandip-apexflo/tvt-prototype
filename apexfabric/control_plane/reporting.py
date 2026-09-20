@@ -37,6 +37,11 @@ PLATE_CONFIDENCE_FLOOR = float(os.getenv("APEXFABRIC_PLATE_CONFIDENCE_FLOOR", "0
 
 
 def _gate_and_role(location: dict[str, Any] | None) -> tuple[str, str] | None:
+    """`location` is whichever of payload.location (a zone) or payload.line
+    (tvt-mills-pilot's face/ANPR line-crossing convention) the caller found --
+    both share the same {id, name, type} shape and the same _entry/_exit id
+    suffix convention, so one function handles either. See
+    docs/contracts/tvt-mills-v1/README.md."""
     if not location or not isinstance(location.get("id"), str):
         return None
     zone_id = location["id"]
@@ -66,11 +71,12 @@ def evaluate_attendance(
     if payload.get("event_type") != "face_detection_event" or not resolved_person_id:
         return
     inner = payload.get("payload") or {}
-    role = _gate_and_role(inner.get("location"))
+    location = inner.get("location") or inner.get("line")
+    role = _gate_and_role(location)
     if role is None:
         return
     gate, direction = role
-    zone_id = inner["location"]["id"]
+    zone_id = location["id"]
     # entry_time/exit_time are the numeric ingest clock (received_at), not the
     # payload's RFC3339 occurred-at string -- duration_seconds arithmetic and
     # the report date-range filter both need a real number, and telemetry.py's
@@ -118,11 +124,12 @@ def evaluate_vehicle_traffic(
         return
     if isinstance(confidence, (int, float)) and confidence < PLATE_CONFIDENCE_FLOOR:
         return
-    role = _gate_and_role(inner.get("location"))
+    location = inner.get("location") or inner.get("line")
+    role = _gate_and_role(location)
     if role is None:
         return
     gate, direction = role
-    zone_id = inner["location"]["id"]
+    zone_id = location["id"]
 
     if direction == "entry":
         if _open_session(connection, "vehicle_sessions", "plate_text", plate_text, gate):

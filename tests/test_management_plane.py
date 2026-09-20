@@ -2,6 +2,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+import uuid
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -25,10 +26,12 @@ from tvt_edge.db.models import (
     DeploymentAssignmentSet,
     DeploymentSyncAttempt,
     DeploymentSyncState,
+    EnrollmentWindow,
     KubernetesResourceRef,
     LegacyImport,
     SolutionBundleRevision,
     SolutionCatalogEntry,
+    SolutionDeployment,
     utc_now,
 )
 from tvt_edge.legacy import import_sqlite_lifecycle
@@ -38,8 +41,8 @@ from tvt_runtime.state import DeploymentStore
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CATALOG_DELIVERY = ROOT / "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
-CATALOG_ID = "traffic-edge-runtime:2026.08.21-v4"
+CATALOG_DELIVERY = ROOT / "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
+CATALOG_ID = "tvt-mills-pilot:2026.09.18-v1"
 CATALOG_DIGEST = "sha256:" + "1" * 64
 
 
@@ -127,7 +130,7 @@ class FakeKubectl:
                 {
                     "items": [
                         {
-                            "metadata": {"name": "traffic-edge-intel-285h-runtime"},
+                            "metadata": {"name": "tvt-mills-edge-intel-285h-runtime"},
                             "spec": {"replicas": 1},
                             "status": {"readyReplicas": 1, "availableReplicas": 1},
                         }
@@ -153,7 +156,7 @@ class ManagementPlaneTests(unittest.TestCase):
         self.bundle = yaml.safe_load(
             (
                 ROOT
-                / "solution-packs/traffic/traffic-edge-runtime-intel-285h.yaml"
+                / "solution-packs/traffic/tvt-mills-pilot-intel-285h.yaml"
             ).read_text(encoding="utf-8")
         )
 
@@ -224,11 +227,11 @@ class ManagementPlaneTests(unittest.TestCase):
             "deployment",
         )
         return self.service.commit_assignments(
-            "traffic-edge-intel-285h",
+            "tvt-mills-edge-intel-285h",
             [
                 {
                     "camera_id": "camera-01",
-                    "apps": ["anpr", "vehicle_counting"],
+                    "apps": ["face_recognition", "anpr"],
                     "fps": 8,
                 }
             ],
@@ -249,23 +252,22 @@ class ManagementPlaneTests(unittest.TestCase):
     def catalog_request():
         return {
             "catalog_id": CATALOG_ID,
-            "deployment_key": "traffic-v4",
+            "deployment_key": "tvt-mills-v1",
             "assignments": [
                 {
                     "camera_id": "camera-01",
-                    "apps": ["wrong_way", "vehicle_counting"],
+                    "apps": ["anpr"],
                     "fps": 8,
                     "config": {
-                        "lines": {
-                            "wrong_way": [
-                                {
-                                    "name": "direction",
-                                    "a": [0.1, 0.5],
-                                    "b": [0.9, 0.5],
-                                    "direction": "a_to_b",
-                                }
-                            ]
-                        }
+                        "lines": [
+                            {
+                                "id": "camera-01_entry",
+                                "name": "camera-01 gate (entry)",
+                                "type": "line",
+                                "points": [[0.1, 0.5], [0.9, 0.5]],
+                                "accepted": ["A->B"],
+                            }
+                        ]
                     },
                 }
             ],
@@ -291,6 +293,171 @@ class ManagementPlaneTests(unittest.TestCase):
             request_id="catalog-commit-1",
         )
         return service, request, preview, committed
+
+    def catalog_request_with_face_recognition(self):
+        request = self.catalog_request()
+        request["assignments"][0]["apps"] = ["face_recognition", "anpr"]
+        return request
+
+    def commit_face_recognition_deployment(self):
+        self.service.create_site(
+            "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"
+        )
+        self.onboard()
+        service = self.catalog_service()
+        request = self.catalog_request_with_face_recognition()
+        preview = service.preview_catalog_deployment(**request)
+        service.commit_catalog_deployment(
+            **request,
+            preview_bundle_sha256=preview["bundle_sha256"],
+            idempotency_key="enrollment-fixture-commit",
+            actor="test",
+            request_id="enrollment-fixture-commit",
+        )
+        return service, request
+
+    def current_camera_assignment(self, service, deployment_key, camera_id):
+        with service.sessions() as session:
+            deployment = session.scalar(
+                select(SolutionDeployment).where(SolutionDeployment.deployment_key == deployment_key)
+            )
+            _catalog_id, assignments, *_ = service._current_catalog_assignments(session, deployment)
+        return next(item for item in assignments if item["camera_id"] == camera_id)
+
+    def test_enrollment_start_then_stop_round_trips_apps_and_config(self):
+        service, request = self.commit_face_recognition_deployment()
+        deployment_key = request["deployment_key"]
+
+        started = service.start_enrollment(
+            deployment_key=deployment_key, camera_id="camera-01", duration_seconds=None,
+            actor="test", request_id="enrollment-start-1",
+        )
+        self.assertIsNotNone(started["window_id"])
+        self.assertIsNone(started["expires_at"])
+        camera = self.current_camera_assignment(service, deployment_key, "camera-01")
+        self.assertEqual(camera["apps"], ["face_enrollment"])
+        self.assertEqual(camera["config"], {})
+
+        stopped = service.stop_enrollment(
+            deployment_key=deployment_key, window_id=started["window_id"],
+            actor="test", request_id="enrollment-stop-1",
+        )
+        self.assertEqual(stopped["camera_id"], "camera-01")
+        camera = self.current_camera_assignment(service, deployment_key, "camera-01")
+        self.assertEqual(camera["apps"], ["face_recognition", "anpr"])
+
+        windows = service.list_enrollment_windows(deployment_key)
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0]["status"], "reverted")
+        self.assertEqual(windows[0]["camera_id"], "camera-01")
+
+    def test_enrollment_rejects_camera_without_face_recognition(self):
+        service, request = self.prepare_catalog_deployment()[:2]
+        with self.assertRaisesRegex(ValueError, "does not run face_recognition"):
+            service.start_enrollment(
+                deployment_key=request["deployment_key"], camera_id="camera-01", duration_seconds=None,
+                actor="test", request_id="enrollment-start-1",
+            )
+
+    def test_enrollment_rejects_concurrent_start_on_the_same_camera(self):
+        service, request = self.commit_face_recognition_deployment()
+        deployment_key = request["deployment_key"]
+        service.start_enrollment(
+            deployment_key=deployment_key, camera_id="camera-01", duration_seconds=None,
+            actor="test", request_id="enrollment-start-1",
+        )
+        with self.assertRaisesRegex(ValueError, "already"):
+            service.start_enrollment(
+                deployment_key=deployment_key, camera_id="camera-01", duration_seconds=None,
+                actor="test", request_id="enrollment-start-2",
+            )
+
+    def test_enrollment_sweep_reverts_expired_windows(self):
+        service, request = self.commit_face_recognition_deployment()
+        deployment_key = request["deployment_key"]
+        started = service.start_enrollment(
+            deployment_key=deployment_key, camera_id="camera-01", duration_seconds=1,
+            actor="test", request_id="enrollment-start-1",
+        )
+        with service.sessions.begin() as session:
+            window = session.get(EnrollmentWindow, uuid.UUID(started["window_id"]))
+            window.expires_at = utc_now() - timedelta(seconds=1)
+
+        results = service.sweep_expired_enrollment_windows()
+        self.assertEqual(len(results), 1)
+        self.assertNotIn("error", results[0])
+        camera = self.current_camera_assignment(service, deployment_key, "camera-01")
+        self.assertEqual(camera["apps"], ["face_recognition", "anpr"])
+        windows = service.list_enrollment_windows(deployment_key)
+        self.assertEqual(windows[0]["status"], "reverted")
+
+    def test_enrollment_http_routes_start_stop_and_list(self):
+        _service, request = self.commit_face_recognition_deployment()
+        deployment_key = request["deployment_key"]
+        app = create_app(self.sessions, self.keyring)
+
+        async def exercise():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+                start = await client.post(
+                    f"/api/v1/deployments/{deployment_key}/enrollment/start",
+                    json={"camera_id": "camera-01"},
+                )
+                listing = await client.get(f"/api/v1/deployments/{deployment_key}/enrollment-windows")
+                stop = await client.post(
+                    f"/api/v1/deployments/{deployment_key}/enrollment/stop",
+                    json={"window_id": start.json()["window_id"]},
+                )
+            return start, listing, stop
+
+        start, listing, stop = asyncio.run(exercise())
+        self.assertEqual(start.status_code, 200)
+        self.assertEqual(listing.json()[0]["status"], "active")
+        self.assertEqual(stop.status_code, 200)
+        self.assertEqual(stop.json()["camera_id"], "camera-01")
+
+    def test_camera_http_routes_cover_the_full_onboarding_lifecycle(self):
+        self.service.create_site(
+            "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"
+        )
+        app = create_app(self.sessions, self.keyring)
+
+        async def exercise():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+                created = await client.post("/api/v1/cameras", json={
+                    "camera_id": "camera-01", "friendly_name": "Main entrance",
+                    "manufacturer": "Example", "model": "C1",
+                    "identifiers": [{"kind": "mac", "value": "00:11:22:33:44:55"}],
+                })
+                listed = await client.get("/api/v1/cameras")
+                fetched = await client.get("/api/v1/cameras/camera-01")
+                streamed = await client.put("/api/v1/cameras/camera-01/stream", json={
+                    "scheme": "rtsp", "host": "192.0.2.10", "port": 554, "path": "/live/main",
+                    "profile_token": "main", "transport": "tcp",
+                })
+                credentialed = await client.put("/api/v1/cameras/camera-01/credentials", json={
+                    "username": "camera-user", "password": "camera-secret",
+                })
+                enabled = await client.patch("/api/v1/cameras/camera-01/enabled", json={"enabled": True})
+                cleared = await client.delete("/api/v1/cameras/camera-01/credentials")
+                deleted = await client.delete("/api/v1/cameras/camera-01")
+                missing = await client.get("/api/v1/cameras/camera-01")
+            return created, listed, fetched, streamed, credentialed, enabled, cleared, deleted, missing
+
+        created, listed, fetched, streamed, credentialed, enabled, cleared, deleted, missing = asyncio.run(exercise())
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.json()["camera_id"], "camera-01")
+        self.assertFalse(created.json()["credentials_configured"])
+        self.assertEqual(len(listed.json()), 1)
+        self.assertEqual(fetched.json()["identifiers"], [{"kind": "mac", "value": "00:11:22:33:44:55"}])
+        self.assertEqual(streamed.json()["selected_profile"]["host"], "192.0.2.10")
+        self.assertTrue(credentialed.json()["credentials_configured"])
+        self.assertNotIn("username", credentialed.json())
+        self.assertTrue(enabled.json()["enabled"])
+        self.assertEqual(cleared.status_code, 204)
+        self.assertEqual(deleted.status_code, 204)
+        self.assertEqual(missing.status_code, 409)
 
     def test_catalog_preview_builds_digest_only_complete_runtime_bundle(self):
         self.service.create_site(
@@ -319,7 +486,7 @@ class ManagementPlaneTests(unittest.TestCase):
         self.assertTrue({"/configs", "/plans"}.issubset(compiler_mounts))
         self.assertFalse(any(path.startswith("/models/") for path in main_mounts | compiler_mounts))
         desired_camera = preview["desired_state"]["cameras"][0]
-        self.assertIn("wrong_way", desired_camera["config"]["lines"])
+        self.assertEqual(desired_camera["config"]["lines"][0]["id"], "camera-01_entry")
 
     def test_catalog_commit_requires_matching_preview_and_available_digest(self):
         self.service.create_site(
@@ -391,11 +558,11 @@ class ManagementPlaneTests(unittest.TestCase):
             worker_id="catalog-worker",
             image_puller=pulls.append,
         ).run_once()
-        self.assertEqual(pulls, [f"127.0.0.1:5000/apexfabric/traffic-edge-runtime@{CATALOG_DIGEST}"])
+        self.assertEqual(pulls, [f"127.0.0.1:5000/apexfabric/tvt-mills-pilot@{CATALOG_DIGEST}"])
         self.assertTrue(client.calls)
 
     def test_node_image_preflight_passes_when_digest_is_cached_on_a_node(self):
-        reference = f"127.0.0.1:5000/apexfabric/traffic-edge-runtime@{CATALOG_DIGEST}"
+        reference = f"127.0.0.1:5000/apexfabric/tvt-mills-pilot@{CATALOG_DIGEST}"
 
         class CachedImageKubectl:
             def run(self, *arguments, input_text=None, check=True):
@@ -411,7 +578,7 @@ class ManagementPlaneTests(unittest.TestCase):
         NodeImagePreflight(CachedImageKubectl())(reference)
 
     def test_node_image_preflight_fails_fast_when_digest_is_not_cached(self):
-        reference = f"127.0.0.1:5000/apexfabric/traffic-edge-runtime@{CATALOG_DIGEST}"
+        reference = f"127.0.0.1:5000/apexfabric/tvt-mills-pilot@{CATALOG_DIGEST}"
 
         class UncachedImageKubectl:
             def run(self, *arguments, input_text=None, check=True):
@@ -500,7 +667,7 @@ class ManagementPlaneTests(unittest.TestCase):
             self.assertEqual(applied.id, first.id)
             self.assertTrue(attempts[-1].safe_detail["previous_applied_bundle_restored"])
         rollback = service.rollback(
-            "traffic-v4", first_preview["bundle_sha256"], "test", "explicit-rollback"
+            "tvt-mills-v1", first_preview["bundle_sha256"], "test", "explicit-rollback"
         )
         with self.sessions() as session:
             revision = session.get(SolutionBundleRevision, rollback.bundle_revision_id)
@@ -517,8 +684,8 @@ class ManagementPlaneTests(unittest.TestCase):
         self.assertNotIn("username", camera)
         self.assertNotIn("password", camera)
         self.assertEqual(camera["selected_profile"]["host"], "192.0.2.10")
-        self.assertEqual(camera["assignments"][0]["deployment_id"], "traffic-edge-intel-285h")
-        self.assertEqual(camera["assignments"][0]["apps"], ["anpr", "vehicle_counting"])
+        self.assertEqual(camera["assignments"][0]["deployment_id"], "tvt-mills-edge-intel-285h")
+        self.assertEqual(camera["assignments"][0]["apps"], ["anpr", "face_recognition"])
         with self.sessions() as session:
             stored = session.get(DeploymentAssignmentSet, committed.id)
             self.assertEqual(stored.desired_revision, 1)
@@ -671,7 +838,7 @@ class ManagementPlaneTests(unittest.TestCase):
         self.assertEqual(cluster["synchronization"]["by_state"], {"applied": 1})
         self.assertEqual(
             cluster["synchronization"]["items"][0]["deployment_id"],
-            "traffic-edge-intel-285h",
+            "tvt-mills-edge-intel-285h",
         )
 
         health = self.route_handler(app, "/api/v1/health")()
@@ -685,7 +852,7 @@ class ManagementPlaneTests(unittest.TestCase):
         self.commit()
         self.assertEqual(
             self.service.camera_workload_names("camera-01"),
-            ["traffic-edge-intel-285h-runtime"],
+            ["tvt-mills-edge-intel-285h-runtime"],
         )
 
     def test_cluster_reader_degrades_without_exposing_command_error(self):

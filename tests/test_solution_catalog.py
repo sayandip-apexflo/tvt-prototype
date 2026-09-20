@@ -59,20 +59,20 @@ class SolutionCatalogTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
             catalog = SolutionCatalog(state / "catalog.sqlite3")
-            delivery = ROOT / "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
-            catalog.seed_delivery(delivery, "registry.local:5000", "apexfabric/traffic-edge-runtime")
+            delivery = ROOT / "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
+            catalog.seed_delivery(delivery, "registry.local:5000", "apexfabric/tvt-mills-pilot")
             with catalog._connect() as connection:
                 connection.execute("""
                     INSERT INTO solutions
-                    SELECT 'traffic-edge-runtime:2026.08.21-v5', name, '2026.08.21-v5', registry,
-                           repository, 'intel-285h-2026.08.21-v5', digest, status,
+                    SELECT 'tvt-mills-pilot:2026.09.18-v2', name, '2026.09.18-v2', registry,
+                           repository, 'intel-285h-2026.09.18-v2', digest, status,
                            json_remove(contract_json, '$.ui'), desired_state_schema_json,
                            desired_state_example_json, last_error, updated_at
-                    FROM solutions WHERE catalog_id='traffic-edge-runtime:2026.08.21-v4'
+                    FROM solutions WHERE catalog_id='tvt-mills-pilot:2026.09.18-v1'
                 """)
             controller = Controller(state)
-            version_five = controller.catalog.get("traffic-edge-runtime:2026.08.21-v5")
-            self.assertEqual(version_five["contract"]["ui"]["camera"]["defaultApp"], "anpr")
+            version_two = controller.catalog.get("tvt-mills-pilot:2026.09.18-v2")
+            self.assertEqual(version_two["contract"]["ui"]["camera"]["defaultApp"], "face_recognition")
 
     def test_admin_solution_types_and_catalog_images_are_catalog_driven(self):
         javascript = (ROOT / "apexfabric/control_plane/static/enhancements.js").read_text(encoding="utf-8")
@@ -145,12 +145,12 @@ class SolutionCatalogTests(unittest.TestCase):
 
     def test_renderer_prefers_digest_over_mutable_tag(self):
         bundle = json.loads(json.dumps(__import__("yaml").safe_load(
-            (ROOT / "solution-packs/traffic/traffic-edge-runtime-intel-285h.yaml").read_text()
+            (ROOT / "solution-packs/traffic/tvt-mills-pilot-intel-285h.yaml").read_text()
         )))
         bundle["applications"][0]["image"]["digest"] = DIGEST
         deployment = next(item for item in render(bundle, "apexfabric") if item["kind"] == "Deployment")
         image = deployment["spec"]["template"]["spec"]["containers"][0]["image"]
-        self.assertEqual(image, f"__APEXFABRIC_REGISTRY__/apexfabric/traffic-edge-runtime@{DIGEST}")
+        self.assertEqual(image, f"__APEXFABRIC_REGISTRY__/apexfabric/tvt-mills-pilot@{DIGEST}")
 
     def test_catalog_selection_generates_digest_pinned_traffic_bundle(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -158,11 +158,11 @@ class SolutionCatalogTests(unittest.TestCase):
             with patch("apexfabric.solution_management.catalog.resolve_registry_digest", return_value=DIGEST):
                 controller.catalog.refresh()
             generated = controller.generate_bundle({
-                "solution_type": "traffic-edge-runtime",
-                "catalog_id": "traffic-edge-runtime:2026.08.21-v4",
-                "deployment_id": "traffic-demo",
+                "solution_type": "tvt-mills-pilot",
+                "catalog_id": "tvt-mills-pilot:2026.09.18-v1",
+                "deployment_id": "tvt-mills-demo",
                 "edge_id": "intel-box-01",
-                "camera_configuration": [{"camera_id": "traffic-1", "apps": ["anpr"]}],
+                "camera_configuration": [{"camera_id": "cam-1", "apps": ["anpr"]}],
             })
             app_image = generated["bundle"]["applications"][0]["image"]
             self.assertEqual(app_image["digest"], DIGEST)

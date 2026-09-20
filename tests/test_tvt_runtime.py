@@ -23,7 +23,7 @@ class TvtRuntimeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.bundle_path = (
-            ROOT / "solution-packs/traffic/traffic-edge-runtime-intel-285h.yaml"
+            ROOT / "solution-packs/traffic/tvt-mills-pilot-intel-285h.yaml"
         )
         cls.bundle = yaml.safe_load(cls.bundle_path.read_text(encoding="utf-8"))
         cls.schema = json.loads(
@@ -34,7 +34,7 @@ class TvtRuntimeTests(unittest.TestCase):
         cls.desired_state = json.loads(
             (
                 ROOT
-                / "solution-packs/traffic/traffic.desired_state.example.json"
+                / "solution-packs/traffic/tvt-mills-pilot.desired_state.example.json"
             ).read_text(encoding="utf-8")
         )
 
@@ -75,8 +75,8 @@ class TvtRuntimeTests(unittest.TestCase):
         self.assertEqual(
             secret_names(result),
             [
-                "traffic-edge-intel-285h-desired-state",
-                "traffic-edge-intel-285h-camera-sources",
+                "tvt-mills-edge-intel-285h-desired-state",
+                "tvt-mills-edge-intel-285h-camera-sources",
             ],
         )
         # Exact k3s@5ada504 contract: ConfigMap (plain data) + Secret.
@@ -120,7 +120,7 @@ class TvtRuntimeTests(unittest.TestCase):
             self.assertEqual(result, 0)
             rendered_output = " ".join(str(call) for call in output.call_args_list)
             self.assertNotIn("camera-pass", rendered_output)
-            self.assertIn("traffic-edge-intel-285h-camera-sources", rendered_output)
+            self.assertIn("tvt-mills-edge-intel-285h-camera-sources", rendered_output)
 
     def test_render_and_apply_require_a_real_registry_address(self):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

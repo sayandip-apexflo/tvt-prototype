@@ -35,7 +35,7 @@ from tvt_edge.db.models import (
     utc_now,
 )
 from tvt_edge.security import CredentialKeyring, redact_text
-from tvt_runtime.camera_secrets import build_camera_secret_list, secret_names
+from tvt_runtime.camera_secrets import RUNTIME_CONTRACTS, build_camera_secret_list, secret_names
 
 
 @dataclass(frozen=True)
@@ -366,6 +366,8 @@ class SyncWorker:
             )
 
     def _secret_inputs(self, work: SyncWorkItem) -> dict[str, Any]:
+        input_contract = work.bundle.get("configuration", {}).get("secret_input_contract")
+        solution_pack = RUNTIME_CONTRACTS.get(input_contract, (None, None))[0] or "traffic"
         desired_cameras = []
         sources: dict[str, str] = {}
         for camera in work.cameras:
@@ -384,7 +386,7 @@ class SyncWorker:
                     "source": (
                         f"file:/run/secrets/apexfabric/{camera.camera_key}.rtsp"
                     ),
-                    "solution_pack": "traffic",
+                    "solution_pack": solution_pack,
                     "fps": camera.fps,
                     "apps": list(camera.apps),
                 }

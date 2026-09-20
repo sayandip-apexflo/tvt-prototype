@@ -145,126 +145,75 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(app["resources"]["cpu"]["request"], "100m")
             self.assertNotIn("PersistentVolumeClaim", {item["kind"] for item in generated["objects"]})
 
-    def test_traffic_runtime_generator_uses_baked_models_and_secret_contract(self):
+    def test_tvt_mills_pilot_runtime_generator_uses_baked_models_and_secret_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             controller = Controller(Path(directory), FakeRunner())
             generated = controller.generate_bundle({
-                "solution_type": "traffic-edge-runtime",
-                "deployment_id": "traffic-demo", "edge_id": "intel-box-01",
-                "image_repository": "registry.local/apexfabric/traffic-edge-runtime",
-                "image_tag": "intel-285h-2026.08.20",
+                "solution_type": "tvt-mills-pilot",
+                "deployment_id": "tvt-mills-demo", "edge_id": "intel-box-01",
+                "image_repository": "registry.local/apexfabric/tvt-mills-pilot",
+                "image_tag": "intel-285h-2026.09.18-v1",
+                "storage_gib": 20,
                 "camera_configuration": [
-                    {"camera_id": "traffic-1", "fps": 8, "apps": ["anpr", "vehicle_counting"]},
-                    {"camera_id": "traffic-2", "fps": 8, "apps": ["wrong_way"]},
+                    {"camera_id": "cam-1", "fps": 8, "apps": ["anpr", "face_recognition"]},
+                    {"camera_id": "cam-2", "fps": 8, "apps": ["face_enrollment"]},
                 ],
             })
             app = generated["bundle"]["applications"][0]
             self.assertEqual(app["configuration"]["models_delivery"], "baked-in")
+            self.assertEqual(app["configuration"]["models_root"], "/models/tvt-mills")
             self.assertEqual(app["configuration"]["inference_mode"], "cpu-compatible")
-            self.assertEqual(app["environment"]["VEHICLE_DEVICE"], "CPU")
-            self.assertEqual(app["environment"]["PLATE_DEVICE"], "CPU")
-            self.assertEqual(app["environment"]["OCR_DEVICE"], "CPU")
-            self.assertNotIn("persistent_volumes", app)
-            self.assertNotIn("PersistentVolumeClaim", {item["kind"] for item in generated["objects"]})
+            self.assertEqual(app["environment"], {"SOLUTION_PACK": "tvt-mills-pilot"})
+            self.assertIn("persistent_volumes", app)
+            self.assertIn("PersistentVolumeClaim", {item["kind"] for item in generated["objects"]})
             self.assertEqual(app["resources"]["camera_streams"], 2)
-            self.assertEqual(generated["desired_state"]["cameras"][0]["source"], "file:/run/secrets/apexfabric/traffic-1.rtsp")
+            self.assertEqual(generated["desired_state"]["cameras"][0]["source"], "file:/run/secrets/apexfabric/cam-1.rtsp")
             deployment = next(item for item in generated["objects"] if item["kind"] == "Deployment")
             volumes = {volume["name"]: volume for volume in deployment["spec"]["template"]["spec"]["volumes"]}
-            self.assertEqual(volumes["desired-state"]["configMap"]["name"], "traffic-demo-desired-state")
+            self.assertEqual(volumes["desired-state"]["configMap"]["name"], "tvt-mills-demo-desired-state")
             runtime_mount = next(mount for mount in deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"] if mount["name"] == "desired-state")
             self.assertEqual(runtime_mount["mountPath"], "/configs")
             self.assertNotIn("subPath", runtime_mount)
             compiler_mounts = {mount["mountPath"] for mount in deployment["spec"]["template"]["spec"]["initContainers"][0]["volumeMounts"]}
-            self.assertIn("/run/secrets/apexfabric/traffic-1.rtsp", compiler_mounts)
-            self.assertNotIn("/models/traffic/openvino", compiler_mounts)
+            self.assertIn("/run/secrets/apexfabric/cam-1.rtsp", compiler_mounts)
+            self.assertNotIn("/models/tvt-mills", compiler_mounts)
 
-    def test_traffic_runtime_generator_persists_accelerated_device_selection(self):
-        with tempfile.TemporaryDirectory() as directory:
-            controller = Controller(Path(directory), FakeRunner())
-            generated = controller.generate_bundle({
-                "solution_type": "traffic-edge-runtime", "inference_mode": "intel-gpu-npu",
-                "camera_configuration": [{"camera_id": "traffic-1", "fps": 8, "apps": ["anpr"]}],
-            })
-            app = generated["bundle"]["applications"][0]
-            self.assertEqual(app["environment"]["VEHICLE_DEVICE"], "GPU")
-            self.assertEqual(app["environment"]["PLATE_DEVICE"], "NPU")
-            self.assertEqual(app["environment"]["OCR_DEVICE"], "MULTI:GPU,NPU")
-            deployment = next(item for item in generated["objects"] if item["kind"] == "Deployment")
-            environment = {item["name"]: item.get("value") for item in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
-            self.assertEqual(environment["VEHICLE_DEVICE"], "GPU")
-
-            with self.assertRaisesRegex(ValueError, "inference_mode"):
+            with self.assertRaisesRegex(ValueError, "supported tvt-mills-pilot apps"):
                 controller.generate_bundle({
-                    "solution_type": "traffic-edge-runtime", "inference_mode": "arbitrary",
-                    "camera_configuration": [{"camera_id": "traffic-1", "fps": 8, "apps": ["anpr"]}],
+                    "solution_type": "tvt-mills-pilot",
+                    "camera_configuration": [{"camera_id": "cam-1", "apps": ["wrong_way"]}],
                 })
 
-    def test_surveillance_runtime_generator_exposes_apps_and_persistent_state(self):
-        with tempfile.TemporaryDirectory() as directory:
-            controller = Controller(Path(directory), FakeRunner())
-            generated = controller.generate_bundle({
-                "solution_type": "surveillance-edge-runtime",
-                "deployment_id": "surveillance-demo",
-                "image_repository": "registry.local/apexfabric/surveillance-edge-runtime",
-                "image_tag": "intel-285h-2026.08.24-v3",
-                "storage_gib": 40,
-                "camera_configuration": [{
-                    "camera_id": "lobby-1", "fps": 8,
-                    "apps": ["reid", "face_recognition", "intrusion", "people_counting"],
-                    "config": {
-                        "zones": {"intrusion": [{"name": "lobby", "poly": [[0.1, 0.1], [0.9, 0.1], [0.5, 0.9]]}]},
-                        "lines": {"people_counting": [{"name": "entry", "a": [0.1, 0.5], "b": [0.9, 0.5], "in_side": "right"}]},
-                    },
-                }],
-            })
-            app = generated["bundle"]["applications"][0]
-            self.assertEqual(generated["desired_state"]["cameras"][0]["solution_pack"], "surveillance")
-            self.assertEqual(app["configuration"]["models_root"], "/models/surveillance")
-            self.assertEqual(app["environment"], {"SOLUTION_PACK": "surveillance"})
-            self.assertEqual(app["persistent_volumes"], [{
-                "name": "state", "mount_path": "/state", "size": "40Gi", "storage_class": "local-path",
-            }])
-            self.assertIn("PersistentVolumeClaim", {item["kind"] for item in generated["objects"]})
-            deployment = next(item for item in generated["objects"] if item["kind"] == "Deployment")
-            mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
-            self.assertIn("/state", {mount["mountPath"] for mount in mounts})
-
-            with self.assertRaisesRegex(ValueError, "supported surveillance apps"):
-                controller.generate_bundle({
-                    "solution_type": "surveillance-edge-runtime",
-                    "camera_configuration": [{"camera_id": "lobby-1", "apps": ["anpr"]}],
-                })
-
-    def test_traffic_runtime_apply_creates_secrets_without_persisting_values(self):
+    def test_tvt_mills_pilot_runtime_apply_creates_secrets_without_persisting_values(self):
         with tempfile.TemporaryDirectory() as directory:
             runner = FakeRunner()
             controller = Controller(Path(directory), runner)
             generated = controller.generate_bundle({
-                "solution_type": "traffic-edge-runtime", "deployment_id": "traffic-demo",
-                "camera_configuration": [{"camera_id": "traffic-1", "fps": 8, "apps": ["anpr"]}],
+                "solution_type": "tvt-mills-pilot", "deployment_id": "tvt-mills-demo",
+                "camera_configuration": [{"camera_id": "cam-1", "fps": 8, "apps": ["anpr"]}],
             })
-            rtsp = "rtsp://camera.example:8554/traffic1"
+            rtsp = "rtsp://camera.example:8554/cam1"
             job = {"log": []}
             result = controller.deploy(job, {
                 "bundle_yaml": generated["bundle_yaml"],
-                "secret_inputs": {"desired_state": generated["desired_state"], "camera_sources": {"traffic-1": rtsp}},
+                "secret_inputs": {"desired_state": generated["desired_state"], "camera_sources": {"cam-1": rtsp}},
             })
             secret_call = next(index for index, call in enumerate(runner.calls) if call[-3:] == ["apply", "-f", "-"])
             secret_list = json.loads(runner.inputs[secret_call])
-            self.assertEqual(secret_list["items"][1]["stringData"]["traffic-1.rtsp"], rtsp)
-            self.assertNotIn(rtsp, (Path(directory) / "packages" / "traffic-demo.yaml").read_text())
+            self.assertEqual(secret_list["items"][1]["stringData"]["cam-1.rtsp"], rtsp)
+            self.assertNotIn(rtsp, (Path(directory) / "packages" / "tvt-mills-demo.yaml").read_text())
             self.assertNotIn(rtsp, json.dumps(job))
             self.assertNotIn(rtsp, json.dumps(result))
-            self.assertEqual(result["configured_inputs"], ["traffic-demo-desired-state", "traffic-demo-camera-sources"])
+            self.assertEqual(result["configured_inputs"], ["tvt-mills-demo-desired-state", "tvt-mills-demo-camera-sources"])
             self.assertEqual(secret_list["items"][0]["kind"], "ConfigMap")
             self.assertEqual(secret_list["items"][0]["metadata"]["annotations"]["apexfabric.com/desired-revision"], "1")
 
-    def test_traffic_runtime_apply_requires_exact_camera_secret_values(self):
+    def test_tvt_mills_pilot_runtime_apply_requires_exact_camera_secret_values(self):
         with tempfile.TemporaryDirectory() as directory:
             controller = Controller(Path(directory), FakeRunner())
             generated = controller.generate_bundle({
-                "solution_type": "traffic-edge-runtime",
-                "camera_configuration": [{"camera_id": "traffic-1", "fps": 8, "apps": ["anpr"]}],
+                "solution_type": "tvt-mills-pilot",
+                "camera_configuration": [{"camera_id": "cam-1", "fps": 8, "apps": ["anpr"]}],
             })
             with self.assertRaisesRegex(ValueError, "exactly match"):
                 controller.deploy({"log": []}, {
@@ -276,18 +225,18 @@ class ControlPlaneTests(unittest.TestCase):
         current = {
             "edge_id": "intel-box-01", "revision": 3,
             "cameras": [{
-                "camera_id": "traffic-1", "source": "file:/run/secrets/apexfabric/traffic-1.rtsp",
-                "solution_pack": "traffic", "fps": 8, "apps": ["anpr"],
+                "camera_id": "cam-1", "source": "file:/run/secrets/apexfabric/cam-1.rtsp",
+                "solution_pack": "tvt-mills-pilot", "fps": 8, "apps": ["anpr"], "config": {},
             }],
         }
         updated = json.loads(json.dumps(current))
         updated["revision"] = 4
-        updated["cameras"][0]["apps"] = ["anpr", "vehicle_counting"]
+        updated["cameras"][0]["apps"] = ["anpr", "face_recognition"]
         with tempfile.TemporaryDirectory() as directory:
             runner = RuntimeConfigurationRunner(current)
             controller = Controller(Path(directory), runner)
             result = controller.update_runtime_configuration({"log": []}, {
-                "name": "traffic-demo-runtime", "desired_state": updated,
+                "name": "tvt-mills-demo-runtime", "desired_state": updated,
             })
             applied = json.loads(runner.inputs[-1])
             self.assertEqual(applied["kind"], "ConfigMap")
@@ -297,26 +246,19 @@ class ControlPlaneTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "greater than 3"):
                 controller.update_runtime_configuration({"log": []}, {
-                    "name": "traffic-demo-runtime", "desired_state": current,
-                })
-
-            missing_geometry = json.loads(json.dumps(current))
-            missing_geometry["revision"] = 4
-            missing_geometry["cameras"][0]["apps"] = ["anpr", "wrong_way"]
-            with self.assertRaisesRegex(ValueError, "requires config.lines.wrong_way"):
-                controller.update_runtime_configuration({"log": []}, {
-                    "name": "traffic-demo-runtime", "desired_state": missing_geometry,
+                    "name": "tvt-mills-demo-runtime", "desired_state": current,
                 })
 
     def test_live_runtime_configuration_removes_disabled_app(self):
         current = {
             "edge_id": "intel-box-01", "revision": 8,
             "cameras": [{
-                "camera_id": "traffic-1", "source": "file:/run/secrets/apexfabric/traffic-1.rtsp",
-                "solution_pack": "traffic", "fps": 8, "apps": ["anpr", "illegal_parking"],
-                "config": {"zones": {"illegal_parking": [{
-                    "id": "parking-zone", "name": "parking", "poly": [[0.1, 0.1], [0.8, 0.1], [0.8, 0.8]],
-                }]}},
+                "camera_id": "cam-1", "source": "file:/run/secrets/apexfabric/cam-1.rtsp",
+                "solution_pack": "tvt-mills-pilot", "fps": 8, "apps": ["anpr", "face_recognition"],
+                "config": {"lines": [{
+                    "id": "cam-1_entry", "name": "cam-1 gate (entry)", "type": "line",
+                    "points": [[0.1, 0.5], [0.9, 0.5]], "accepted": ["A->B"],
+                }]},
             }],
         }
         updated = json.loads(json.dumps(current))
@@ -325,7 +267,7 @@ class ControlPlaneTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             runner = RuntimeConfigurationRunner(current)
             Controller(Path(directory), runner).update_runtime_configuration({"log": []}, {
-                "name": "traffic-demo-runtime", "desired_state": updated,
+                "name": "tvt-mills-demo-runtime", "desired_state": updated,
             })
             applied = json.loads(runner.inputs[-1])
             stored = json.loads(applied["data"]["desired_state.json"])

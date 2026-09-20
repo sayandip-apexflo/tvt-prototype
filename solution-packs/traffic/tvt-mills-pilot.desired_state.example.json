@@ -1,0 +1,33 @@
+{
+  "edge_id": "intel-box-01",
+  "revision": 1,
+  "cameras": [
+    {
+      "camera_id": "cam4",
+      "source": "file:/run/secrets/apexfabric/cam4.rtsp",
+      "solution_pack": "tvt-mills-pilot",
+      "fps": 8,
+      "apps": ["face_recognition", "anpr"],
+      "config": {
+        "zones": {"anpr": []},
+        "lines": [
+          {"id": "cam4_entry", "name": "cam4 gate (entry)", "type": "line", "points": [[0.5, 0.08], [0.5, 0.95]], "accepted": ["B->A"]},
+          {"id": "cam4_exit", "name": "cam4 gate (exit)", "type": "line", "points": [[0.5, 0.08], [0.5, 0.95]], "accepted": ["A->B"]}
+        ]
+      }
+    },
+    {
+      "camera_id": "cam5",
+      "source": "file:/run/secrets/apexfabric/cam5.rtsp",
+      "solution_pack": "tvt-mills-pilot",
+      "fps": 8,
+      "apps": ["face_recognition"],
+      "config": {
+        "zones": {"anpr": []},
+        "lines": [
+          {"id": "cam5_exit", "name": "cam5 gate (exit)", "type": "line", "points": [[0.5, 0.08], [0.5, 0.95]], "accepted": ["A->B"]}
+        ]
+      }
+    }
+  ]
+}

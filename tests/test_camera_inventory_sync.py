@@ -172,14 +172,14 @@ class CameraInventorySyncTests(unittest.TestCase):
         bundle = yaml.safe_load(
             (
                 Path(__file__).resolve().parents[1]
-                / "solution-packs/traffic/traffic-edge-runtime-intel-285h.yaml"
+                / "solution-packs/traffic/tvt-mills-pilot-intel-285h.yaml"
             ).read_text(encoding="utf-8")
         )
         self.service.register_deployment(
             bundle, "apexfabric", "registry.local:5000", "test", "deployment"
         )
         self.service.commit_assignments(
-            "traffic-edge-intel-285h",
+            "tvt-mills-edge-intel-285h",
             [{"camera_id": "cam-01", "apps": ["anpr"], "fps": 8}],
             "test",
             "assignment",

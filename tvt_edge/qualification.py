@@ -1,4 +1,14 @@
-"""Bounded, redacted qualification of the catalog-backed Traffic workload."""
+"""Bounded, redacted qualification of the catalog-backed tvt-mills-pilot workload.
+
+Formerly qualified the standalone Traffic workload -- see
+docs/contracts/tvt-mills-v1/README.md for why the two-pack architecture was
+retired in favor of this single combined face_recognition/face_enrollment/
+anpr pack. DEFAULT_IMAGE_LOCK's filename intentionally keeps the old
+"traffic-image.lock.json" name -- it is owned by the separate
+pipeline-image-sync subsystem (tvt_runtime/image_lock.py,
+tvt-pipeline-image-sync.timer, tests/test_image_lock.py and friends), which
+this qualifier only reads and does not otherwise touch.
+"""
 
 from __future__ import annotations
 
@@ -27,11 +37,11 @@ from tvt_edge.paths import RESOURCE_ROOT
 
 ROOT = RESOURCE_ROOT
 DEFAULT_CATALOG_DIRECTORY = (
-    ROOT / "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
+    ROOT / "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
 )
 DEFAULT_REPORT_DIRECTORY = Path("/var/lib/tvt/qualification")
 DEFAULT_IMAGE_LOCK = Path("/var/lib/tvt/pipeline/traffic-image.lock.json")
-CATALOG_ID = "traffic-edge-runtime:2026.08.21-v4"
+CATALOG_ID = "tvt-mills-pilot:2026.09.18-v1"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 MAX_HTTP_BYTES = 2 * 1024 * 1024
 MAX_COMMAND_BYTES = 4 * 1024 * 1024
@@ -247,7 +257,7 @@ def _is_passing_baseline(report: dict[str, Any]) -> bool:
     }
     return bool(
         report.get("format_version") == 1
-        and report.get("qualification") == "traffic-edge-runtime-v4"
+        and report.get("qualification") == "tvt-mills-pilot-v1"
         and report.get("outcome") == "passed"
         and isinstance(report.get("invariants"), dict)
         and len(identifiers) == len(checks)
@@ -285,7 +295,7 @@ def atomic_write_report(path: Path, report: dict[str, Any]) -> None:
         raise
 
 
-class TrafficQualifier:
+class TvtMillsQualifier:
     def __init__(
         self,
         api: Api,
@@ -412,7 +422,7 @@ class TrafficQualifier:
         if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?", options.deployment_id):
             raise ValueError("deployment ID must be DNS compatible")
         if options.namespace != "apexfabric":
-            raise ValueError("Traffic qualification is restricted to the apexfabric namespace")
+            raise ValueError("tvt-mills-pilot qualification is restricted to the apexfabric namespace")
         if options.checkpoint not in {
             "steady",
             "pre-reboot",
@@ -424,7 +434,7 @@ class TrafficQualifier:
             raise ValueError("post-reboot and post-rollback checks require a baseline report")
         if options.baseline is not None:
             if not _is_passing_baseline(options.baseline):
-                raise ValueError("baseline must be a passing safe Traffic qualification report")
+                raise ValueError("baseline must be a passing safe tvt-mills-pilot qualification report")
         if options.rollback_bundle_sha256 is not None and options.checkpoint != "post-rollback":
             raise ValueError("rollback requests require --checkpoint post-rollback")
         if options.rollback_bundle_sha256 is not None and not re.fullmatch(
@@ -450,7 +460,7 @@ class TrafficQualifier:
             self._check(
                 "contracts.provenance",
                 valid_metadata,
-                "Pinned Traffic schemas and examples match provenance",
+                "Pinned tvt-mills-pilot schemas and examples match provenance",
                 {
                     "catalog_id": metadata["catalog_id"],
                     "checksums": metadata["checksums"],
@@ -686,7 +696,7 @@ class TrafficQualifier:
                 self._check(
                     "containerd.image",
                     True,
-                    "K3s containerd has the immutable Traffic image",
+                    "K3s containerd has the immutable tvt-mills-pilot image",
                     {"image_reference": image_reference},
                 )
             except Exception as error:
@@ -780,7 +790,7 @@ class TrafficQualifier:
             self._check(
                 "kubernetes.workload_contract",
                 contract_ok,
-                "Deployment has the immutable two-container Traffic contract",
+                "Deployment has the immutable two-container tvt-mills-pilot contract",
                 {
                     "deployment": workload_name,
                     "same_image": image_ok,
@@ -918,7 +928,7 @@ class TrafficQualifier:
             self._check(
                 "kubernetes.persistent_state",
                 pvc_ok,
-                "The retained Traffic state PVC is Bound",
+                "The retained tvt-mills-pilot state PVC is Bound",
                 {
                     "claim": state_claim.get("metadata", {}).get("name"),
                     "uid": pvc_uid,
@@ -941,7 +951,7 @@ class TrafficQualifier:
             self._check(
                 "runtime.health",
                 endpoint_ok,
-                "Traffic health, readiness, and telemetry endpoints are available",
+                "tvt-mills-pilot health, readiness, and telemetry endpoints are available",
             )
             metrics = json.loads(telemetry.get("metrics") or "")
             if metadata is None:
@@ -972,7 +982,7 @@ class TrafficQualifier:
 
         try:
             if pod is None:
-                raise ValueError("no running Traffic Pod is available for SSE")
+                raise ValueError("no running tvt-mills-pilot Pod is available for SSE")
             pod_name = pod["metadata"]["name"]
             result = self.commands.run(
                 [
@@ -991,7 +1001,7 @@ class TrafficQualifier:
             self._check(
                 "runtime.events_sse",
                 reachable,
-                "The bounded SSE request reached the Traffic event endpoint",
+                "The bounded SSE request reached the tvt-mills-pilot event endpoint",
             )
             events = parse_sse_events(output)
             if metadata is None:
@@ -1057,7 +1067,7 @@ class TrafficQualifier:
         )
         return {
             "format_version": 1,
-            "qualification": "traffic-edge-runtime-v4",
+            "qualification": "tvt-mills-pilot-v1",
             "checkpoint": options.checkpoint,
             "outcome": outcome,
             "started_at": started.isoformat(),
@@ -1101,7 +1111,7 @@ def _load_object(path: Path) -> dict[str, Any]:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
-        description="Qualify a deployed PIPELINE Traffic v4 workload"
+        description="Qualify a deployed tvt-mills-pilot workload"
     )
     result.add_argument("deployment_id")
     result.add_argument("--namespace", default="apexfabric")
@@ -1146,7 +1156,7 @@ def main(argv: list[str] | None = None) -> int:
         idempotency_key=args.idempotency_key,
         rollback_bundle_sha256=args.rollback_bundle_sha256,
     )
-    qualifier = TrafficQualifier(
+    qualifier = TvtMillsQualifier(
         LocalApiClient(args.api_url),
         CommandRunner(),
         args.catalog_directory,
@@ -1155,7 +1165,7 @@ def main(argv: list[str] | None = None) -> int:
     report = qualifier.qualify(options)
     output = args.output or (
         DEFAULT_REPORT_DIRECTORY
-        / f"traffic-{args.deployment_id}-{args.checkpoint}-{int(time.time())}.json"
+        / f"tvt-mills-{args.deployment_id}-{args.checkpoint}-{int(time.time())}.json"
     )
     atomic_write_report(output, report)
     print(

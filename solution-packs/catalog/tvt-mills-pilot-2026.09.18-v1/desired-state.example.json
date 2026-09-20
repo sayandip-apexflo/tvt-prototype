@@ -1,0 +1,137 @@
+{
+  "edge_id": "tvt-mills-edge-01",
+  "revision": 1,
+  "cameras": [
+    {
+      "camera_id": "main-entrance-1",
+      "source": "file:/run/secrets/apexfabric/main-entrance-1.rtsp",
+      "solution_pack": "tvt-mills-pilot",
+      "fps": 5,
+      "apps": ["face_recognition", "anpr"],
+      "config": {
+        "zones": {
+          "anpr": [
+            {
+              "id": "main-entrance-1-parking",
+              "name": "Main entrance parking",
+              "poly": [[0.08, 0.30], [0.92, 0.30], [0.92, 0.94], [0.08, 0.94]]
+            }
+          ]
+        },
+        "lines": [
+          {
+            "id": "main-entrance-1_entry",
+            "name": "Main entrance 1 gate (entry)",
+            "type": "line",
+            "points": [[0.50, 0.08], [0.50, 0.95]],
+            "accepted": ["B->A"]
+          },
+          {
+            "id": "main-entrance-1_exit",
+            "name": "Main entrance 1 gate (exit)",
+            "type": "line",
+            "points": [[0.50, 0.08], [0.50, 0.95]],
+            "accepted": ["A->B"]
+          }
+        ]
+      }
+    },
+    {
+      "camera_id": "main-entrance-2",
+      "source": "file:/run/secrets/apexfabric/main-entrance-2.rtsp",
+      "solution_pack": "tvt-mills-pilot",
+      "fps": 5,
+      "apps": ["face_recognition", "anpr"],
+      "config": {
+        "zones": {"anpr": []},
+        "lines": [
+          {
+            "id": "main-entrance-2_entry",
+            "name": "Main entrance 2 gate (entry)",
+            "type": "line",
+            "points": [[0.50, 0.08], [0.50, 0.95]],
+            "accepted": ["B->A"]
+          },
+          {
+            "id": "main-entrance-2_exit",
+            "name": "Main entrance 2 gate (exit)",
+            "type": "line",
+            "points": [[0.50, 0.08], [0.50, 0.95]],
+            "accepted": ["A->B"]
+          }
+        ]
+      }
+    },
+    {
+      "camera_id": "plant-entrance-1",
+      "source": "file:/run/secrets/apexfabric/plant-entrance-1.rtsp",
+      "solution_pack": "tvt-mills-pilot",
+      "fps": 5,
+      "apps": ["face_recognition"],
+      "config": {
+        "zones": {"anpr": []},
+        "lines": [
+          {
+            "id": "plant-entrance-1_entry",
+            "name": "Plant entrance 1 gate (entry)",
+            "type": "line",
+            "points": [[0.50, 0.08], [0.50, 0.95]],
+            "accepted": ["B->A"]
+          },
+          {
+            "id": "plant-entrance-1_exit",
+            "name": "Plant entrance 1 gate (exit)",
+            "type": "line",
+            "points": [[0.50, 0.08], [0.50, 0.95]],
+            "accepted": ["A->B"]
+          }
+        ]
+      }
+    },
+    {
+      "camera_id": "plant-entrance-2",
+      "source": "file:/run/secrets/apexfabric/plant-entrance-2.rtsp",
+      "solution_pack": "tvt-mills-pilot",
+      "fps": 5,
+      "apps": ["face_recognition"],
+      "config": {
+        "zones": {"anpr": []},
+        "lines": [
+          {
+            "id": "plant-entrance-2_entry",
+            "name": "Plant entrance 2 gate (entry)",
+            "type": "line",
+            "points": [[0.50, 0.08], [0.50, 0.95]],
+            "accepted": ["B->A"]
+          },
+          {
+            "id": "plant-entrance-2_exit",
+            "name": "Plant entrance 2 gate (exit)",
+            "type": "line",
+            "points": [[0.50, 0.08], [0.50, 0.95]],
+            "accepted": ["A->B"]
+          }
+        ]
+      }
+    },
+    {
+      "camera_id": "back-exit",
+      "source": "file:/run/secrets/apexfabric/back-exit.rtsp",
+      "solution_pack": "tvt-mills-pilot",
+      "fps": 5,
+      "apps": ["face_recognition"],
+      "config": {
+        "zones": {"anpr": []},
+        "lines": [
+          {
+            "id": "back-exit_exit",
+            "name": "Back exit gate (exit)",
+            "type": "line",
+            "points": [[0.50, 0.08], [0.50, 0.95]],
+            "accepted": ["A->B"]
+          }
+        ]
+      }
+    }
+  ]
+}

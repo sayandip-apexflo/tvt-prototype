@@ -1,0 +1,73 @@
+{
+  "format_version": 1,
+  "catalog_id": "tvt-mills-pilot:2026.09.18-v1",
+  "pipeline": {
+    "repository": "https://github.com/BhashyamDayasagar587/TVT_images",
+    "commit": "main"
+  },
+  "delivery": {
+    "branch": "main",
+    "directory": ".",
+    "version": "2026.09.18-v1"
+  },
+  "archive": {
+    "filename": "tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar",
+    "size": 967496192,
+    "sha256": "a236a4c1c3053e6a78270d98426b72c5fcbe681273b6f5f35d5631d25a88f4a8",
+    "loaded_image": "localhost/tvt-mills-pilot:intel-285h-2026.09.18-v1"
+  },
+  "local_image": {
+    "repository": "apexfabric/tvt-mills-pilot",
+    "tag": "intel-285h-2026.09.18-v1"
+  },
+  "files": {
+    "image-contract.yaml": {
+      "sha256": "27b829b98f11fcdfa2e444ac8072b23885dca89f4a7c2c312e61934cd5eaeb16"
+    },
+    "desired-state.schema.json": {
+      "sha256": "ad814ea4c29bed685758301b02579cbb6340272397a166a3e5ed73707cf76e64"
+    },
+    "desired-state.example.json": {
+      "sha256": "6b2b5c924dd5b88da462a41e6fe65c50c1d1682c5dc3e1aa46e083f0b433d99c"
+    },
+    "metrics.schema.json": {
+      "sha256": "d2be647575d7db4c43b17556ead25fb9103681eb6c946034e1329435f11b40fc"
+    },
+    "analytics-event.schema.json": {
+      "sha256": "14250d446b377bf79c6ecf5ae40f168c9071edf2df5d4ac18ff6e8402c6ffde4"
+    },
+    "analytics-event.example.json": {
+      "sha256": "681d42d8757adda5a23169029461a4503cf600bcc1236d256f38482992e573e8"
+    }
+  },
+  "note": "image-contract.yaml, desired-state.schema.json, and desired-state.example.json in this directory are repo-authored, not copied from the vendor delivery verbatim -- see docs/contracts/tvt-mills-v1/README.md for what changed and why (cameras.items inlined for apexfabric/solution_management/catalog.py ingestion; line id pattern tightened to require an _entry/_exit suffix; metrics.schema.json is a permissive placeholder because the vendor never published one). analytics-event.schema.json is reproduced unmodified because it describes what the shipped binary actually emits. MANAGER-UI-HANDOFF.md, management-api.openapi.yaml, and manifests/tvt-edge.yaml are vendor documentation only, not consumed by this platform's ingestion path, and are not vendored into this directory. The archive's sha256 above is the vendor's published release digest (release tag tvt-edge-intel-285h-2026.09.18-v1); the six `files` checksums are self-checksums of this directory's own files (`sha256sum image-contract.yaml desired-state.schema.json desired-state.example.json metrics.schema.json analytics-event.schema.json analytics-event.example.json`), the same way the legacy traffic pack's provenance.json was populated. Recompute them whenever any of those six files change -- tvt_edge/delivery_metadata.py:load_delivery_metadata rejects a mismatch.",
+  "known_deviation_from_vendor_schema": {
+    "desired-state.schema.json": "vendor's cameras array used {\"items\": {\"$ref\": \"#/$defs/camera\"}}; this repo's copy inlines the camera object under cameras.items so SolutionCatalog._validate_ui_annotations (apexfabric/solution_management/catalog.py) can read the apps enum without resolving refs, and tightens line.id's pattern to require an _entry/_exit suffix. Both are additive/structural-only: they reject a strict subset of what the vendor's original pattern accepted and do not change how the running image interprets desired_state.json."
+  },
+  "vendor_files_as_delivered": {
+    "README.md": {
+      "sha256": "d10aff76b7ca8ddd8ff29e086fead54277d4c64ec58822f22d08ddb2fd8adde0"
+    },
+    "MANAGER-UI-HANDOFF.md": {
+      "sha256": "bac614857bd21d185f02f031aea2a2bdb72b88c209ac6456249ea106815218b4"
+    },
+    "analytics-event.schema.json": {
+      "sha256": "1cf5d1416b9f8a4ceca7e8d0b1e3a3fa95966386ac6d4ea9cbbe6d99fe9295f8"
+    },
+    "desired-state.example.json": {
+      "sha256": "f5e7d52baad36efb7316f19dfa75a594cbd17fe47f884aeb4368c0f4c0b351e1"
+    },
+    "desired-state.schema.json": {
+      "sha256": "ae1c6015cf24bc7b6540663db069831ab6e6d1b0609ff9203c547f46ad4c5db4"
+    },
+    "image-contract.yaml": {
+      "sha256": "5b0069c3f04debdf4d6d3d56a24fd4714cd416249e768e1ea5fa17fbf9cccb4e"
+    },
+    "management-api.openapi.yaml": {
+      "sha256": "2bf9021419338c1335f1ba945f29de10b6cc72126ffd85e57b780eee1a222cd8"
+    },
+    "manifests/tvt-edge.yaml": {
+      "sha256": "50afb3297deb44e613d5e329424ebcf5546cee511ecc7d452ed5335f39dcf91e"
+    }
+  }
+}

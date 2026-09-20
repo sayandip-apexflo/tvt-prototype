@@ -107,7 +107,7 @@ class NodeAgentTests(unittest.TestCase):
         self.assertNotIn("prometheus.io/scrape", deployment["spec"]["template"]["metadata"]["annotations"])
 
     def test_intel_gpu_npu_runtime_renders_capacity_external_inputs_and_devices(self):
-        bundle = yaml.safe_load((ROOT / "solution-packs/traffic/traffic-edge-runtime-intel-285h.yaml").read_text())
+        bundle = yaml.safe_load((ROOT / "solution-packs/traffic/tvt-mills-pilot-intel-285h.yaml").read_text())
         objects = render(bundle, "apexfabric")
         claims = {item["metadata"]["name"] for item in objects if item["kind"] == "PersistentVolumeClaim"}
         self.assertEqual(claims, set())
@@ -126,7 +126,7 @@ class NodeAgentTests(unittest.TestCase):
         self.assertIn("/dev/dri", mounts)
         self.assertIn("/dev/accel", mounts)
         volumes = {item["name"]: item for item in pod["volumes"]}
-        self.assertEqual(volumes["desired-state"]["configMap"]["name"], "traffic-edge-intel-285h-desired-state")
+        self.assertEqual(volumes["desired-state"]["configMap"]["name"], "tvt-mills-edge-intel-285h-desired-state")
         self.assertEqual(volumes["desired-state"]["configMap"]["defaultMode"], 0o444)
         self.assertEqual(volumes["external-cam4-source"]["secret"]["defaultMode"], 0o444)
         compiler = pod["initContainers"][0]
@@ -172,7 +172,7 @@ class NodeAgentTests(unittest.TestCase):
         self.assertEqual(annotations["prometheus.io/port"], "8080")
 
     def test_bundle_health_and_telemetry_contract_is_discoverable(self):
-        bundle = yaml.safe_load((ROOT / "solution-packs/traffic/traffic-edge-runtime-intel-285h.yaml").read_text())
+        bundle = yaml.safe_load((ROOT / "solution-packs/traffic/tvt-mills-pilot-intel-285h.yaml").read_text())
         deployment = next(item for item in render(bundle, "apexfabric") if item["kind"] == "Deployment")
         annotations = deployment["metadata"]["annotations"]
         self.assertEqual(annotations["apexfabric.com/health-path"], "/healthz")

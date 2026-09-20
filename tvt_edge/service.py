@@ -23,6 +23,7 @@ from apexfabric.solution_management.catalog import (
 )
 from tvt_edge.delivery_metadata import load_delivery_metadata
 from tvt_edge.bundles import (
+    PACK_NAME_TO_SOLUTION_PACK,
     BundleCamera,
     apply_registry,
     bundle_sha256,
@@ -44,6 +45,7 @@ from tvt_edge.db.models import (
     CameraStreamProfile,
     CredentialKeyVersion,
     DeploymentAssignmentSet,
+    EnrollmentWindow,
     DeploymentSyncState,
     DeploymentSyncAttempt,
     KubernetesResourceRef,
@@ -1028,6 +1030,10 @@ class ManagementService:
         catalog = self._solution_view(entry)
         if entry.status != "available" or entry.resolved_digest is None:
             raise ValueError("only an available catalog entry can be deployed")
+        solution_pack = PACK_NAME_TO_SOLUTION_PACK.get(
+            catalog.get("contract", {}).get("name"), catalog.get("contract", {}).get("name")
+        )
+        solution_id = f"{solution_pack}-edge"
         site = self.current_site(session)
         deployment_query = select(SolutionDeployment).where(
             SolutionDeployment.site_id == site.id,
@@ -1037,7 +1043,7 @@ class ManagementService:
         if lock_deployment:
             deployment_query = deployment_query.with_for_update()
         deployment = session.scalar(deployment_query)
-        if deployment is not None and deployment.solution_id != "traffic-edge":
+        if deployment is not None and deployment.solution_id != solution_id:
             raise ValueError("a deployment ID cannot be reused for another solution")
         desired_revision = deployment.next_desired_revision if deployment else 1
         resolved = []
@@ -1065,11 +1071,11 @@ class ManagementService:
             desired_camera = {
                 "camera_id": camera.camera_key,
                 "source": f"file:/run/secrets/apexfabric/{camera.camera_key}.rtsp",
-                "solution_pack": "traffic",
+                "solution_pack": solution_pack,
                 "fps": fps,
                 "apps": list(apps),
             }
-            if config:
+            if config or solution_pack == "tvt-mills-pilot":
                 desired_camera["config"] = config
             desired_cameras.append(desired_camera)
         desired_state = {
@@ -1084,7 +1090,7 @@ class ManagementService:
         if errors:
             error = errors[0]
             location = ".".join(str(value) for value in error.absolute_path) or "desired_state"
-            raise ValueError(f"invalid Traffic geometry at {location}: {error.message}")
+            raise ValueError(f"invalid {solution_pack} geometry at {location}: {error.message}")
         for camera in desired_cameras:
             config = camera.get("config", {})
             apps = set(camera["apps"])
@@ -1203,7 +1209,7 @@ class ManagementService:
                 deployment = SolutionDeployment(
                     site_id=site.id,
                     deployment_key=deployment_key,
-                    solution_id="traffic-edge",
+                    solution_id=bundle["solution"]["solution_id"],
                     namespace=namespace,
                     registry=entry.local_registry,
                 )
@@ -1256,6 +1262,213 @@ class ManagementService:
                 },
             )
             return assignment_set
+
+    @staticmethod
+    def _current_catalog_assignments(
+        session: Session, deployment: SolutionDeployment
+    ) -> tuple[str, list[dict[str, Any]], str, dict[str, str], str]:
+        """Reconstruct (catalog_id, assignments, inference_mode, resources,
+        state_size) from the latest committed assignment set, so enrollment
+        start/stop can replay it through preview_catalog_deployment/
+        commit_catalog_deployment with one camera's apps swapped -- the same
+        call shape a manual reconfigure through the UI uses."""
+        assignment_set = session.scalar(
+            select(DeploymentAssignmentSet)
+            .where(DeploymentAssignmentSet.deployment_id == deployment.id)
+            .order_by(DeploymentAssignmentSet.desired_revision.desc())
+            .limit(1)
+        )
+        if assignment_set is None:
+            raise ValueError("deployment has no committed assignments")
+        bundle_revision = session.get(SolutionBundleRevision, assignment_set.bundle_revision_id)
+        configuration = bundle_revision.canonical_bundle.get("configuration", {})
+        catalog_id = configuration.get("catalog_id")
+        if not catalog_id:
+            raise ValueError("enrollment requires a catalog-based deployment")
+        camera_assignments = session.scalars(
+            select(CameraDeploymentAssignment)
+            .where(CameraDeploymentAssignment.assignment_set_id == assignment_set.id)
+            .order_by(CameraDeploymentAssignment.ordinal)
+        ).all()
+        assignments: list[dict[str, Any]] = []
+        for camera_assignment in camera_assignments:
+            camera = session.get(Camera, camera_assignment.camera_id)
+            apps = session.scalars(
+                select(CameraApplicationAssignment).where(
+                    CameraApplicationAssignment.camera_assignment_id == camera_assignment.id
+                )
+            ).all()
+            assignments.append({
+                "camera_id": camera.camera_key,
+                "apps": [item.use_case_key for item in apps],
+                "fps": camera_assignment.requested_fps,
+                "config": copy.deepcopy(apps[0].configuration) if apps else {},
+            })
+        application = bundle_revision.canonical_bundle["applications"][0]
+        resources = {
+            "cpu_request": application["resources"]["cpu"]["request"],
+            "cpu_limit": application["resources"]["cpu"]["limit"],
+            "memory_request": application["resources"]["memory"]["request"],
+            "memory_limit": application["resources"]["memory"]["limit"],
+        }
+        state_size = next(
+            (item["size"] for item in application.get("persistent_volumes", []) if item["name"] == "state"),
+            "20Gi",
+        )
+        inference_mode = configuration.get("inference_mode", "cpu-compatible")
+        return catalog_id, assignments, inference_mode, resources, state_size
+
+    def start_enrollment(
+        self,
+        *,
+        deployment_key: str,
+        camera_id: str,
+        duration_seconds: int | None,
+        actor: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Temporarily switch a face_recognition camera to face_enrollment.
+
+        tvt-mills-pilot has no dedicated enrollment camera -- see
+        docs/contracts/tvt-mills-v1/README.md. Reverts explicitly via
+        stop_enrollment, or automatically once expires_at passes (see the
+        caller of EnrollmentWindow sweep in tvt_edge/cli.py's retention job).
+        """
+        with self.sessions.begin() as session:
+            deployment = self._deployment_for_update(session, deployment_key)
+            camera = self._camera(session, camera_id)
+            existing = session.scalar(
+                select(EnrollmentWindow).where(
+                    EnrollmentWindow.deployment_id == deployment.id,
+                    EnrollmentWindow.camera_id == camera.id,
+                    EnrollmentWindow.status == "active",
+                )
+            )
+            if existing is not None:
+                raise ValueError(f"camera {camera_id!r} already has an active enrollment window")
+            catalog_id, assignments, inference_mode, resources, state_size = self._current_catalog_assignments(
+                session, deployment
+            )
+            target = next((item for item in assignments if item["camera_id"] == camera_id), None)
+            if target is None:
+                raise ValueError(f"camera {camera_id!r} is not assigned to this deployment")
+            if target["apps"] == ["face_enrollment"]:
+                raise ValueError(f"camera {camera_id!r} is already in enrollment mode")
+            if "face_recognition" not in target["apps"]:
+                raise ValueError(f"camera {camera_id!r} does not run face_recognition")
+            started_at = utc_now()
+            expires_at = started_at + timedelta(seconds=duration_seconds) if duration_seconds else None
+            window = EnrollmentWindow(
+                deployment_id=deployment.id,
+                camera_id=camera.id,
+                prior_apps=target["apps"],
+                prior_config=target["config"],
+                prior_fps=target["fps"],
+                started_at=started_at,
+                expires_at=expires_at,
+                status="active",
+            )
+            session.add(window)
+            session.flush()
+            window_id = str(window.id)
+
+        new_assignments = [
+            {**item, "apps": ["face_enrollment"], "config": {}} if item["camera_id"] == camera_id else item
+            for item in assignments
+        ]
+        preview = self.preview_catalog_deployment(
+            catalog_id=catalog_id, deployment_key=deployment_key, assignments=new_assignments,
+            inference_mode=inference_mode, resources=resources, state_size=state_size, namespace="apexfabric",
+        )
+        self.commit_catalog_deployment(
+            catalog_id=catalog_id, deployment_key=deployment_key, assignments=new_assignments,
+            inference_mode=inference_mode, resources=resources, state_size=state_size, namespace="apexfabric",
+            preview_bundle_sha256=preview["bundle_sha256"],
+            idempotency_key=f"enrollment-start:{window_id}", actor=actor, request_id=request_id,
+        )
+        return {"window_id": window_id, "camera_id": camera_id, "expires_at": expires_at.isoformat() if expires_at else None}
+
+    def stop_enrollment(
+        self, *, deployment_key: str, window_id: str, actor: str, request_id: str
+    ) -> dict[str, Any]:
+        with self.sessions.begin() as session:
+            deployment = self._deployment_for_update(session, deployment_key)
+            window = session.get(EnrollmentWindow, uuid.UUID(window_id))
+            if window is None or window.deployment_id != deployment.id or window.status != "active":
+                raise ValueError(f"enrollment window {window_id!r} is not active")
+            camera = session.get(Camera, window.camera_id)
+            camera_key = camera.camera_key
+            catalog_id, assignments, inference_mode, resources, state_size = self._current_catalog_assignments(
+                session, deployment
+            )
+            window.status = "reverted"
+            window.ended_at = utc_now()
+
+        new_assignments = [
+            {**item, "apps": window.prior_apps, "config": window.prior_config, "fps": window.prior_fps}
+            if item["camera_id"] == camera_key else item
+            for item in assignments
+        ]
+        preview = self.preview_catalog_deployment(
+            catalog_id=catalog_id, deployment_key=deployment_key, assignments=new_assignments,
+            inference_mode=inference_mode, resources=resources, state_size=state_size, namespace="apexfabric",
+        )
+        self.commit_catalog_deployment(
+            catalog_id=catalog_id, deployment_key=deployment_key, assignments=new_assignments,
+            inference_mode=inference_mode, resources=resources, state_size=state_size, namespace="apexfabric",
+            preview_bundle_sha256=preview["bundle_sha256"],
+            idempotency_key=f"enrollment-stop:{window_id}", actor=actor, request_id=request_id,
+        )
+        return {"window_id": window_id, "camera_id": camera_key}
+
+    def list_enrollment_windows(self, deployment_key: str | None = None) -> list[dict[str, Any]]:
+        with self.sessions() as session:
+            query = select(EnrollmentWindow).order_by(EnrollmentWindow.started_at.desc())
+            if deployment_key:
+                deployment = session.scalar(
+                    select(SolutionDeployment).where(
+                        SolutionDeployment.deployment_key == deployment_key,
+                        SolutionDeployment.deleted_at.is_(None),
+                    )
+                )
+                if deployment is None:
+                    return []
+                query = query.where(EnrollmentWindow.deployment_id == deployment.id)
+            windows = session.scalars(query).all()
+            deployments = {item.id: item for item in {session.get(SolutionDeployment, w.deployment_id) for w in windows}}
+            cameras = {item.id: item for item in {session.get(Camera, w.camera_id) for w in windows}}
+            return [{
+                "window_id": str(window.id),
+                "deployment_key": deployments[window.deployment_id].deployment_key,
+                "camera_id": cameras[window.camera_id].camera_key,
+                "started_at": window.started_at.isoformat(),
+                "expires_at": window.expires_at.isoformat() if window.expires_at else None,
+                "ended_at": window.ended_at.isoformat() if window.ended_at else None,
+                "status": window.status,
+            } for window in windows]
+
+    def sweep_expired_enrollment_windows(self, actor: str = "scheduler", request_id: str = "enrollment:sweep") -> list[dict[str, Any]]:
+        with self.sessions() as session:
+            expired = session.scalars(
+                select(EnrollmentWindow).where(
+                    EnrollmentWindow.status == "active",
+                    EnrollmentWindow.expires_at.is_not(None),
+                    EnrollmentWindow.expires_at < utc_now(),
+                )
+            ).all()
+            reverts = [
+                (session.get(SolutionDeployment, window.deployment_id).deployment_key, str(window.id))
+                for window in expired
+            ]
+        results = []
+        for deployment_key, window_id in reverts:
+            try:
+                results.append(self.stop_enrollment(
+                    deployment_key=deployment_key, window_id=window_id, actor=actor, request_id=request_id,
+                ))
+            except Exception as error:
+                results.append({"window_id": window_id, "error": str(error)})
+        return results
 
     @staticmethod
     def _store_bundle_revision(

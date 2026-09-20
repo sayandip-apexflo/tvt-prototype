@@ -11,7 +11,7 @@ from typing import Any
 
 from apexfabric.solution_management.renderer import revision
 from apexfabric.solution_management.validation import validate_bundle
-from tvt_runtime.camera_secrets import TRAFFIC_APPS
+from tvt_runtime.camera_secrets import RUNTIME_CONTRACTS
 from tvt_runtime.state import ensure_bundle_has_no_inline_secrets
 from tvt_edge.paths import RESOURCE_ROOT
 
@@ -23,6 +23,17 @@ SCHEMA = json.loads(
     )
 )
 DNS_ID = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,61}[a-z0-9])?$")
+# Catalog image-contract `name` -> the solution_pack/secret_input_contract prefix
+# this bundle builder and tvt_runtime.camera_secrets.RUNTIME_CONTRACTS use.
+# tvt-mills-pilot (the single combined pack that replaced the old separate
+# surveillance/traffic packs, see docs/contracts/tvt-mills-v1/README.md) uses
+# the same string for its catalog name and its solution_pack value, so this is
+# an identity mapping today; kept as an explicit lookup (rather than using
+# contract["name"] directly) so a future pack can diverge the two again
+# without changing every call site.
+PACK_NAME_TO_SOLUTION_PACK = {
+    "tvt-mills-pilot": "tvt-mills-pilot",
+}
 
 
 @dataclass(frozen=True)
@@ -60,21 +71,22 @@ def catalog_traffic_bundle(
     if inference_mode not in {"cpu-compatible", "gpu-npu"}:
         raise ValueError("inference_mode must be cpu-compatible or gpu-npu")
     contract = catalog.get("contract", {})
+    solution_pack = PACK_NAME_TO_SOLUTION_PACK.get(contract.get("name"), contract.get("name"))
     if contract.get("models", {}).get("delivery") != "baked-in":
-        raise ValueError("Traffic catalog entry must deliver baked-in models")
+        raise ValueError("catalog entry must deliver baked-in models")
     if contract.get("hardwareProfile") != "intel-285h":
-        raise ValueError("Traffic catalog entry is not for intel-285h")
+        raise ValueError("catalog entry is not for intel-285h")
     repository = f"{image['registry'].rstrip('/')}/{image['repository']}"
     devices = (
         {"VEHICLE_DEVICE": "GPU", "PLATE_DEVICE": "NPU", "OCR_DEVICE": "MULTI:GPU,NPU"}
         if inference_mode == "gpu-npu"
         else {"VEHICLE_DEVICE": "CPU", "PLATE_DEVICE": "CPU", "OCR_DEVICE": "CPU"}
-    )
+    ) if solution_pack == "traffic" else {}
     template = {
         "api_version": "apexfabric.com/v1alpha1",
         "kind": "DeploymentBundle",
         "deployment_id": deployment_id,
-        "solution": {"solution_id": "traffic-edge", "version": catalog["version"]},
+        "solution": {"solution_id": f"{solution_pack}-edge", "version": catalog["version"]},
         "applications": [{
             "name": "runtime",
             "image": {
@@ -102,7 +114,7 @@ def catalog_traffic_bundle(
                 "desired_state_config_map": f"{deployment_id}-desired-state",
                 "desired_state_key": "desired_state.json",
                 "models_delivery": "baked-in",
-                "models_root": contract.get("models", {}).get("root", "/models/traffic/openvino"),
+                "models_root": contract.get("models", {}).get("root", f"/models/{solution_pack}"),
                 "inference_mode": inference_mode,
             },
             "placement": {
@@ -130,14 +142,14 @@ def catalog_traffic_bundle(
                 "metrics": {"path": "/metrics", "port": "management", "format": "json"},
                 "events": {"path": "/events", "port": "management", "protocol": "sse"},
             },
-            "environment": {"SOLUTION_PACK": "traffic", **devices},
+            "environment": {"SOLUTION_PACK": solution_pack, **devices},
         }],
         "configuration": {
             "edge_id": edge_id,
             "catalog_id": catalog["catalog_id"],
             "runtime_plan_is_compiled_by_init_container": True,
             "image_contract": "apexfabric-v1",
-            "secret_input_contract": "traffic-runtime-v1",
+            "secret_input_contract": f"{solution_pack}-runtime-v1",
             "models_delivery": "baked-in",
             "inference_mode": inference_mode,
         },
@@ -171,12 +183,14 @@ def instantiate_traffic_bundle(
 
     result = copy.deepcopy(template)
     validate_tvt_bundle(result)
-    if result.get("configuration", {}).get("secret_input_contract") != "traffic-runtime-v1":
+    input_contract = result.get("configuration", {}).get("secret_input_contract")
+    if input_contract not in RUNTIME_CONTRACTS:
         if cameras:
-            raise ValueError("camera assignments require traffic-runtime-v1")
+            raise ValueError(f"camera assignments require a known secret_input_contract, got {input_contract!r}")
         return result
+    _, allowed_apps = RUNTIME_CONTRACTS[input_contract]
     if len(result["applications"]) != 1 or result["applications"][0]["name"] != "runtime":
-        raise ValueError("traffic-runtime-v1 requires one runtime application")
+        raise ValueError(f"{input_contract} requires one runtime application")
     if not cameras:
         raise ValueError("at least one camera assignment is required")
     if len({item.camera_key for item in cameras}) != len(cameras):
@@ -192,9 +206,9 @@ def instantiate_traffic_bundle(
             raise ValueError(f"invalid camera key {camera.camera_key!r}")
         if not 1 <= camera.requested_fps <= 120:
             raise ValueError("requested FPS must be between 1 and 120")
-        invalid_apps = sorted(set(camera.apps) - TRAFFIC_APPS)
+        invalid_apps = sorted(set(camera.apps) - allowed_apps)
         if not camera.apps or invalid_apps:
-            raise ValueError(f"unsupported Traffic apps: {invalid_apps}")
+            raise ValueError(f"unsupported apps for {input_contract}: {invalid_apps}")
         camera_keys.append(camera.camera_key)
         mounts.append(
             {

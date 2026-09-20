@@ -419,6 +419,35 @@ class DeploymentSyncState(Base):
     )
 
 
+class EnrollmentWindow(Base, IdMixin):
+    """Temporary face-enrollment camera reassignment (tvt-mills-pilot has no
+    dedicated enrollment camera -- see docs/contracts/tvt-mills-v1/README.md).
+    Bookkeeping only: the actual apps/config change is replayed through
+    preview_catalog_deployment/commit_catalog_deployment, the same call shape
+    a manual reconfigure uses, so it goes through the normal
+    DeploymentAssignmentSet/audit trail rather than a side channel."""
+
+    __tablename__ = "enrollment_windows"
+    __table_args__ = (
+        CheckConstraint("status IN ('active','reverted')", name="enrollment_window_status"),
+    )
+    deployment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("solution_deployments.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    camera_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("cameras.id", ondelete="RESTRICT"), nullable=False
+    )
+    prior_apps: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    prior_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    prior_fps: Mapped[int] = mapped_column(Integer, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(16), default="active", nullable=False, index=True)
+
+
 class ManagementOperation(Base, IdMixin):
     __tablename__ = "management_operations"
     __table_args__ = (UniqueConstraint("idempotency_key"),)

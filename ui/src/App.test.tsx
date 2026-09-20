@@ -156,4 +156,30 @@ describe("edge management UI", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Live" }));
     await waitFor(() => expect(screen.getByText("Live feed unavailable")).toBeInTheDocument());
   });
+
+  it("offers to start enrollment for a face_recognition camera and reflects an active window", async () => {
+    const camera = {
+      camera_id: "camera-01", friendly_name: "Main entrance", configured: true, enabled: true,
+      credentials_configured: true, identifiers: [],
+      assignments: [{ deployment_id: "tvt-mills-edge-intel-285h", apps: ["face_recognition", "anpr"], fps: 8 }],
+      created_at: "2026-09-03T00:00:00Z", updated_at: "2026-09-03T00:00:00Z",
+    };
+    responses["/api/v1/cameras"] = [camera];
+    responses["/api/v1/cameras/camera-01"] = camera;
+    responses["/api/v1/deployments/tvt-mills-edge-intel-285h/enrollment-windows"] = [];
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Plant 01 · edge-01")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Cameras/i }));
+    fireEvent.click(screen.getByText("Main entrance"));
+    const startButton = await screen.findByRole("button", { name: "Use as enrollment camera" });
+    fireEvent.click(startButton);
+    expect(screen.getByRole("heading", { name: "Use as enrollment camera" })).toBeInTheDocument();
+
+    responses["/api/v1/deployments/tvt-mills-edge-intel-285h/enrollment-windows"] = [{
+      window_id: "w1", deployment_key: "tvt-mills-edge-intel-285h", camera_id: "camera-01",
+      started_at: "2026-09-03T00:00:00Z", expires_at: null, ended_at: null, status: "active",
+    }];
+    fireEvent.click(screen.getByRole("button", { name: "Start enrollment" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Revert now" })).toBeInTheDocument());
+  });
 });

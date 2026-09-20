@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apexfabric.local/schemas/v1/tvt-mills-pilot-metrics.json",
+  "title": "TVT Mills pilot runtime metrics",
+  "description": "The vendor delivery (see provenance.json) does not publish a metrics JSON schema -- management-api.openapi.yaml describes /metrics only as 'Runtime counters' with no shape. This is deliberately permissive rather than reverse-engineered from one observed payload; tighten it once a live deployment's actual /metrics output is captured, the same way the legacy traffic pack's metrics.schema.json was derived from its vendor.",
+  "type": "object"
+}

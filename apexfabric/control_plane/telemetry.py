@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from .alerts import SCHEMA as ALERT_SCHEMA, evaluate as evaluate_alerts
+from .enrollment_windows import SCHEMA as ENROLLMENT_WINDOWS_SCHEMA
 from .identity import (
     SCHEMA as IDENTITY_SCHEMA,
     IdentityPolicy,
@@ -134,6 +135,7 @@ class TelemetryStore:
             connection.executescript(ALERT_SCHEMA)
             connection.executescript(IDENTITY_SCHEMA)
             connection.executescript(REPORTING_SCHEMA)
+            connection.executescript(ENROLLMENT_WINDOWS_SCHEMA)
             if self.identity_policy is not None:
                 load_identity_extension(connection)
                 ensure_vector_tables(connection, self.identity_policy)
