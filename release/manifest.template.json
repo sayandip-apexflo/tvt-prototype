@@ -21,7 +21,7 @@
     "registry_image": "images/registry.tar",
     "node_reporter_image": "images/node-reporter.tar",
     "node_status_controller_image": "images/node-status-controller.tar",
-    "traffic_image": "images/traffic-edge-runtime-v4.tar",
+    "traffic_image": "images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar",
     "ui_image": "images/ui.tar",
     "k3s_installer": "k3s/install.sh",
     "k3s_binary": "k3s/k3s"

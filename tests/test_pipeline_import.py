@@ -84,7 +84,7 @@ class PipelineImportTests(unittest.TestCase):
                 "sha256": values["PIPELINE_TRAFFIC_ARCHIVE_SHA256"],
                 "size": int(values["PIPELINE_TRAFFIC_ARCHIVE_SIZE"]),
             },
-            "source": {"mode": "archive"},
+            "source": {"mode": "bundled"},
             "image": {
                 "registry": "127.0.0.1:5000",
                 "repository": values["PIPELINE_TRAFFIC_LOCAL_REPOSITORY"],
@@ -116,36 +116,42 @@ class PipelineImportTests(unittest.TestCase):
             "verification_timestamp": "2026-09-03T00:00:00+00:00",
         }
 
-    def test_exact_v4_delivery_pins(self):
+    def test_exact_tvt_mills_delivery_pins(self):
         values = self.pipeline_values()
         self.assertEqual(
             values["PIPELINE_REVISION"],
-            "6513562c9d27eba511322280e19e054c3948ae4d",
+            "ab85058ab961bb7aeb4ed9c96f1a35ec5c37f934",
+        )
+        self.assertEqual(values["PIPELINE_TRAFFIC_DELIVERY_DIR"], ".")
+        self.assertEqual(
+            values["PIPELINE_TRAFFIC_CATALOG_ID"],
+            "tvt-mills-pilot:2026.09.18-v1",
         )
         self.assertEqual(
-            values["PIPELINE_TRAFFIC_DELIVERY_DIR"],
-            "delivery/apexfabric-v1/intel-285h/traffic",
+            values["PIPELINE_TRAFFIC_ARCHIVE"],
+            "tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar",
         )
-        self.assertEqual(values["PIPELINE_TRAFFIC_ARCHIVE"], "image-2026.08.21-v4.tar")
         self.assertEqual(
             values["PIPELINE_TRAFFIC_ARCHIVE_SHA256"],
-            "a6787bba6a27bc486f90b4c4dd41681d051c7c834568d99bc4a884d177d10e0f",
+            "a236a4c1c3053e6a78270d98426b72c5fcbe681273b6f5f35d5631d25a88f4a8",
         )
-        self.assertEqual(values["PIPELINE_TRAFFIC_ARCHIVE_SIZE"], "1930041856")
+        self.assertEqual(values["PIPELINE_TRAFFIC_ARCHIVE_SIZE"], "967496192")
         self.assertEqual(
             values["PIPELINE_TRAFFIC_ARCHIVE_IMAGE"],
-            "localhost/traffic-edge-runtime:intel-285h-2026.08.21-v4",
+            "localhost/tvt-edge-runtime:intel-285h-2026.09.18-v1",
         )
-        self.assertEqual(values["PIPELINE_TRAFFIC_LOCAL_TAG"], "intel-285h-2026.08.21-v4")
+        self.assertEqual(
+            values["PIPELINE_TRAFFIC_LOCAL_TAG"],
+            "intel-285h-2026.09.18-v1",
+        )
         self.assertNotIn("latest", self.text("config/pipeline.env").lower())
 
-    def test_import_fetches_commit_and_archive_without_tracking_branch_head(self):
+    def test_import_requires_the_bundled_archive_and_metadata(self):
         script = self.operation("import-pipeline-traffic-image.sh")
-        self.assertIn('fetch --no-tags origin "${PIPELINE_REVISION}"', script)
-        self.assertIn('lfs pull --include="${archive_relative}"', script)
-        self.assertIn('origin "${PIPELINE_REVISION}"', script)
+        self.assertIn("--archive-file and --metadata-directory are required", script)
+        self.assertIn("source-build mode is not supported", script)
+        self.assertIn('SOURCE_MODE=bundled', script)
         self.assertNotIn("PIPELINE_DELIVERY_BRANCH", script)
-        self.assertNotIn("release-tag fetch", script)
 
     def test_import_rejects_invalid_archive_and_image_contract(self):
         script = self.operation("import-pipeline-traffic-image.sh")
@@ -160,22 +166,21 @@ class PipelineImportTests(unittest.TestCase):
             "io.apexfabric.models.delivery",
             'config.get("User")',
             'config.get("ExposedPorts")',
-            "solution_image_entrypoint.py",
-            "edge_agent.py",
+            "edge-main.py",
             "vehicle.xml",
             "license_plate.bin",
             "ocr.xml",
+            "adaface_ir101_int8.xml",
+            "det_500m.onnx",
         ):
             self.assertIn(required, combined)
         self.assertNotIn("docker run", script)
         self.assertIn('docker create "${source_image}"', script)
 
-    def test_source_build_is_distinct_qualification_mode(self):
+    def test_source_build_is_rejected_for_the_vendor_release(self):
         script = self.operation("import-pipeline-traffic-image.sh")
-        self.assertIn("qualification mode", script)
-        self.assertIn("PIPELINE_UBUNTU_BASE_IMAGE", script)
-        self.assertIn("docker build", script)
-        self.assertIn('selected_local_tag="${PIPELINE_TRAFFIC_LOCAL_TAG}-source-build"', script)
+        self.assertIn('[[ "${MODE}" == archive ]]', script)
+        self.assertIn("source-build mode is not supported", script)
         service = self.text("deploy/systemd/tvt-pipeline-image-sync.service")
         self.assertIn("--mode archive", service)
         self.assertNotIn("--mode build", service)
@@ -188,6 +193,10 @@ class PipelineImportTests(unittest.TestCase):
             lock_path.write_text(json.dumps(self.matching_lock(values)), encoding="utf-8")
             lock_path.chmod(0o600)
             work_dir = temporary_path / "work"
+            archive_path = temporary_path / "image.oci.tar"
+            archive_path.write_bytes(b"not-read-on-idempotent-path")
+            metadata_path = temporary_path / "metadata"
+            metadata_path.mkdir()
             result = subprocess.run(
                 [
                     "bash",
@@ -197,6 +206,10 @@ class PipelineImportTests(unittest.TestCase):
                     str(work_dir),
                     "--lock-output",
                     str(lock_path),
+                    "--archive-file",
+                    str(archive_path),
+                    "--metadata-directory",
+                    str(metadata_path),
                 ],
                 env=self.fake_environment(temporary_path),
                 check=False,
@@ -213,6 +226,10 @@ class PipelineImportTests(unittest.TestCase):
             lock_path = temporary_path / "traffic-image.lock.json"
             original = b'{"last_known_good": true}\n'
             lock_path.write_bytes(original)
+            archive_path = temporary_path / "image.oci.tar"
+            archive_path.write_bytes(b"invalid")
+            metadata_path = temporary_path / "metadata"
+            metadata_path.mkdir()
             result = subprocess.run(
                 [
                     "bash",
@@ -222,6 +239,10 @@ class PipelineImportTests(unittest.TestCase):
                     str(temporary_path / "work"),
                     "--lock-output",
                     str(lock_path),
+                    "--archive-file",
+                    str(archive_path),
+                    "--metadata-directory",
+                    str(metadata_path),
                 ],
                 env=self.fake_environment(temporary_path, docker_succeeds=False),
                 check=False,

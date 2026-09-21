@@ -23,7 +23,7 @@ REQUIRED_FILES = {
     "images/registry.tar",
     "images/node-reporter.tar",
     "images/node-status-controller.tar",
-    "images/traffic-edge-runtime-v4.tar",
+    "images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar",
     "images/ui.tar",
     "k3s/install.sh",
     "k3s/k3s",
@@ -38,6 +38,8 @@ PIN_KEYS = (
     "LOCAL_REGISTRY_IMAGE",
     "PIPELINE_REVISION",
     "PIPELINE_TRAFFIC_VERSION",
+    "PIPELINE_TRAFFIC_CATALOG_ID",
+    "PIPELINE_TRAFFIC_ARCHIVE_URL",
     "PIPELINE_TRAFFIC_ARCHIVE_SHA256",
     "PIPELINE_TRAFFIC_ARCHIVE_SIZE",
     "PIPELINE_TRAFFIC_ARCHIVE_IMAGE",
@@ -257,7 +259,7 @@ def create_lock(args: argparse.Namespace) -> dict[str, Any]:
     missing_pins = [key for key, value in pins.items() if not value]
     if missing_pins:
         raise InputError("release configuration pins are missing: " + ", ".join(missing_pins))
-    traffic = root / "images/traffic-edge-runtime-v4.tar"
+    traffic = root / "images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar"
     if sha256(traffic) != pins["PIPELINE_TRAFFIC_ARCHIVE_SHA256"]:
         raise InputError("Traffic archive checksum does not match config/pipeline.env")
     if traffic.stat().st_size != int(pins["PIPELINE_TRAFFIC_ARCHIVE_SIZE"]):

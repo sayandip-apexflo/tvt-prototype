@@ -10,8 +10,8 @@ tvt_op_bootstrap_postgresql() (
 set -Eeuo pipefail
 
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly SOURCE_CATALOG="${REPO_ROOT}/solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
-readonly TARGET_CATALOG="/opt/tvt/solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
+readonly SOURCE_CATALOG="${REPO_ROOT}/solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
+readonly TARGET_CATALOG="/opt/tvt/solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
 VENV=/opt/tvt/venv
 
 usage() {
@@ -473,7 +473,7 @@ cp -a "${INPUT_LOCK}" "${OUTPUT}/release-inputs.lock.json"
 cp -a "${REGISTRY_IMAGE}" "${OUTPUT}/images/registry.tar"
 cp -a "${NODE_REPORTER_IMAGE}" "${OUTPUT}/images/node-reporter.tar"
 cp -a "${NODE_STATUS_CONTROLLER_IMAGE}" "${OUTPUT}/images/node-status-controller.tar"
-cp -a "${TRAFFIC_IMAGE}" "${OUTPUT}/images/traffic-edge-runtime-v4.tar"
+cp -a "${TRAFFIC_IMAGE}" "${OUTPUT}/images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar"
 cp -a "${UI_IMAGE}" "${OUTPUT}/images/ui.tar"
 cp -a "${K3S_INSTALLER}" "${OUTPUT}/k3s/install.sh"
 cp -a "${K3S_BINARY}" "${OUTPUT}/k3s/k3s"
@@ -562,7 +562,6 @@ done
 for command_name in awk curl df docker dpkg flock git grep npm python3 sed sha256sum stat; do
   command -v "${command_name}" >/dev/null 2>&1 || fail "required command is missing: ${command_name}"
 done
-git lfs version >/dev/null 2>&1 || fail "Git LFS is required"
 [[ $(dpkg --print-architecture) == amd64 ]] || fail "release inputs must be built on amd64"
 [[ -r /etc/os-release ]] || fail "/etc/os-release is missing"
 # shellcheck disable=SC1091
@@ -774,33 +773,24 @@ acquire_k3s() {
 }
 
 acquire_traffic() {
-  local checkout source_archive actual_size actual_digest
-  checkout="${CACHE_DIRECTORY}/pipeline"
-  if [[ ! -d ${checkout}/.git ]]; then
-    [[ ! -e ${checkout} ]] || fail "PIPELINE cache exists but is not a Git checkout: ${checkout}"
-    log "cloning PIPELINE without LFS payloads"
-    GIT_LFS_SKIP_SMUDGE=1 git clone --no-checkout "${PIPELINE_REPOSITORY}" "${checkout}"
-  fi
-  git -C "${checkout}" remote set-url origin "${PIPELINE_REPOSITORY}"
-  log "fetching exact PIPELINE commit ${PIPELINE_REVISION}"
-  GIT_LFS_SKIP_SMUDGE=1 git -C "${checkout}" fetch --no-tags origin "${PIPELINE_REVISION}"
-  GIT_LFS_SKIP_SMUDGE=1 git -C "${checkout}" checkout --detach --force "${PIPELINE_REVISION}"
-  git -C "${checkout}" lfs install --local >/dev/null
-  git -C "${checkout}" lfs pull origin \
-    --include="${PIPELINE_TRAFFIC_DELIVERY_DIR}/${PIPELINE_TRAFFIC_ARCHIVE}" --exclude=""
-  source_archive="${checkout}/${PIPELINE_TRAFFIC_DELIVERY_DIR}/${PIPELINE_TRAFFIC_ARCHIVE}"
+  local cache_directory source_archive actual_size actual_digest
+  cache_directory="${CACHE_DIRECTORY}/tvt-mills/${PIPELINE_TRAFFIC_VERSION}"
+  source_archive="${cache_directory}/${PIPELINE_TRAFFIC_ARCHIVE}"
+  mkdir -p "${cache_directory}"
+  log "acquiring pinned TVT Mills OCI archive ${PIPELINE_TRAFFIC_VERSION}"
+  download_atomic "${PIPELINE_TRAFFIC_ARCHIVE_URL}" "${source_archive}"
   [[ -f ${source_archive} && ! -L ${source_archive} ]] || \
-    fail "Traffic archive was not materialized by Git LFS"
+    fail "TVT Mills OCI archive was not downloaded"
   actual_size="$(stat -c '%s' "${source_archive}")"
   [[ ${actual_size} == "${PIPELINE_TRAFFIC_ARCHIVE_SIZE}" ]] || \
-    fail "Traffic archive size is ${actual_size}, expected ${PIPELINE_TRAFFIC_ARCHIVE_SIZE}"
+    fail "TVT Mills archive size is ${actual_size}, expected ${PIPELINE_TRAFFIC_ARCHIVE_SIZE}"
   actual_digest="$(sha256sum "${source_archive}" | awk '{print $1}')"
   [[ ${actual_digest} == "${PIPELINE_TRAFFIC_ARCHIVE_SHA256}" ]] || \
-    fail "Traffic archive checksum mismatch"
+    fail "TVT Mills archive checksum mismatch"
   "${REPO_ROOT}/scripts/tvt-edge-operations.sh" verify-docker-archive-tag \
     --archive "${source_archive}" --expected "${PIPELINE_TRAFFIC_ARCHIVE_IMAGE}"
   cp --reflink=auto --sparse=always "${source_archive}" \
-    "${staging}/images/traffic-edge-runtime-v4.tar"
+    "${staging}/images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar"
 }
 
 log_edge_profile() {
@@ -1138,7 +1128,7 @@ ARCHIVE_FILE="${TVT_PIPELINE_ARCHIVE_FILE:-}"
 METADATA_DIRECTORY="${TVT_PIPELINE_METADATA_DIRECTORY:-}"
 
 usage() {
-  echo "usage: scripts/tvt-edge-operations.sh import-pipeline-traffic-image [--mode archive|build] [--archive-file FILE --metadata-directory DIR] [--work-dir PATH] [--lock-output FILE] [--concurrency-lock FILE]" >&2
+  echo "usage: scripts/tvt-edge-operations.sh import-pipeline-traffic-image --mode archive --archive-file FILE --metadata-directory DIR [--work-dir PATH] [--lock-output FILE] [--concurrency-lock FILE]" >&2
 }
 
 while (($#)); do
@@ -1152,18 +1142,20 @@ while (($#)); do
     *) usage; exit 2 ;;
   esac
 done
-[[ "${MODE}" == archive || "${MODE}" == build ]] || { usage; exit 2; }
-if [[ -n ${ARCHIVE_FILE} || -n ${METADATA_DIRECTORY} ]]; then
-  [[ ${MODE} == archive && -f ${ARCHIVE_FILE} && ! -L ${ARCHIVE_FILE} && -d ${METADATA_DIRECTORY} && ! -L ${METADATA_DIRECTORY} ]] || {
-    echo "--archive-file and --metadata-directory must be supplied together in archive mode" >&2
-    exit 2
-  }
-  ARCHIVE_FILE="$(cd "$(dirname "${ARCHIVE_FILE}")" && pwd -P)/$(basename "${ARCHIVE_FILE}")"
-  METADATA_DIRECTORY="$(cd "${METADATA_DIRECTORY}" && pwd -P)"
-fi
+[[ "${MODE}" == archive ]] || {
+  echo "source-build mode is not supported for the vendor release; use the checksum-pinned OCI archive" >&2
+  exit 2
+}
+[[ -n ${ARCHIVE_FILE} && -n ${METADATA_DIRECTORY} \
+  && -f ${ARCHIVE_FILE} && ! -L ${ARCHIVE_FILE} \
+  && -d ${METADATA_DIRECTORY} && ! -L ${METADATA_DIRECTORY} ]] || {
+  echo "--archive-file and --metadata-directory are required together in archive mode" >&2
+  exit 2
+}
+ARCHIVE_FILE="$(cd "$(dirname "${ARCHIVE_FILE}")" && pwd -P)/$(basename "${ARCHIVE_FILE}")"
+METADATA_DIRECTORY="$(cd "${METADATA_DIRECTORY}" && pwd -P)"
 [[ -n "${CONCURRENCY_LOCK}" ]] || CONCURRENCY_LOCK="${LOCK_OUTPUT}.flock"
-SOURCE_MODE="${MODE}"
-if [[ -n ${ARCHIVE_FILE} ]]; then SOURCE_MODE=bundled; fi
+SOURCE_MODE=bundled
 
 [[ "${PIPELINE_REVISION}" =~ ^[0-9a-f]{40}$ ]] || {
   echo "PIPELINE_REVISION must be a full 40-character commit" >&2
@@ -1175,7 +1167,11 @@ for digest_variable in \
   PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256 \
   PIPELINE_TRAFFIC_METRICS_SCHEMA_SHA256 \
   PIPELINE_TRAFFIC_ANALYTICS_EVENT_SCHEMA_SHA256 \
-  PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256; do
+  PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256 \
+  PIPELINE_FACE_MODEL_ADAFACE_XML_SHA256 \
+  PIPELINE_FACE_MODEL_ADAFACE_BIN_SHA256 \
+  PIPELINE_FACE_MODEL_DETECTOR_SHA256 \
+  PIPELINE_FACE_MODEL_RECOGNIZER_SHA256; do
   [[ "${!digest_variable}" =~ ^[0-9a-f]{64}$ ]] || {
     echo "${digest_variable} must be a sha256 digest" >&2
     exit 1
@@ -1194,17 +1190,12 @@ done
   exit 1
 }
 required_commands=(curl docker flock python3 sha256sum tar timeout)
-if [[ -z ${ARCHIVE_FILE} ]]; then required_commands+=(git); fi
 for command_name in "${required_commands[@]}"; do
   command -v "${command_name}" >/dev/null 2>&1 || {
     echo "required command not found: ${command_name}" >&2
     exit 1
   }
 done
-if [[ "${MODE}" == archive && -z ${ARCHIVE_FILE} ]] && ! timeout 10s git lfs version >/dev/null 2>&1; then
-  echo "archive mode requires Git LFS; install the git-lfs package" >&2
-  exit 1
-fi
 
 mkdir -p "$(dirname "${LOCK_OUTPUT}")" "$(dirname "${CONCURRENCY_LOCK}")"
 exec 9>"${CONCURRENCY_LOCK}"
@@ -1229,6 +1220,64 @@ retry_with_timeout() {
   done
   echo "${description} failed after 3 attempts" >&2
   return 1
+}
+
+oci_load_directory=""
+docker_load_container_archive() {
+  local archive="$1" load_archive="${archive}"
+  if tar -tf "${archive}" | grep -qx 'index.json'; then
+    oci_load_directory="$(mktemp -d "${WORK_DIR}/oci-docker-load.XXXXXX")"
+    load_archive="${oci_load_directory}/image.tar"
+    cp --reflink=auto --sparse=always "${archive}" "${load_archive}"
+    python3 - "${archive}" "${oci_load_directory}/manifest.json" <<'PY'
+import json
+import pathlib
+import re
+import sys
+import tarfile
+
+source = pathlib.Path(sys.argv[1])
+output = pathlib.Path(sys.argv[2])
+digest_pattern = re.compile(r"sha256:([0-9a-f]{64})")
+with tarfile.open(source, mode="r:") as archive:
+    index_stream = archive.extractfile("index.json")
+    if index_stream is None:
+        raise SystemExit("OCI archive index.json cannot be read")
+    index = json.load(index_stream)
+    manifests = index.get("manifests") if isinstance(index, dict) else None
+    if not isinstance(manifests, list) or len(manifests) != 1:
+        raise SystemExit("OCI archive must contain exactly one image manifest")
+    descriptor = manifests[0]
+    match = digest_pattern.fullmatch(str(descriptor.get("digest", "")))
+    annotations = descriptor.get("annotations") if isinstance(descriptor, dict) else None
+    tag = annotations.get("org.opencontainers.image.ref.name") if isinstance(annotations, dict) else None
+    if match is None or not isinstance(tag, str) or not tag:
+        raise SystemExit("OCI archive manifest descriptor is invalid")
+    manifest_name = f"blobs/sha256/{match.group(1)}"
+    manifest_stream = archive.extractfile(manifest_name)
+    if manifest_stream is None:
+        raise SystemExit("OCI image manifest blob cannot be read")
+    manifest = json.load(manifest_stream)
+    config_match = digest_pattern.fullmatch(str((manifest.get("config") or {}).get("digest", "")))
+    layers = manifest.get("layers")
+    if config_match is None or not isinstance(layers, list) or not layers:
+        raise SystemExit("OCI image manifest config or layers are invalid")
+    layer_names = []
+    for layer in layers:
+        layer_match = digest_pattern.fullmatch(str((layer or {}).get("digest", "")))
+        if layer_match is None:
+            raise SystemExit("OCI image manifest contains an invalid layer digest")
+        layer_names.append(f"blobs/sha256/{layer_match.group(1)}")
+document = [{
+    "Config": f"blobs/sha256/{config_match.group(1)}",
+    "RepoTags": [tag],
+    "Layers": layer_names,
+}]
+output.write_text(json.dumps(document, separators=(",", ":")) + "\n", encoding="utf-8")
+PY
+    tar --append --file "${load_archive}" -C "${oci_load_directory}" manifest.json
+  fi
+  timeout --signal=TERM 20m docker load --input "${load_archive}"
 }
 
 registry_manifest_digest() {
@@ -1351,7 +1400,8 @@ cleanup() {
   if [[ -n "${verification_container}" ]]; then
     timeout 30s docker rm --force "${verification_container}" >/dev/null 2>&1 || true
   fi
-  for temporary_path in "${credential_helper}" "${verification_dir}" "${temporary_context}"; do
+  for temporary_path in "${credential_helper}" "${verification_dir}" "${temporary_context}" \
+    "${oci_load_directory}"; do
     if [[ -n "${temporary_path}" && "${temporary_path}" == "${WORK_DIR}"/* ]]; then
       rm -rf -- "${temporary_path}"
     fi
@@ -1388,7 +1438,7 @@ if [[ -n ${ARCHIVE_FILE} ]]; then
   }
   "${REPO_ROOT}/scripts/tvt-edge-operations.sh" verify-docker-archive-tag \
     --archive "${ARCHIVE_FILE}" --expected "${PIPELINE_TRAFFIC_ARCHIVE_IMAGE}"
-  timeout --signal=TERM 20m docker load --input "${ARCHIVE_FILE}"
+  docker_load_container_archive "${ARCHIVE_FILE}"
   source_image="${PIPELINE_TRAFFIC_ARCHIVE_IMAGE}"
 else
 git_environment=(env GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0)
@@ -1471,7 +1521,7 @@ if [[ "${MODE}" == archive ]]; then
   }
   "${REPO_ROOT}/scripts/tvt-edge-operations.sh" verify-docker-archive-tag \
     --archive "${archive_path}" --expected "${PIPELINE_TRAFFIC_ARCHIVE_IMAGE}"
-  timeout --signal=TERM 20m docker load --input "${archive_path}"
+  docker_load_container_archive "${archive_path}"
   source_image="${PIPELINE_TRAFFIC_ARCHIVE_IMAGE}"
 else
   echo "qualification mode: building from pinned source; this is not the production synchronization path" >&2
@@ -1516,20 +1566,21 @@ timeout 1m docker image inspect "${source_image}" \
   --port "${PIPELINE_TRAFFIC_CONTAINER_PORT}" \
   --command "${PIPELINE_TRAFFIC_CONTAINER_COMMAND}"
 
-mkdir -p "${verification_dir}/models" "${verification_dir}/modules"
+mkdir -p "${verification_dir}/models/traffic" "${verification_dir}/models/face" \
+  "${verification_dir}/modules"
 verification_container="$(timeout 1m docker create "${source_image}")"
 timeout 10m docker cp "${verification_container}:/models/traffic/openvino/." \
-  "${verification_dir}/models"
-timeout 1m docker cp "${verification_container}:/opt/pipeline/edge_runtime/agent/edge_agent.py" \
-  "${verification_dir}/modules/edge_agent.py"
-timeout 1m docker cp "${verification_container}:/opt/pipeline/edge_runtime/runtime/solution_image_entrypoint.py" \
-  "${verification_dir}/modules/solution_image_entrypoint.py"
+  "${verification_dir}/models/traffic"
+timeout 10m docker cp "${verification_container}:/models/face/." \
+  "${verification_dir}/models/face"
+timeout 1m docker cp "${verification_container}:/opt/tvt/edge/__main__.py" \
+  "${verification_dir}/modules/edge-main.py"
 while read -r model_file model_sha256; do
-  [[ -s "${verification_dir}/models/${model_file}" ]] || {
+  [[ -s "${verification_dir}/models/traffic/${model_file}" ]] || {
     echo "Traffic image is missing baked model ${model_file}" >&2
     exit 1
   }
-  echo "${model_sha256}  ${verification_dir}/models/${model_file}" \
+  echo "${model_sha256}  ${verification_dir}/models/traffic/${model_file}" \
     | sha256sum --check --status || {
     echo "baked model checksum verification failed for ${model_file}" >&2
     exit 1
@@ -1542,12 +1593,24 @@ license_plate.bin ${PIPELINE_TRAFFIC_MODEL_LICENSE_PLATE_BIN_SHA256}
 ocr.xml ${PIPELINE_TRAFFIC_MODEL_OCR_XML_SHA256}
 ocr.bin ${PIPELINE_TRAFFIC_MODEL_OCR_BIN_SHA256}
 EOF
-[[ -s "${verification_dir}/modules/edge_agent.py" ]] || {
-  echo "Traffic image is missing the edge-agent compiler module" >&2
-  exit 1
-}
-[[ -s "${verification_dir}/modules/solution_image_entrypoint.py" ]] || {
-  echo "Traffic image is missing the solution image entrypoint" >&2
+while read -r model_file model_sha256; do
+  [[ -s "${verification_dir}/models/face/${model_file}" ]] || {
+    echo "TVT Mills image is missing baked face model ${model_file}" >&2
+    exit 1
+  }
+  echo "${model_sha256}  ${verification_dir}/models/face/${model_file}" \
+    | sha256sum --check --status || {
+    echo "baked face model checksum verification failed for ${model_file}" >&2
+    exit 1
+  }
+done <<EOF
+adaface_ir101_int8.xml ${PIPELINE_FACE_MODEL_ADAFACE_XML_SHA256}
+adaface_ir101_int8.bin ${PIPELINE_FACE_MODEL_ADAFACE_BIN_SHA256}
+face_reid/models/buffalo_s/det_500m.onnx ${PIPELINE_FACE_MODEL_DETECTOR_SHA256}
+face_reid/models/buffalo_s/1k3d68.onnx ${PIPELINE_FACE_MODEL_RECOGNIZER_SHA256}
+EOF
+[[ -s "${verification_dir}/modules/edge-main.py" ]] || {
+  echo "TVT Mills image is missing its Python runtime entrypoint" >&2
   exit 1
 }
 timeout 30s docker rm "${verification_container}" >/dev/null
@@ -2163,8 +2226,8 @@ set -Eeuo pipefail
 umask 077
 
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly SOURCE_CONTRACTS="${REPO_ROOT}/solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
-readonly TARGET_CONTRACTS="/opt/tvt/solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
+readonly SOURCE_CONTRACTS="${REPO_ROOT}/solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
+readonly TARGET_CONTRACTS="/opt/tvt/solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
 
 [[ ${EUID} -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 [[ -x /opt/tvt/venv/bin/tvt-traffic-qualify ]] || {
@@ -3048,12 +3111,12 @@ set -Eeuo pipefail
 umask 077
 
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CATALOG_DIRECTORY=/opt/tvt/solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4
+CATALOG_DIRECTORY=/opt/tvt/solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1
 QUALIFIER=(/opt/tvt/venv/bin/tvt-traffic-qualify)
 
 if [[ ! -x ${QUALIFIER[0]} ]]; then
   QUALIFIER=("${REPO_ROOT}/.venv/bin/python" -m tvt_edge.qualification)
-  CATALOG_DIRECTORY="${REPO_ROOT}/solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
+  CATALOG_DIRECTORY="${REPO_ROOT}/solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
 fi
 
 [[ ${EUID} -eq 0 ]] || {
@@ -3448,7 +3511,7 @@ PY
 tvt_op_verify_docker_archive_tag() (
 # Source: scripts/verify-docker-archive-tag.py
   exec python3 - "$@" <<'TVT_VERIFY_DOCKER_ARCHIVE_TAG_PY'
-"""Verify that a Docker image archive contains exactly the expected tag."""
+"""Verify that a Docker-save or OCI-layout archive has one expected tag."""
 
 from __future__ import annotations
 
@@ -3466,36 +3529,50 @@ class ArchiveTagError(ValueError):
     pass
 
 
+def _read_json(archive: tarfile.TarFile, name: str) -> object:
+    members = [member for member in archive.getmembers() if member.name == name]
+    if len(members) != 1:
+        raise ArchiveTagError(f"archive must contain exactly one {name}")
+    member = members[0]
+    if not member.isfile() or member.size > MAX_MANIFEST_SIZE:
+        raise ArchiveTagError(f"archive {name} is not a bounded regular file")
+    stream = archive.extractfile(member)
+    if stream is None:
+        raise ArchiveTagError(f"archive {name} cannot be read")
+    return json.load(stream)
+
+
 def archive_tags(path: Path) -> list[str]:
     try:
         with tarfile.open(path, mode="r:*") as archive:
-            manifests = [
-                member
-                for member in archive.getmembers()
-                if member.name == "manifest.json"
-            ]
-            if len(manifests) != 1:
-                raise ArchiveTagError("archive must contain exactly one manifest.json")
-            manifest = manifests[0]
-            if not manifest.isfile() or manifest.size > MAX_MANIFEST_SIZE:
-                raise ArchiveTagError("archive manifest.json is not a bounded regular file")
-            stream = archive.extractfile(manifest)
-            if stream is None:
-                raise ArchiveTagError("archive manifest.json cannot be read")
-            document = json.load(stream)
+            names = {member.name for member in archive.getmembers()}
+            if "manifest.json" in names:
+                document = _read_json(archive, "manifest.json")
+                if not isinstance(document, list) or not document:
+                    raise ArchiveTagError("archive manifest.json must contain a non-empty list")
+                tags: list[str] = []
+                for entry in document:
+                    if not isinstance(entry, dict) or not isinstance(entry.get("RepoTags"), list):
+                        raise ArchiveTagError("archive manifest entry has no RepoTags list")
+                    if not all(isinstance(tag, str) and tag for tag in entry["RepoTags"]):
+                        raise ArchiveTagError("archive manifest contains an invalid image tag")
+                    tags.extend(entry["RepoTags"])
+                return tags
+            if "index.json" in names and "oci-layout" in names:
+                document = _read_json(archive, "index.json")
+                if not isinstance(document, dict) or document.get("schemaVersion") != 2:
+                    raise ArchiveTagError("OCI index.json has an invalid schema")
+                manifests = document.get("manifests")
+                if not isinstance(manifests, list) or len(manifests) != 1:
+                    raise ArchiveTagError("OCI archive must contain exactly one image manifest")
+                annotations = manifests[0].get("annotations") if isinstance(manifests[0], dict) else None
+                tag = annotations.get("org.opencontainers.image.ref.name") if isinstance(annotations, dict) else None
+                if not isinstance(tag, str) or not tag:
+                    raise ArchiveTagError("OCI image manifest has no reference-name annotation")
+                return [tag]
+            raise ArchiveTagError("archive is neither Docker-save nor OCI-layout format")
     except (OSError, tarfile.TarError, json.JSONDecodeError) as error:
-        raise ArchiveTagError(f"invalid Docker archive: {error}") from error
-
-    if not isinstance(document, list) or not document:
-        raise ArchiveTagError("archive manifest.json must contain a non-empty list")
-    tags: list[str] = []
-    for entry in document:
-        if not isinstance(entry, dict) or not isinstance(entry.get("RepoTags"), list):
-            raise ArchiveTagError("archive manifest entry has no RepoTags list")
-        if not all(isinstance(tag, str) and tag for tag in entry["RepoTags"]):
-            raise ArchiveTagError("archive manifest contains an invalid image tag")
-        tags.extend(entry["RepoTags"])
-    return tags
+        raise ArchiveTagError(f"invalid container archive: {error}") from error
 
 
 def verify(path: Path, expected: str) -> None:
@@ -3515,9 +3592,9 @@ def main() -> int:
     try:
         verify(args.archive, args.expected)
     except ArchiveTagError as error:
-        print(f"docker-archive-tag: ERROR: {error}", file=sys.stderr)
+        print(f"container-archive-tag: ERROR: {error}", file=sys.stderr)
         return 1
-    print(f"Verified Docker archive image tag: {args.expected}")
+    print(f"Verified container archive image tag: {args.expected}")
     return 0
 
 
@@ -3548,13 +3625,14 @@ def verify(document: object, expected: argparse.Namespace) -> list[str]:
     config = image.get("Config") or {}
     labels = config.get("Labels") or {}
     expected_labels = {
-        "org.opencontainers.image.source": expected.source,
         "org.opencontainers.image.title": expected.title,
         "org.opencontainers.image.version": expected.version,
         "io.apexfabric.contract.version": expected.contract_version,
         "io.apexfabric.hardware.profile": expected.hardware_profile,
         "io.apexfabric.models.delivery": expected.models_delivery,
     }
+    if expected.source:
+        expected_labels["org.opencontainers.image.source"] = expected.source
     errors = []
     if image.get("Architecture") != "amd64":
         errors.append(f"architecture {image.get('Architecture')!r}, expected 'amd64'")
@@ -3594,7 +3672,7 @@ def main() -> int:
         raise SystemExit(f"cannot read Docker image inspection: {error}") from error
     errors = verify(document, args)
     if errors:
-        raise SystemExit("Traffic image contract verification failed: " + "; ".join(errors))
+        raise SystemExit("solution image contract verification failed: " + "; ".join(errors))
     return 0
 
 
@@ -3742,7 +3820,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("qualification report is missing its rollback request")
     invariants = report.get("invariants", {})
     if (
-        invariants.get("catalog_id") != "traffic-edge-runtime:2026.08.21-v4"
+        invariants.get("catalog_id") != "tvt-mills-pilot:2026.09.18-v1"
         or not invariants.get("deployment_id")
         or invariants.get("namespace") != "apexfabric"
         or not isinstance(invariants.get("applied_revision"), int)

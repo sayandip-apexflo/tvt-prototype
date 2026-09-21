@@ -77,7 +77,8 @@ readonly RELEASE_VERSION="$(tvt_manifest_value "${BUNDLE}" release_version)"
 readonly RELEASE_DIRECTORY="${OPT_TVT}/releases/${RELEASE_VERSION}"
 readonly RESOURCE_DIRECTORY="${RELEASE_DIRECTORY}/resources"
 readonly VENV_DIRECTORY="${RELEASE_DIRECTORY}/venv"
-readonly TRAFFIC_CATALOG_DIRECTORY="${RESOURCE_DIRECTORY}/solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4"
+readonly SOLUTION_CATALOG_DIRECTORY="${RESOURCE_DIRECTORY}/solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
+readonly SOLUTION_IMAGE_ARCHIVE="${RESOURCE_DIRECTORY}/images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar"
 
 complete_post_reboot_preparation() {
   local preparation_status
@@ -154,6 +155,14 @@ install_application() {
   mv -Tf "${current_link}" "${OPT_TVT}/current"
 }
 
+validate_solution_delivery() {
+  "${VENV_DIRECTORY}/bin/python" \
+    "${RESOURCE_DIRECTORY}/scripts/validate-solution-delivery.py" \
+    --catalog "${SOLUTION_CATALOG_DIRECTORY}" \
+    --config "${RESOURCE_DIRECTORY}/config/pipeline.env" \
+    --archive "${SOLUTION_IMAGE_ARCHIVE}"
+}
+
 install_registry() {
   "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" install-local-registry \
     --image-archive "${RESOURCE_DIRECTORY}/images/registry.tar"
@@ -195,14 +204,14 @@ install_pipeline_image() {
   fi
   "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" import-pipeline-traffic-image \
     --mode archive \
-    --archive-file "${RESOURCE_DIRECTORY}/images/traffic-edge-runtime-v4.tar" \
-    --metadata-directory "${TRAFFIC_CATALOG_DIRECTORY}" \
+    --archive-file "${SOLUTION_IMAGE_ARCHIVE}" \
+    --metadata-directory "${SOLUTION_CATALOG_DIRECTORY}" \
     --work-dir /var/lib/tvt/pipeline/work \
     --lock-output /var/lib/tvt/pipeline/traffic-image.lock.json \
     --concurrency-lock /var/lib/tvt/pipeline/import.lock
   "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" install-pipeline-image-sync \
-    --archive-file "${RESOURCE_DIRECTORY}/images/traffic-edge-runtime-v4.tar" \
-    --metadata-directory "${TRAFFIC_CATALOG_DIRECTORY}"
+    --archive-file "${SOLUTION_IMAGE_ARCHIVE}" \
+    --metadata-directory "${SOLUTION_CATALOG_DIRECTORY}"
   systemctl start tvt-pipeline-image-sync.service
 }
 
@@ -400,6 +409,7 @@ if [[ -n ${existing_release} && ${existing_release} != "${RELEASE_VERSION}" ]]; 
 fi
 ${RESUME} && tvt_log "explicit resume requested"
 tvt_run_stage "${INSTALL_STATE}" "${RELEASE_VERSION}" application install_application
+tvt_run_stage "${INSTALL_STATE}" "${RELEASE_VERSION}" solution_delivery_contract validate_solution_delivery
 tvt_run_stage "${INSTALL_STATE}" "${RELEASE_VERSION}" registry install_registry
 tvt_run_stage "${INSTALL_STATE}" "${RELEASE_VERSION}" k3s install_k3s
 tvt_run_stage "${INSTALL_STATE}" "${RELEASE_VERSION}" node_management install_node_management

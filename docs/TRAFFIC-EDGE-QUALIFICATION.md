@@ -1,7 +1,7 @@
 # Traffic edge Phase 5 qualification
 
-Phase 5 is a manual, bounded acceptance gate for the deployed PIPELINE Traffic
-v4 solution on the single Intel Core Ultra 9 285H edge. It creates verifiable
+Phase 5 is a manual, bounded acceptance gate for the deployed TVT Mills pilot
+solution on the single Intel Core Ultra 9 285H edge. It creates verifiable
 local evidence; it is not a daemon, a background monitor, or an automatic
 reboot/rollback mechanism.
 
@@ -10,8 +10,8 @@ reboot/rollback mechanism.
 A passing report proves all of the following at one point in time:
 
 - the vendored image, desired-state, metrics, and analytics-event contracts
-  match their SHA-256 records from PIPELINE commit
-  `6513562c9d27eba511322280e19e054c3948ae4d`;
+  match their SHA-256 records from `TVT_images` commit
+  `ab85058ab961bb7aeb4ed9c96f1a35ec5c37f934`;
 - Ubuntu reports `amd64`, the 285H CPU is present, `/dev/dri` and `/dev/accel`
   exist, the reboot-required marker is absent, and VA-API, OpenCL, and OpenVINO
   expose CPU/GPU/NPU as expected;

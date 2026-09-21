@@ -175,6 +175,13 @@ python3 scripts/tvt-release-inputs.py verify \
   --platform-config config/platform.env --pipeline-config config/pipeline.env \
   --hardware-matrix config/hardware-matrix.env --edge-inventory "${EDGE_INVENTORY}"
 
+validation_python=python3
+if [[ -x .venv/bin/python ]]; then validation_python=.venv/bin/python; fi
+"${validation_python}" scripts/validate-solution-delivery.py \
+  --catalog solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1 \
+  --config config/pipeline.env \
+  --archive "${INPUT_DIRECTORY}/images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar"
+
 tests_status=skipped
 if ! ${SKIP_TESTS}; then
   test_python=python3
@@ -194,7 +201,7 @@ if ${ALLOW_DIRTY_SOURCE}; then dirty_argument=(--allow-dirty-source); fi
   --registry-image "${INPUT_DIRECTORY}/images/registry.tar" \
   --node-reporter-image "${INPUT_DIRECTORY}/images/node-reporter.tar" \
   --node-status-controller-image "${INPUT_DIRECTORY}/images/node-status-controller.tar" \
-  --traffic-image "${INPUT_DIRECTORY}/images/traffic-edge-runtime-v4.tar" \
+  --traffic-image "${INPUT_DIRECTORY}/images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar" \
   --ui-image "${INPUT_DIRECTORY}/images/ui.tar" \
   --k3s-installer "${INPUT_DIRECTORY}/k3s/install.sh" \
   --k3s-binary "${INPUT_DIRECTORY}/k3s/k3s" \

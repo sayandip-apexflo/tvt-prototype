@@ -13,8 +13,8 @@ automatically.
 
 Assign one person as the release owner for each build. Build on a trusted
 Ubuntu 24.04 `amd64` workstation or disposable VM, not on a production edge
-host. The machine needs network access, Python 3.12, Node/NPM, Docker, Git LFS,
-and enough disk for multiple copies of the approximately 1.93 GB Traffic image
+host. The machine needs network access, Python 3.12, Node/NPM, and Docker,
+and enough disk for multiple copies of the approximately 968 MB solution image
 and the remaining image/package closures.
 
 Keep these areas separate:
@@ -50,7 +50,7 @@ inputs/
 │   ├── registry.tar
 │   ├── node-reporter.tar
 │   ├── node-status-controller.tar
-│   └── traffic-edge-runtime-v4.tar
+│   └── tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar
 ├── k3s/
 │   ├── install.sh
 │   └── k3s
@@ -107,8 +107,8 @@ does not exist or is empty, it automatically:
 1. pulls and verifies the digest-pinned Registry image;
 2. builds both node-management images for Linux amd64;
 3. downloads K3s and validates its official amd64 checksum and reported version;
-4. fetches the exact Traffic Git LFS object and validates its configured size,
-   checksum, and image tag;
+4. downloads the checksum-pinned TVT Mills OCI release asset and validates its
+   configured size, checksum, and embedded image tag;
 5. downloads the configured Intel NPU release and the Python 3.12 OpenVINO
    wheel closure;
 6. enables the pinned Metis 1.4.17 and Voyager 1.6.1 closures exactly when
@@ -121,7 +121,7 @@ does not exist or is empty, it automatically:
 
 Artifacts are first written to a temporary sibling directory, validated, and
 locked. The complete input tree is published atomically only after validation
-passes. A sibling `cache/` retains K3s, PIPELINE Git LFS, and Intel NPU downloads
+passes. A sibling `cache/` retains K3s, TVT Mills, and Intel NPU downloads
 for subsequent releases. The cache is never copied into the release.
 
 An existing locked input tree is treated as immutable and verified before use.

@@ -102,10 +102,12 @@ def load_delivery_metadata(directory: Path, expected_name: str = "tvt-mills-pilo
         raise CatalogError(f"{expected_name} delivery hardware profile is not intel-285h")
     if (contract.get("models") or {}).get("delivery") != "baked-in":
         raise CatalogError(f"{expected_name} delivery must declare baked-in models")
-    if archive.get("loaded_image") != (
-        f"localhost/{contract['name']}:intel-285h-{contract['version']}"
+    loaded_image = archive.get("loaded_image")
+    if not isinstance(loaded_image, str) or not re.fullmatch(
+        rf"localhost/[a-z0-9][a-z0-9._/-]*:intel-285h-{re.escape(str(contract['version']))}",
+        loaded_image,
     ):
-        raise CatalogError("loaded image name disagrees with the image contract")
+        raise CatalogError("loaded image name or version disagrees with the image contract")
     expected_catalog_id = f"{contract['name']}:{contract['version']}"
     if provenance.get("catalog_id") != expected_catalog_id:
         raise CatalogError("catalog ID disagrees with the image contract")

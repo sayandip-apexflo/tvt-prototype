@@ -136,30 +136,26 @@ These commands check the Registry API, show both service states and their
 Docker-to-registry-to-K3s ordering, display the installed mirror configuration,
 and print current-day logs for troubleshooting.
 
-## Phase 3: synchronize PIPELINE Traffic v4 and refresh the catalog
+## Phase 3: synchronize the TVT Mills image and refresh the catalog
 
-### 1. Review the PIPELINE pins and inspection
+### 1. Review the immutable delivery pins
 
 ```bash
 sed -n '1,200p' config/pipeline.env
 less docs/PIPELINE-TRAFFIC-IMAGE.md
 ```
 
-These commands show the exact v4 commit and delivery path, archive size and
-checksum, baked-model contract, local image identity, and developer-only build
-inputs. The delivery branch is informational; synchronization does not follow
-its current HEAD.
+These commands show the exact source commit and release asset URL, archive size
+and checksum, baked-model contract, source image tag, and edge-local image
+identity. The release tag is informational; acquisition uses the pinned asset
+URL and verifies its bytes.
 
-### 2. Install source-download prerequisites
+### 2. Confirm bundle capacity
 
-```bash
-sudo apt-get update
-sudo apt-get install -y git git-lfs
-```
-
-This installs Git and Git LFS. The default import downloads only the pinned
-Traffic image archive from the pinned PIPELINE checkout. Allow at least 6 GB of
-free disk for the 1.93 GB archive, Docker's loaded layers, and registry copy.
+Allow at least 4 GB of free disk for the approximately 968 MB OCI archive,
+Docker's loaded layers, the OCI-to-Docker compatibility copy, and the registry
+copy. The release builder downloads the archive; the edge importer accepts
+only the bundled, checksum-verified file.
 
 ### 3. Install automated synchronization
 
@@ -183,8 +179,8 @@ sudo systemctl status tvt-pipeline-image-sync.service \
 ```
 
 The oneshot waits for the loopback registry, takes a nonblocking import lock,
-fetches only the exact commit and v4 Git LFS archive, verifies the archive and
-image contract, and pushes the versioned image. It does not delete older
+verifies the bundled OCI archive and catalog contract, and pushes the
+versioned image. It does not delete older
 images, generate a DeploymentBundle, call K3s, or change a deployed digest.
 Re-running it is a no-op when the private lock and verified registry manifest
 digest agree.
@@ -195,18 +191,18 @@ digest agree.
 sudo ./scripts/tvt-edge-operations.sh verify-pipeline-image-sync
 sudo python3 -m json.tool /var/lib/tvt/pipeline/traffic-image.lock.json
 sudo docker image inspect \
-  127.0.0.1:5000/apexfabric/traffic-edge-runtime:intel-285h-2026.08.21-v4
+  127.0.0.1:5000/apexfabric/tvt-mills-pilot:intel-285h-2026.09.18-v1
 sudo journalctl -u tvt-pipeline-image-sync.service --since today
 ```
 
-The verifier checks the private lock, v4 provenance fields, timer state, last
+The verifier checks the private lock, pinned provenance fields, timer state, last
 oneshot result, and registry manifest bytes. The JSON command displays the
 registry-produced digest and immutable `repository@sha256:` reference.
 
 ### 6. Seed and refresh the PostgreSQL catalog
 
 The PostgreSQL bootstrap applies the catalog migration and idempotently seeds
-the vendored v4 entry:
+the vendored `tvt-mills-pilot:2026.09.18-v1` entry:
 
 ```bash
 sudo ./scripts/tvt-edge-operations.sh bootstrap-postgresql
@@ -248,32 +244,27 @@ For a bootstrap that has already run, repeat only the idempotent seed command:
 sudo -u tvt-edge env TVT_DATABASE_URL=postgresql+psycopg:///tvt \
   /opt/tvt/venv/bin/tvt-edge seed-solutions \
   --delivery-directory \
-  "$PWD/solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4" \
+  "$PWD/solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1" \
   --registry 127.0.0.1:5000
 ```
 
 ### 7. Repository-local manual import or qualification build
 
 ```bash
-sudo ./scripts/tvt-edge-operations.sh import-pipeline-traffic-image
+sudo ./scripts/tvt-edge-operations.sh import-pipeline-traffic-image \
+  --mode archive \
+  --archive-file /path/to/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar \
+  --metadata-directory solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1
 sudo python3 -m json.tool build/pipeline/traffic-image.lock.json
 ```
 
 These commands use the gitignored repository-local development state path.
 Production services use `/var/lib/tvt/pipeline` instead.
 
-```bash
-sudo ./scripts/tvt-edge-operations.sh import-pipeline-traffic-image --mode build \
-  --lock-output build/pipeline/traffic-source-build.lock.json
-```
+Source-build mode is intentionally rejected. The vendor release archive is the
+only supported image input.
 
-This builds from the same pinned commit using the pinned Ubuntu base manifest
-and NPU-driver argument, then stores it under a distinct `-source-build` tag.
-Use it only for qualification: the upstream Dockerfiles still resolve mutable
-APT packages and ranged Python requirements. The release archive remains the
-production import source.
-
-## Phase 4: preview and deploy Traffic from the catalog
+## Phase 4: preview and deploy TVT Mills from the catalog
 
 The normal operator path is the Solutions page at
 `http://127.0.0.1:8089/#solutions`. Select an `available` catalog entry,

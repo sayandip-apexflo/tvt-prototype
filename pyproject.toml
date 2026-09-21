@@ -54,6 +54,10 @@ version = {attr = "tvt_edge.__version__"}
   "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4/*.json",
   "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4/*.yaml",
 ]
+"share/tvt/solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1" = [
+  "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1/*.json",
+  "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1/*.yaml",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

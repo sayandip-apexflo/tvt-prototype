@@ -3,10 +3,10 @@
   "catalog_id": "tvt-mills-pilot:2026.09.18-v1",
   "pipeline": {
     "repository": "https://github.com/BhashyamDayasagar587/TVT_images",
-    "commit": "main"
+    "commit": "ab85058ab961bb7aeb4ed9c96f1a35ec5c37f934"
   },
   "delivery": {
-    "branch": "main",
+    "branch": "tvt-edge-intel-285h-2026.09.18-v1",
     "directory": ".",
     "version": "2026.09.18-v1"
   },
@@ -14,7 +14,7 @@
     "filename": "tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar",
     "size": 967496192,
     "sha256": "a236a4c1c3053e6a78270d98426b72c5fcbe681273b6f5f35d5631d25a88f4a8",
-    "loaded_image": "localhost/tvt-mills-pilot:intel-285h-2026.09.18-v1"
+    "loaded_image": "localhost/tvt-edge-runtime:intel-285h-2026.09.18-v1"
   },
   "local_image": {
     "repository": "apexfabric/tvt-mills-pilot",

@@ -104,6 +104,19 @@ class EdgeHostInstallerTests(unittest.TestCase):
         self.assertIn("kubectl wait --for=condition=Ready", verification)
         self.assertNotIn(".status.conditions[?(", verification)
 
+    def test_solution_contract_is_checked_before_host_services(self) -> None:
+        installer = (ROOT / "install-tvt-edge-host.sh").read_text(encoding="utf-8")
+        stages = installer.split("tvt_run_stage", 1)[1]
+        contract = stages.index("solution_delivery_contract")
+        for later_stage in (" registry ", " k3s ", " postgresql_and_services "):
+            self.assertLess(contract, stages.index(later_stage))
+        self.assertIn("scripts/validate-solution-delivery.py", installer)
+
+        release_builder = (ROOT / "scripts/make-tvt-edge-release.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("scripts/validate-solution-delivery.py", release_builder)
+
     def test_release_front_door_builds_missing_inputs(self) -> None:
         front_door = (ROOT / "scripts/make-tvt-edge-release.sh").read_text(
             encoding="utf-8"
@@ -183,13 +196,13 @@ class EdgeHostInstallerTests(unittest.TestCase):
             "prepare-tvt-edge-host.sh", "install-tvt-edge-host.sh", "alembic.ini",
             "config/platform.env", "config/pipeline.env", "config/hardware-matrix.env",
             "scripts/lib/tvt-installer-common.sh", "scripts/tvt-edge-operations.sh",
-            "scripts/tvt-hardware-inventory.py",
+            "scripts/tvt-hardware-inventory.py", "scripts/validate-solution-delivery.py",
             "deploy/k8s/apexfabric-foundation.yaml", "deploy/k8s/apexfabric-node-management.yaml",
             "deploy/host/tvt-edge.env.example", "deploy/host/postgresql-tvt.conf",
             "deploy/systemd/tvt-edge.service", "deploy/systemd/tvt-camera-sync.service",
             "solution-packs/schema/deployment-bundle.schema.json",
-            "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4/provenance.json",
-            "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4/image-contract.yaml",
+            "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1/provenance.json",
+            "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1/image-contract.yaml",
             "tvt_edge/db/migrations/env.py", "packages/apt/runtime.deb",
             "hardware/driver-recipe.json", "hardware/linux-npu-driver.tar.gz",
             "hardware/edge-inventory.json",
@@ -263,7 +276,7 @@ class EdgeHostInstallerTests(unittest.TestCase):
             self.make_bundle(bundle)
             accepted = self.verify_bundle(bundle)
             self.assertEqual(accepted.returncode, 0, accepted.stderr)
-            (bundle / "images/traffic-edge-runtime-v4.tar").write_bytes(b"corrupt")
+            (bundle / "images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar").write_bytes(b"corrupt")
             rejected = self.verify_bundle(bundle)
             self.assertNotEqual(rejected.returncode, 0)
             self.assertIn("checksum mismatch", rejected.stderr)
@@ -294,7 +307,8 @@ class EdgeHostInstallerTests(unittest.TestCase):
                 )
             locked_paths = [
                 "images/registry.tar", "images/node-reporter.tar",
-                "images/node-status-controller.tar", "images/traffic-edge-runtime-v4.tar",
+                "images/node-status-controller.tar",
+                "images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar",
                 "k3s/install.sh", "k3s/k3s", "hardware/driver-recipe.json",
                 "hardware/linux-npu-driver.tar.gz", "hardware/wheels/openvino.whl",
                 "hardware/voyager-wheels/axelera_rt.whl",
@@ -454,7 +468,7 @@ tvt_run_stage {state} 0.1.0 sample worker
                 "images/registry.tar": b"registry",
                 "images/node-reporter.tar": b"reporter",
                 "images/node-status-controller.tar": b"controller",
-                "images/traffic-edge-runtime-v4.tar": traffic,
+                "images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar": traffic,
                 "images/ui.tar": b"ui",
                 "k3s/install.sh": b"#!/bin/sh\n",
                 "k3s/k3s": b"#!/bin/sh\n",
@@ -534,6 +548,8 @@ tvt_run_stage {state} 0.1.0 sample worker
             pipeline.write_text(
                 "PIPELINE_REVISION=" + "2" * 40 + "\n"
                 "PIPELINE_TRAFFIC_VERSION=v4\n"
+                "PIPELINE_TRAFFIC_CATALOG_ID=traffic:v4\n"
+                "PIPELINE_TRAFFIC_ARCHIVE_URL=https://example.invalid/traffic.tar\n"
                 f"PIPELINE_TRAFFIC_ARCHIVE_SHA256={hashlib.sha256(traffic).hexdigest()}\n"
                 f"PIPELINE_TRAFFIC_ARCHIVE_SIZE={len(traffic)}\n"
                 "PIPELINE_TRAFFIC_ARCHIVE_IMAGE=traffic:v4\n",

@@ -133,8 +133,8 @@ required_resources = {
     "deploy/host/tvt-edge.env.example", "deploy/host/postgresql-tvt.conf",
     "deploy/systemd/tvt-edge.service", "deploy/systemd/tvt-camera-sync.service",
     "solution-packs/schema/deployment-bundle.schema.json",
-    "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4/provenance.json",
-    "solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4/image-contract.yaml",
+    "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1/provenance.json",
+    "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1/image-contract.yaml",
     "tvt_edge/db/migrations/env.py",
 }
 for relative in sorted(required_resources):

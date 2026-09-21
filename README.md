@@ -197,34 +197,35 @@ without adding TLS, authentication, firewall policy, and a corresponding threat
 review. Re-running the installer retains `/var/lib/tvt/registry` and reconciles
 the service to the pinned image.
 
-### PIPELINE Traffic image import
+### TVT Mills solution image import
 
-The Traffic workload comes from the `PIPELINE` ApexFabric V1 delivery branch,
-but synchronization fetches exact commit
-`6513562c9d27eba511322280e19e054c3948ae4d` rather than following mutable branch
-HEAD. The production artifact is the baked-model v4 archive at
-`delivery/apexfabric-v1/intel-285h/traffic/image-2026.08.21-v4.tar`; its size,
-SHA-256, image contract, expected model hashes, and local image identity are
-pinned in `config/pipeline.env`.
+The combined face-recognition, face-enrollment, and ANPR workload comes from
+the immutable `tvt-edge-intel-285h-2026.09.18-v1` release of `TVT_images`, at
+commit `ab85058ab961bb7aeb4ed9c96f1a35ec5c37f934`. The production OCI archive,
+its exact size and SHA-256, catalog contract, model hashes, source image tag,
+and edge-local image identity are pinned together in `config/pipeline.env`.
 
 Import it after the local registry is running:
 
 ```bash
-sudo apt-get install -y git git-lfs
-sudo ./scripts/tvt-edge-operations.sh import-pipeline-traffic-image
+sudo ./scripts/tvt-edge-operations.sh import-pipeline-traffic-image \
+  --mode archive \
+  --archive-file /path/to/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar \
+  --metadata-directory solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1
 ```
 
-The archive path verifies the 1.93 GB Git LFS artifact before loading it. The
-script validates the Linux `amd64` OCI/runtime contract and the six baked
-OpenVINO model files without starting the CV runtime, pushes the versioned tag
-to `127.0.0.1:5000`, verifies the registry manifest digest against its bytes,
+The release builder downloads and verifies the 967,496,192-byte OCI artifact
+before bundling it. The edge importer validates the Linux `amd64` runtime
+contract and the pinned traffic and face models without starting the CV
+runtime, pushes the versioned tag to `127.0.0.1:5000`, verifies the registry
+manifest digest against its bytes,
 and atomically writes a private immutable lock under `build/pipeline/` for a
 repository run. When that lock still matches the registry, a repeat invocation
-is a no-op. `--mode build` is developer qualification only and is never used by
-automated synchronization.
+is a no-op. Source-build mode is rejected; the checksum-pinned vendor archive
+is the only supported image input.
 
-See [PIPELINE Traffic image provenance](docs/PIPELINE-TRAFFIC-IMAGE.md) for the
-complete v4 provenance, contract, model checksums, and lock format.
+See [TVT Mills image provenance](docs/PIPELINE-TRAFFIC-IMAGE.md) for the
+complete provenance, contract, model checksums, and lock format.
 See [Traffic edge qualification](docs/TRAFFIC-EDGE-QUALIFICATION.md) for the
 Phase 5 live-device acceptance, reboot, and rollback procedure.
 

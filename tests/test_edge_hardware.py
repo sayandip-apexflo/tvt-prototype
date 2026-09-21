@@ -199,7 +199,7 @@ class EdgeInventoryLockTests(unittest.TestCase):
             "images/registry.tar": b"registry",
             "images/node-reporter.tar": b"reporter",
             "images/node-status-controller.tar": b"controller",
-            "images/traffic-edge-runtime-v4.tar": traffic,
+            "images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar": traffic,
             "images/ui.tar": b"ui",
             "k3s/install.sh": b"#!/bin/sh\n",
             "k3s/k3s": b"#!/bin/sh\n",
@@ -269,6 +269,8 @@ class EdgeInventoryLockTests(unittest.TestCase):
         pipeline.write_text(
             "PIPELINE_REVISION=" + "2" * 40 + "\n"
             "PIPELINE_TRAFFIC_VERSION=v4\n"
+            "PIPELINE_TRAFFIC_CATALOG_ID=traffic:v4\n"
+            "PIPELINE_TRAFFIC_ARCHIVE_URL=https://example.invalid/traffic.tar\n"
             f"PIPELINE_TRAFFIC_ARCHIVE_SHA256={hashlib.sha256(traffic).hexdigest()}\n"
             f"PIPELINE_TRAFFIC_ARCHIVE_SIZE={len(traffic)}\n"
             "PIPELINE_TRAFFIC_ARCHIVE_IMAGE=traffic:v4\n",
