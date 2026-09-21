@@ -215,6 +215,43 @@ application_build_info{service,version}
 HTTP routes must be normalized templates such as `/cameras/{camera_id}`, not
 raw paths containing IDs.
 
+#### 3.7.1 Face-enrollment sessions
+
+Enrollment (see HLD.md and `tvt_edge/enrollment.py`) does not get its own
+metric family. Every actionable failure in the session state machine
+(`activating -> capturing -> restoring -> completed/timed_out/cancelled/
+failed`) increments the existing `application_errors_total{service=
+"edge-management", error_code}` counter with one of these bounded codes,
+paired with a correlated JSON log line (`event=
+"enrollment_session_error"`, `operation_id=<session_id>`, `result=
+<transition>`; the enrollment session ID is a log field, never a metric
+label):
+
+```text
+ENROLLMENT_ACTIVATION_FAILED   -- committing/applying the face_enrollment
+                                   revision did not complete within the
+                                   bounded activation timeout
+ENROLLMENT_CAPTURE_REJECTED    -- an enrollment_capture_event arrived for
+                                   the active session's camera but failed
+                                   an eligibility rule (window, quality);
+                                   the session stays 'capturing'
+ENROLLMENT_TIMEOUT             -- the capture window closed with no valid
+                                   capture; the camera is still restored
+ENROLLMENT_RESTORE_DEGRADED    -- queuing or confirming the restoration
+                                   commit failed this tick (typically K3s
+                                   unavailable); the session stays
+                                   'restoring' and retries
+```
+
+Successful transitions (`capturing`, `restoring`, `completed`, `timed_out`,
+`cancelled`) are logged at `info` with `error_code=NONE` and no metric
+increment -- see `EnrollmentReconciler.run_once` in `tvt_edge/enrollment.py`.
+Bounded, ordinary-validation errors (e.g. "camera does not run
+face_recognition", "an enrollment session is already active") are returned
+as HTTP 409 by the shared `ValueError` handler like every other management
+API rejection and are not separately metered, matching existing
+management-API convention.
+
 ### 3.8 Alert dispatcher
 
 ```text

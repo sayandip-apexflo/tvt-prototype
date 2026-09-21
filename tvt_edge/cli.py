@@ -197,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
             settings.sync_namespace,
             kubectl_client(settings.kubeconfig),
             apex_url=settings.apex_url,
+            enrollment_reconcile_interval_seconds=settings.enrollment_reconcile_interval_seconds,
         )
         start_http_server(
             settings.metrics_port,

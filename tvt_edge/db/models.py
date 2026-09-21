@@ -448,6 +448,106 @@ class EnrollmentWindow(Base, IdMixin):
     status: Mapped[str] = mapped_column(String(16), default="active", nullable=False, index=True)
 
 
+class EnrollmentCameraDesignation(Base, IdMixin, TimeMixin):
+    """The single camera a deployment currently designates for face
+    enrollment. Kept separate from EnrollmentSession so an operator can see
+    and change the designation before any session starts."""
+
+    __tablename__ = "enrollment_camera_designations"
+    __table_args__ = (UniqueConstraint("deployment_id"),)
+    deployment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("solution_deployments.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    camera_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("cameras.id", ondelete="RESTRICT"), nullable=False
+    )
+    row_version: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+    updated_by: Mapped[str] = mapped_column(String(200), nullable=False)
+
+
+class EnrollmentSession(Base, IdMixin):
+    """Durable state machine for one operator-triggered face-enrollment
+    cycle: swap the designated camera to apps=["face_enrollment"], accept at
+    most one enrollment_capture_event, then restore its exact prior
+    apps/config/fps. See docs/contracts/tvt-mills-v1/README.md and
+    tvt_edge/enrollment.py (EnrollmentReconciler, which drives every
+    transition below except the operator-triggered start/cancel).
+
+    activating -> capturing -> restoring -> completed
+                             -> timed_out (goes through restoring first)
+                             -> cancelled (goes through restoring first)
+                             -> failed
+
+    naming_status is independent of status: pending_name -> named. A
+    session can reach 'completed' with naming_status still 'pending_name' --
+    restoration never waits on the operator naming the person.
+    """
+
+    __tablename__ = "enrollment_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('activating','capturing','restoring','completed','timed_out','cancelled','failed')",
+            name="enrollment_session_status",
+        ),
+        CheckConstraint(
+            "naming_status IN ('not_applicable','pending_name','named')",
+            name="enrollment_session_naming_status",
+        ),
+        CheckConstraint(
+            "capture_result IS NULL OR capture_result IN ('created','duplicate')",
+            name="enrollment_session_capture_result",
+        ),
+        UniqueConstraint("accepted_event_id"),
+        Index(
+            "uq_active_enrollment_session_per_deployment",
+            "deployment_id",
+            unique=True,
+            postgresql_where=text("status IN ('activating','capturing','restoring')"),
+            sqlite_where=text("status IN ('activating','capturing','restoring')"),
+        ),
+    )
+    deployment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("solution_deployments.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    camera_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("cameras.id", ondelete="RESTRICT"), nullable=False
+    )
+    prior_apps: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    prior_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    prior_fps: Mapped[int] = mapped_column(Integer, nullable=False)
+    capture_window_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    activation_assignment_set_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("deployment_assignment_sets.id", ondelete="RESTRICT")
+    )
+    activation_revision: Mapped[int | None] = mapped_column(BigInteger)
+    restoration_assignment_set_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("deployment_assignment_sets.id", ondelete="RESTRICT")
+    )
+    restoration_revision: Mapped[int | None] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(String(16), default="activating", nullable=False, index=True)
+    naming_status: Mapped[str] = mapped_column(String(16), default="not_applicable", nullable=False)
+    capture_result: Mapped[str | None] = mapped_column(String(16))
+    accepted_event_id: Mapped[str | None] = mapped_column(String(255))
+    person_id: Mapped[str | None] = mapped_column(String(64))
+    result_code: Mapped[str | None] = mapped_column(String(64))
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    actor: Mapped[str] = mapped_column(String(200), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    row_version: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    capture_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    restoration_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    restored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
 class ManagementOperation(Base, IdMixin):
     __tablename__ = "management_operations"
     __table_args__ = (UniqueConstraint("idempotency_key"),)

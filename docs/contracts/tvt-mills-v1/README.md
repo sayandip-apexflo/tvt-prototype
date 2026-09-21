@@ -48,12 +48,20 @@ line `id`s required to end in `_entry`/`_exit`).
 - **Enrollment is time-shared, not a dedicated camera.** There is no 6th
   enrollment-only camera. Any of the five `face_recognition` cameras can be
   temporarily switched to `apps: ["face_enrollment"]` (the only combination
-  the schema allows for that app) and back — see
-  `apexfabric/control_plane/enrollment_windows.py`. While a camera is in an
-  enrollment window it stops contributing attendance/vehicle events at its
-  gate; any open session there is force-closed by the existing
-  `reporting.sweep_stale_sessions` cutoff like any other missed exit. This
-  is accepted, not silently dropped.
+  the schema allows for that app) and back. The operator-facing workflow is
+  the durable session state machine in `tvt_edge/enrollment.py` +
+  `ManagementService` (designate a camera, start a session, accept one
+  capture, restore automatically) — see `LLD_PLAN.md` §12.4a for the state
+  machine, data ownership, and the one identified upstream `identity.py`
+  gap. `apexfabric/control_plane/enrollment_windows.py`/`server.py`'s own
+  `start_enrollment`/`stop_enrollment` (frozen, exercised by
+  `tests/test_enrollment_windows.py`) and `tvt_edge/service.py`'s
+  `EnrollmentWindow` bookkeeping (0005 migration) predate this and remain in
+  place unmodified for backward compatibility, but the console no longer
+  drives them. While a camera is in an enrollment window it stops
+  contributing attendance/vehicle events at its gate; any open session there
+  is force-closed by the existing `reporting.sweep_stale_sessions` cutoff
+  like any other missed exit. This is accepted, not silently dropped.
 
 ## Security posture (unchanged from before)
 

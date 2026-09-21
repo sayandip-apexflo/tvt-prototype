@@ -727,7 +727,11 @@ job boundaries, rather than adding it to every internal function signature.
 Use an `operation_id` for camera discovery/onboarding and report generation, an
 `event_id` for an asynchronous application event, and a `stream_session_id` for
 one workload-to-camera RTSP connection lifetime. Propagate the appropriate ID
-in job or event payloads.
+in job or event payloads. Face-enrollment sessions
+(`tvt_edge/enrollment.py::EnrollmentReconciler`, running as a bounded task
+inside the management API process on a short interval, not the daily
+retention timer) log their session ID as `operation_id` for the same reason
+-- see METRICS.md §3.7.1 for the bounded `error_code`s it can emit.
 
 These IDs belong in logs, not Prometheus labels.
 

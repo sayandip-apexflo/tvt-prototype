@@ -8,7 +8,7 @@ import json
 import re
 import uuid
 from collections import Counter
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -46,6 +46,8 @@ from tvt_edge.db.models import (
     CameraStreamProfile,
     CredentialKeyVersion,
     DeploymentAssignmentSet,
+    EnrollmentCameraDesignation,
+    EnrollmentSession,
     EnrollmentWindow,
     DeploymentSyncState,
     DeploymentSyncAttempt,
@@ -56,6 +58,17 @@ from tvt_edge.db.models import (
     SolutionBundleRevision,
     SolutionDeployment,
     utc_now,
+)
+from tvt_edge.enrollment import (
+    ACTIVE_STATUSES as ENROLLMENT_ACTIVE_STATUSES,
+    TERMINAL_STATUSES as ENROLLMENT_TERMINAL_STATUSES,
+    DEFAULT_ACTIVATION_TIMEOUT_SECONDS,
+    DEFAULT_CAPTURE_WINDOW_SECONDS,
+    MAX_CAPTURE_WINDOW_SECONDS,
+    MIN_CAPTURE_WINDOW_SECONDS,
+    RESULT_CODE_TERMINAL_STATUS,
+    has_rejected_capture_attempt,
+    select_first_capture,
 )
 from tvt_edge.geometry import ShapeInput, compile_camera_config, line_shape_key, slugify, validate_shape
 from tvt_edge.security import CredentialKeyring, redact, redact_text
@@ -89,10 +102,17 @@ class ManagementService:
         sessions: sessionmaker[Session],
         keyring: CredentialKeyring,
         catalog_resolver: Callable[[str, str, str], str] = resolve_registry_digest,
+        enrollment_minimum_sharpness: float | None = None,
     ) -> None:
         self.sessions = sessions
         self.keyring = keyring
         self.catalog_resolver = catalog_resolver
+        # Optional defense-in-depth capture-quality floor, checked only
+        # against the vendor's non-sensitive payload.payload.quality block
+        # (see tvt_edge/enrollment.py eligible_capture_candidate) -- never
+        # the embedding itself, which apexfabric/control_plane/identity.py
+        # (frozen) already validates authoritatively.
+        self.enrollment_minimum_sharpness = enrollment_minimum_sharpness
 
     @staticmethod
     def _audit(
@@ -1358,6 +1378,7 @@ class ManagementService:
         idempotency_key: str,
         actor: str,
         request_id: str,
+        _enrollment_session_id: uuid.UUID | None = None,
     ) -> DeploymentAssignmentSet:
         if namespace != "apexfabric":
             raise ValueError("catalog deployments must use the apexfabric namespace")
@@ -1382,6 +1403,9 @@ class ManagementService:
                 )
                 if existing is not None:
                     return existing
+                self._block_enrollment_conflicts(
+                    session, idempotent_deployment.id, assignments, _enrollment_session_id
+                )
             entry, deployment, resolved, bundle, _desired_state = self._catalog_deployment_candidate(
                 session,
                 catalog_id=catalog_id,
@@ -1659,6 +1683,708 @@ class ManagementService:
             except Exception as error:
                 results.append({"window_id": window_id, "error": str(error)})
         return results
+
+    # ------------------------------------------------------------------
+    # Enrollment sessions: durable state machine, superseding the bookkeeping
+    # above for the operator-facing workflow. See tvt_edge/enrollment.py for
+    # the state machine constants and the bounded background reconciler that
+    # drives every transition below except start/cancel.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _active_enrollment_session(
+        session: Session, deployment_id: uuid.UUID, *, for_update: bool = False
+    ) -> EnrollmentSession | None:
+        query = select(EnrollmentSession).where(
+            EnrollmentSession.deployment_id == deployment_id,
+            EnrollmentSession.status.in_(ENROLLMENT_ACTIVE_STATUSES),
+        )
+        if for_update:
+            query = query.with_for_update()
+        return session.scalar(query)
+
+    @staticmethod
+    def _block_enrollment_conflicts(
+        session: Session,
+        deployment_id: uuid.UUID,
+        assignments: list[dict[str, Any]],
+        exempt_session_id: uuid.UUID | None,
+    ) -> None:
+        """Reject a generic assignment edit that would reassign a camera an
+        active enrollment session currently owns (apps/config/fps other than
+        the session's own face_enrollment target). Internal calls from the
+        session's own start/restore path pass their session's id in
+        `exempt_session_id` so they are never blocked by themselves; unrelated
+        camera changes in the same payload are left untouched."""
+
+        active = session.scalars(
+            select(EnrollmentSession).where(
+                EnrollmentSession.deployment_id == deployment_id,
+                EnrollmentSession.status.in_(ENROLLMENT_ACTIVE_STATUSES),
+            )
+        ).all()
+        for row in active:
+            if row.id == exempt_session_id:
+                continue
+            camera = session.get(Camera, row.camera_id)
+            if camera is None:
+                continue
+            item = next(
+                (entry for entry in assignments if entry["camera_id"] == camera.camera_key), None
+            )
+            if item is not None and list(item.get("apps", [])) != ["face_enrollment"]:
+                raise ValueError(
+                    f"camera {camera.camera_key!r} is under an active enrollment session"
+                )
+
+    @staticmethod
+    def _as_aware(value: datetime | None, reference: datetime) -> datetime | None:
+        """SQLite drops timezone metadata even for timezone-aware columns;
+        PostgreSQL preserves it. Normalize against `reference`'s tzinfo so
+        session-window arithmetic stays portable between the two (see
+        apply_retention's identical fixup for credential.superseded_at)."""
+
+        if value is not None and value.tzinfo is None and reference.tzinfo is not None:
+            return value.replace(tzinfo=reference.tzinfo)
+        return value
+
+    @staticmethod
+    def _is_revision_applied(
+        session: Session, deployment_id: uuid.UUID, revision: int | None
+    ) -> bool:
+        if revision is None:
+            return False
+        sync = session.get(DeploymentSyncState, deployment_id)
+        if sync is None or sync.state != "applied" or sync.applied_assignment_set_id is None:
+            return False
+        applied_set = session.get(DeploymentAssignmentSet, sync.applied_assignment_set_id)
+        return applied_set is not None and applied_set.desired_revision == revision
+
+    def designate_enrollment_camera(
+        self, *, deployment_key: str, camera_id: str, actor: str, request_id: str
+    ) -> dict[str, Any]:
+        with self.sessions.begin() as session:
+            deployment = self._deployment_for_update(session, deployment_key)
+            if self._active_enrollment_session(session, deployment.id, for_update=True) is not None:
+                raise ValueError("cannot change the enrollment camera while a session is active")
+            camera = self._camera(session, camera_id)
+            _catalog_id, assignments, *_ = self._current_catalog_assignments(session, deployment)
+            target = next((item for item in assignments if item["camera_id"] == camera_id), None)
+            if target is None:
+                raise ValueError(f"camera {camera_id!r} is not assigned to this deployment")
+            if "face_recognition" not in target["apps"]:
+                raise ValueError(f"camera {camera_id!r} does not run face_recognition")
+            designation = session.scalar(
+                select(EnrollmentCameraDesignation).where(
+                    EnrollmentCameraDesignation.deployment_id == deployment.id
+                )
+            )
+            if designation is None:
+                designation = EnrollmentCameraDesignation(
+                    deployment_id=deployment.id, camera_id=camera.id, updated_by=actor
+                )
+                session.add(designation)
+            else:
+                designation.camera_id = camera.id
+                designation.updated_by = actor
+                designation.row_version += 1
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="enrollment.camera.designate",
+                target_type="deployment",
+                target_id=deployment_key,
+                details={"camera_id": camera_id},
+            )
+            return {"deployment_key": deployment_key, "camera_id": camera_id}
+
+    def get_enrollment_designation(self, deployment_key: str) -> dict[str, Any] | None:
+        with self.sessions() as session:
+            deployment = session.scalar(
+                select(SolutionDeployment).where(
+                    SolutionDeployment.deployment_key == deployment_key,
+                    SolutionDeployment.deleted_at.is_(None),
+                )
+            )
+            if deployment is None:
+                return None
+            designation = session.scalar(
+                select(EnrollmentCameraDesignation).where(
+                    EnrollmentCameraDesignation.deployment_id == deployment.id
+                )
+            )
+            if designation is None:
+                return None
+            camera = session.get(Camera, designation.camera_id)
+            return {"deployment_key": deployment_key, "camera_id": camera.camera_key}
+
+    def _apply_enrollment_target(
+        self,
+        *,
+        deployment_key: str,
+        camera_key: str,
+        apps: list[str],
+        config: dict[str, Any],
+        fps: int,
+        idempotency_key: str,
+        session_id: uuid.UUID,
+        actor: str,
+        request_id: str,
+    ) -> DeploymentAssignmentSet:
+        with self.sessions() as session:
+            deployment = session.scalar(
+                select(SolutionDeployment).where(
+                    SolutionDeployment.deployment_key == deployment_key,
+                    SolutionDeployment.deleted_at.is_(None),
+                )
+            )
+            if deployment is None:
+                raise ValueError(f"unknown deployment {deployment_key!r}")
+            catalog_id, assignments, inference_mode, resources, state_size = (
+                self._current_catalog_assignments(session, deployment)
+            )
+        new_assignments = [
+            {**item, "apps": list(apps), "config": copy.deepcopy(config), "fps": fps}
+            if item["camera_id"] == camera_key
+            else item
+            for item in assignments
+        ]
+        preview = self.preview_catalog_deployment(
+            catalog_id=catalog_id,
+            deployment_key=deployment_key,
+            assignments=new_assignments,
+            inference_mode=inference_mode,
+            resources=resources,
+            state_size=state_size,
+            namespace="apexfabric",
+        )
+        return self.commit_catalog_deployment(
+            catalog_id=catalog_id,
+            deployment_key=deployment_key,
+            assignments=new_assignments,
+            inference_mode=inference_mode,
+            resources=resources,
+            state_size=state_size,
+            namespace="apexfabric",
+            preview_bundle_sha256=preview["bundle_sha256"],
+            idempotency_key=idempotency_key,
+            actor=actor,
+            request_id=request_id,
+            _enrollment_session_id=session_id,
+        )
+
+    def start_enrollment_session(
+        self,
+        *,
+        deployment_key: str,
+        actor: str,
+        request_id: str,
+        capture_window_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        window = capture_window_seconds or DEFAULT_CAPTURE_WINDOW_SECONDS
+        if not MIN_CAPTURE_WINDOW_SECONDS <= window <= MAX_CAPTURE_WINDOW_SECONDS:
+            raise ValueError(
+                f"capture_window_seconds must be between {MIN_CAPTURE_WINDOW_SECONDS} "
+                f"and {MAX_CAPTURE_WINDOW_SECONDS}"
+            )
+        with self.sessions.begin() as session:
+            deployment = self._deployment_for_update(session, deployment_key)
+            if self._active_enrollment_session(session, deployment.id, for_update=True) is not None:
+                raise ValueError("an enrollment session is already active for this deployment")
+            designation = session.scalar(
+                select(EnrollmentCameraDesignation).where(
+                    EnrollmentCameraDesignation.deployment_id == deployment.id
+                )
+            )
+            if designation is None:
+                raise ValueError("no enrollment camera has been designated for this deployment")
+            camera = session.get(Camera, designation.camera_id)
+            _catalog_id, assignments, *_ = self._current_catalog_assignments(session, deployment)
+            target = next(
+                (item for item in assignments if item["camera_id"] == camera.camera_key), None
+            )
+            if target is None:
+                raise ValueError(f"camera {camera.camera_key!r} is no longer assigned to this deployment")
+            if target["apps"] == ["face_enrollment"]:
+                raise ValueError(f"camera {camera.camera_key!r} is already in enrollment mode")
+            row = EnrollmentSession(
+                deployment_id=deployment.id,
+                camera_id=camera.id,
+                prior_apps=target["apps"],
+                prior_config=target["config"],
+                prior_fps=target["fps"],
+                capture_window_seconds=window,
+                status="activating",
+                naming_status="not_applicable",
+                actor=actor,
+                request_id=request_id,
+            )
+            session.add(row)
+            session.flush()
+            session_id = row.id
+            camera_key = camera.camera_key
+            fps = target["fps"]
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="enrollment.session.start",
+                target_type="deployment",
+                target_id=deployment_key,
+                details={"camera_id": camera_key},
+            )
+
+        try:
+            assignment_set = self._apply_enrollment_target(
+                deployment_key=deployment_key,
+                camera_key=camera_key,
+                apps=["face_enrollment"],
+                config={},
+                fps=fps,
+                idempotency_key=f"enrollment-activate:{session_id}",
+                session_id=session_id,
+                actor=actor,
+                request_id=request_id,
+            )
+        except Exception:
+            with self.sessions.begin() as session:
+                row = session.get(EnrollmentSession, session_id)
+                if row is not None and row.status == "activating":
+                    row.status = "failed"
+                    row.result_code = "activation_failed"
+                    row.error_code = "ENROLLMENT_ACTIVATION_FAILED"
+                    row.completed_at = utc_now()
+            raise
+
+        with self.sessions.begin() as session:
+            row = session.get(EnrollmentSession, session_id)
+            if row is not None and row.status == "activating":
+                row.activation_assignment_set_id = assignment_set.id
+                row.activation_revision = assignment_set.desired_revision
+        return self._enrollment_session_view_by_id(session_id)
+
+    def cancel_enrollment_session(
+        self, *, deployment_key: str, session_id: str, actor: str, request_id: str
+    ) -> dict[str, Any]:
+        with self.sessions.begin() as session:
+            deployment = self._deployment_for_update(session, deployment_key)
+            row = session.get(EnrollmentSession, uuid.UUID(session_id), with_for_update=True)
+            if row is None or row.deployment_id != deployment.id:
+                raise ValueError(f"unknown enrollment session {session_id!r}")
+            if row.status not in ("activating", "capturing"):
+                # Already restoring/terminal: cancellation is idempotent.
+                return self._enrollment_session_view(session, row)
+            row.status = "restoring"
+            row.result_code = "cancelled"
+            row.restoration_started_at = utc_now()
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="enrollment.session.cancel",
+                target_type="deployment",
+                target_id=deployment_key,
+                details={"session_id": session_id},
+            )
+        # The reconciler's next tick observes restoration_assignment_set_id
+        # is still unset for this 'restoring' session and queues the restore
+        # (see reconcile_enrollment_sessions) -- cancellation does not itself
+        # depend on the browser staying open to finish restoring the camera.
+        return self._enrollment_session_view_by_id(uuid.UUID(session_id))
+
+    def get_enrollment_status(self, deployment_key: str) -> dict[str, Any]:
+        with self.sessions() as session:
+            deployment = session.scalar(
+                select(SolutionDeployment).where(
+                    SolutionDeployment.deployment_key == deployment_key,
+                    SolutionDeployment.deleted_at.is_(None),
+                )
+            )
+            if deployment is None:
+                raise ValueError(f"unknown deployment {deployment_key!r}")
+            designation = session.scalar(
+                select(EnrollmentCameraDesignation).where(
+                    EnrollmentCameraDesignation.deployment_id == deployment.id
+                )
+            )
+            designated_camera = None
+            if designation is not None:
+                camera = session.get(Camera, designation.camera_id)
+                designated_camera = camera.camera_key if camera else None
+            row = session.scalar(
+                select(EnrollmentSession)
+                .where(EnrollmentSession.deployment_id == deployment.id)
+                .order_by(EnrollmentSession.started_at.desc())
+                .limit(1)
+            )
+            result: dict[str, Any] = {
+                "deployment_key": deployment_key,
+                "designated_camera_id": designated_camera,
+                "session": None,
+                "degraded": False,
+            }
+            if row is not None:
+                result["session"] = self._enrollment_session_view(session, row)
+                if row.status in ("activating", "restoring"):
+                    sync = session.get(DeploymentSyncState, deployment.id)
+                    if sync is not None and sync.state == "failed":
+                        result["degraded"] = True
+            return result
+
+    def list_enrollment_sessions(self, deployment_key: str, limit: int = 20) -> list[dict[str, Any]]:
+        limit = max(1, min(limit, 200))
+        with self.sessions() as session:
+            deployment = session.scalar(
+                select(SolutionDeployment).where(
+                    SolutionDeployment.deployment_key == deployment_key,
+                    SolutionDeployment.deleted_at.is_(None),
+                )
+            )
+            if deployment is None:
+                return []
+            rows = session.scalars(
+                select(EnrollmentSession)
+                .where(EnrollmentSession.deployment_id == deployment.id)
+                .order_by(EnrollmentSession.started_at.desc())
+                .limit(limit)
+            ).all()
+            return [self._enrollment_session_view(session, row) for row in rows]
+
+    def _enrollment_session_view(self, session: Session, row: EnrollmentSession) -> dict[str, Any]:
+        deployment = session.get(SolutionDeployment, row.deployment_id)
+        camera = session.get(Camera, row.camera_id)
+        return {
+            "session_id": str(row.id),
+            "deployment_key": deployment.deployment_key if deployment else None,
+            "camera_id": camera.camera_key if camera else None,
+            "status": row.status,
+            "naming_status": row.naming_status,
+            "capture_result": row.capture_result,
+            "person_id": row.person_id,
+            "result_code": row.result_code,
+            "error_code": row.error_code,
+            "capture_window_seconds": row.capture_window_seconds,
+            "started_at": row.started_at.isoformat(),
+            "activated_at": row.activated_at.isoformat() if row.activated_at else None,
+            "capture_deadline_at": row.capture_deadline_at.isoformat() if row.capture_deadline_at else None,
+            "captured_at": row.captured_at.isoformat() if row.captured_at else None,
+            "restoration_started_at": (
+                row.restoration_started_at.isoformat() if row.restoration_started_at else None
+            ),
+            "restored_at": row.restored_at.isoformat() if row.restored_at else None,
+            "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        }
+
+    def _enrollment_session_view_by_id(self, session_id: uuid.UUID) -> dict[str, Any]:
+        with self.sessions() as session:
+            row = session.get(EnrollmentSession, session_id)
+            if row is None:
+                raise ValueError("enrollment session disappeared")
+            return self._enrollment_session_view(session, row)
+
+    def list_people_awaiting_names(self, deployment_key: str | None = None) -> list[dict[str, Any]]:
+        with self.sessions() as session:
+            rows = session.scalars(
+                select(EnrollmentSession)
+                .where(
+                    EnrollmentSession.capture_result == "created",
+                    EnrollmentSession.naming_status == "pending_name",
+                )
+                .order_by(EnrollmentSession.captured_at.desc())
+            ).all()
+            results: list[dict[str, Any]] = []
+            for row in rows:
+                deployment = session.get(SolutionDeployment, row.deployment_id)
+                if deployment is None:
+                    continue
+                if deployment_key and deployment.deployment_key != deployment_key:
+                    continue
+                camera = session.get(Camera, row.camera_id)
+                results.append(
+                    {
+                        "session_id": str(row.id),
+                        "person_id": row.person_id,
+                        "deployment_key": deployment.deployment_key,
+                        "camera_id": camera.camera_key if camera else None,
+                        "captured_at": row.captured_at.isoformat() if row.captured_at else None,
+                    }
+                )
+            return results
+
+    def set_person_display_name(
+        self, *, person_id: str, display_name: str, apex: Any, actor: str, request_id: str
+    ) -> dict[str, Any]:
+        name = display_name.strip()
+        if not name or len(name) > 160:
+            raise ValueError("display_name is required (maximum 160 characters)")
+        with self.sessions() as session:
+            row = session.scalar(
+                select(EnrollmentSession).where(
+                    EnrollmentSession.person_id == person_id,
+                    EnrollmentSession.capture_result == "created",
+                )
+            )
+            if row is None:
+                raise ValueError("unknown person_id")
+            already_named = row.naming_status == "named"
+        if not already_named:
+            apex.rename_person(person_id, name)
+        with self.sessions.begin() as session:
+            row = session.scalar(
+                select(EnrollmentSession)
+                .where(
+                    EnrollmentSession.person_id == person_id,
+                    EnrollmentSession.capture_result == "created",
+                )
+                .with_for_update()
+            )
+            if row is not None and row.naming_status != "named":
+                row.naming_status = "named"
+                self._audit(
+                    session,
+                    actor=actor,
+                    request_id=request_id,
+                    action="enrollment.person.name",
+                    target_type="person",
+                    target_id=person_id,
+                    details={},
+                )
+        return {"person_id": person_id, "naming_status": "named"}
+
+    def reconcile_enrollment_sessions(
+        self, apex: Any, *, now: datetime | None = None
+    ) -> list[dict[str, Any]]:
+        """Advance every non-terminal enrollment session by one step. Called
+        from tvt_edge.enrollment.EnrollmentReconciler on a short interval so
+        interactive enrollment windows never depend on the once-daily
+        retention timer. Returns a list of
+        {"session_id", "transition", "error_code"} for the caller's
+        observability; this method itself never logs or increments metrics."""
+
+        current_time = now or utc_now()
+        with self.sessions() as session:
+            ids = list(
+                session.scalars(
+                    select(EnrollmentSession.id).where(
+                        EnrollmentSession.status.in_(ENROLLMENT_ACTIVE_STATUSES)
+                    )
+                ).all()
+            )
+        results: list[dict[str, Any]] = []
+        for session_id in ids:
+            try:
+                outcome = self._reconcile_one_enrollment_session(session_id, apex, current_time)
+            except Exception as error:
+                outcome = {
+                    "session_id": str(session_id),
+                    "transition": None,
+                    "error_code": "INTERNAL_ERROR",
+                    "detail": redact_text(str(error)),
+                }
+            if outcome is not None:
+                results.append(outcome)
+        return results
+
+    def _reconcile_one_enrollment_session(
+        self, session_id: uuid.UUID, apex: Any, current_time: datetime
+    ) -> dict[str, Any] | None:
+        with self.sessions.begin() as session:
+            row = session.get(EnrollmentSession, session_id, with_for_update=True)
+            if row is None or row.status not in ENROLLMENT_ACTIVE_STATUSES:
+                return None
+            deployment = session.get(SolutionDeployment, row.deployment_id)
+            camera = session.get(Camera, row.camera_id)
+            deployment_key = deployment.deployment_key
+            camera_key = camera.camera_key
+            status = row.status
+            transition: str | None = None
+            error_code: str | None = None
+            pending: tuple[str, tuple[Any, ...]] | None = None
+
+            if status == "activating":
+                if row.activation_revision is not None and self._is_revision_applied(
+                    session, deployment.id, row.activation_revision
+                ):
+                    row.status = "capturing"
+                    row.activated_at = current_time
+                    row.capture_deadline_at = current_time + timedelta(
+                        seconds=row.capture_window_seconds
+                    )
+                    transition = "capturing"
+                elif current_time - self._as_aware(row.started_at, current_time) > timedelta(
+                    seconds=DEFAULT_ACTIVATION_TIMEOUT_SECONDS
+                ):
+                    row.status = "restoring"
+                    row.result_code = "activation_failed"
+                    row.error_code = error_code = "ENROLLMENT_ACTIVATION_FAILED"
+                    row.restoration_started_at = current_time
+                    transition = "restoring"
+                    pending = (
+                        "restore",
+                        (row.prior_apps, row.prior_config, row.prior_fps, row.actor, row.request_id),
+                    )
+            elif status == "capturing":
+                capture_deadline_at = self._as_aware(row.capture_deadline_at, current_time)
+                if capture_deadline_at is not None and current_time >= capture_deadline_at:
+                    row.status = "restoring"
+                    row.result_code = "timed_out"
+                    row.error_code = error_code = "ENROLLMENT_TIMEOUT"
+                    row.restoration_started_at = current_time
+                    transition = "restoring"
+                    pending = (
+                        "restore",
+                        (row.prior_apps, row.prior_config, row.prior_fps, row.actor, row.request_id),
+                    )
+                else:
+                    pending = (
+                        "poll",
+                        (
+                            self._as_aware(row.activated_at, current_time),
+                            capture_deadline_at,
+                            row.actor,
+                            row.request_id,
+                        ),
+                    )
+            elif status == "restoring":
+                if row.restoration_assignment_set_id is not None:
+                    if self._is_revision_applied(session, deployment.id, row.restoration_revision):
+                        if row.result_code is None:
+                            row.result_code = "ok"
+                        row.status = RESULT_CODE_TERMINAL_STATUS[row.result_code]
+                        row.restored_at = current_time
+                        row.completed_at = current_time
+                        transition = row.status
+                else:
+                    pending = (
+                        "restore",
+                        (row.prior_apps, row.prior_config, row.prior_fps, row.actor, row.request_id),
+                    )
+
+        if pending is not None:
+            kind, payload = pending
+            if kind == "restore":
+                apps, config, fps, actor, request_id = payload
+                try:
+                    assignment_set = self._apply_enrollment_target(
+                        deployment_key=deployment_key,
+                        camera_key=camera_key,
+                        apps=apps,
+                        config=config,
+                        fps=fps,
+                        idempotency_key=f"enrollment-restore:{session_id}",
+                        session_id=session_id,
+                        actor=actor,
+                        request_id=request_id,
+                    )
+                except Exception:
+                    # K3s/queue failure while queuing the restore commit: the
+                    # session stays 'restoring' (restoration_assignment_set_id
+                    # unset) and the next tick retries -- surfaced as
+                    # 'degraded' by get_enrollment_status in the meantime.
+                    return {
+                        "session_id": str(session_id),
+                        "transition": None,
+                        "error_code": "ENROLLMENT_RESTORE_DEGRADED",
+                    }
+                with self.sessions.begin() as session:
+                    row = session.get(EnrollmentSession, session_id)
+                    if row is not None and row.status == "restoring":
+                        row.restoration_assignment_set_id = assignment_set.id
+                        row.restoration_revision = assignment_set.desired_revision
+                if transition is None:
+                    transition = "restoring"
+            elif kind == "poll":
+                activated_at, deadline, actor, request_id = payload
+                capture_outcome = self._poll_enrollment_capture(
+                    session_id, apex, deployment_key, camera_key, activated_at, deadline, actor, request_id
+                )
+                if capture_outcome is not None:
+                    return capture_outcome
+
+        if transition is None:
+            return None
+        return {"session_id": str(session_id), "transition": transition, "error_code": error_code}
+
+    def _poll_enrollment_capture(
+        self,
+        session_id: uuid.UUID,
+        apex: Any,
+        deployment_key: str,
+        camera_key: str,
+        activated_at: datetime,
+        deadline: datetime,
+        actor: str,
+        request_id: str,
+    ) -> dict[str, Any] | None:
+        try:
+            events = apex.recent_events(deployment_key)
+        except Exception:
+            return None  # apex unreachable this tick; the session stays 'capturing'
+        candidate = select_first_capture(
+            events,
+            deployment_key=deployment_key,
+            camera_key=camera_key,
+            window_start=activated_at,
+            window_end=deadline,
+            minimum_sharpness=self.enrollment_minimum_sharpness,
+        )
+        if candidate is None:
+            if has_rejected_capture_attempt(events, deployment_key=deployment_key, camera_key=camera_key):
+                return {
+                    "session_id": str(session_id),
+                    "transition": None,
+                    "error_code": "ENROLLMENT_CAPTURE_REJECTED",
+                }
+            return None
+        try:
+            persons = apex.list_persons()
+        except Exception:
+            return None
+        created_person = next(
+            (item for item in persons if item.get("enrollment_source_event_id") == candidate.event_id),
+            None,
+        )
+        capture_result = "created" if created_person else "duplicate"
+        person_id = created_person.get("person_id") if created_person else None
+
+        with self.sessions.begin() as session:
+            row = session.get(EnrollmentSession, session_id, with_for_update=True)
+            if row is None or row.status != "capturing":
+                return None
+            row.accepted_event_id = candidate.event_id
+            row.capture_result = capture_result
+            row.person_id = person_id
+            row.naming_status = "pending_name" if capture_result == "created" else "not_applicable"
+            row.captured_at = utc_now()
+            row.status = "restoring"
+            row.restoration_started_at = utc_now()
+            prior_apps, prior_config, prior_fps = row.prior_apps, row.prior_config, row.prior_fps
+
+        try:
+            assignment_set = self._apply_enrollment_target(
+                deployment_key=deployment_key,
+                camera_key=camera_key,
+                apps=prior_apps,
+                config=prior_config,
+                fps=prior_fps,
+                idempotency_key=f"enrollment-restore:{session_id}",
+                session_id=session_id,
+                actor=actor,
+                request_id=request_id,
+            )
+        except Exception:
+            return {
+                "session_id": str(session_id),
+                "transition": "restoring",
+                "error_code": "ENROLLMENT_RESTORE_DEGRADED",
+            }
+        with self.sessions.begin() as session:
+            row = session.get(EnrollmentSession, session_id)
+            if row is not None and row.status == "restoring":
+                row.restoration_assignment_set_id = assignment_set.id
+                row.restoration_revision = assignment_set.desired_revision
+        return {"session_id": str(session_id), "transition": "restoring", "error_code": None}
 
     @staticmethod
     def _store_bundle_revision(
@@ -2226,6 +2952,14 @@ class ManagementService:
                 ~ManagementOperation.id.in_(
                     select(AuditEvent.operation_id).where(AuditEvent.operation_id.is_not(None))
                 ),
+            ).delete(synchronize_session=False)
+            # A session awaiting a name is never pruned (that would silently
+            # drop it from list_people_awaiting_names -- the operator would
+            # never learn the capture happened at all).
+            counts["enrollment_sessions"] = session.query(EnrollmentSession).filter(
+                EnrollmentSession.status.in_(ENROLLMENT_TERMINAL_STATUSES),
+                EnrollmentSession.naming_status != "pending_name",
+                EnrollmentSession.started_at < cutoffs["audit"],
             ).delete(synchronize_session=False)
             credentials = session.scalars(
                 select(CameraCredentialVersion).where(

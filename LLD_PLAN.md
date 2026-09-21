@@ -702,6 +702,106 @@ privacy, backup/restore, schema migration, and deletion requirements are
 approved, those workloads are integration stubs rather than restart-safe
 product features.
 
+### 12.4a Face enrollment (session state machine, identity ownership, and a known upstream gap)
+
+Face enrollment lets an operator temporarily switch one already-assigned
+`face_recognition` camera to `apps: ["face_enrollment"]` exclusively, accept
+exactly one `enrollment_capture_event`, and restore the camera's prior
+apps/config/fps -- server-side, independent of the browser. It follows the
+same narrow-exception pattern as §12.5: TVT management PostgreSQL owns
+designation, the durable session state machine, desired revisions, and
+audit; the existing Apex identity/business-data plane
+(`apexfabric-control`'s `TelemetryStore`/`PersonStore`, sqlite-vec-backed,
+frozen per §6 below) continues to own embeddings and person records exactly
+as before. PostgreSQL never receives a vector, a face image, a raw
+`enrollment_capture_event` body, or a person's display name.
+
+**State machine** (`tvt_edge/db/models.py::EnrollmentSession`,
+`tvt_edge/enrollment.py`, `ManagementService.reconcile_enrollment_sessions`):
+
+```text
+activating -> capturing -> restoring -> completed
+                         -> timed_out   (via restoring)
+                         -> cancelled   (via restoring)
+                         -> failed      (via restoring, activation only)
+```
+
+`naming_status` (`not_applicable -> pending_name -> named`) is independent:
+a session reaches its terminal status once the camera is confirmed restored,
+even if the captured person still needs a display name.
+
+**Reconciliation cadence.** A bounded background task inside the management
+API process (`tvt_edge/api/app.py::create_app`'s
+`enrollment_reconcile_interval_seconds`, default 2s, mirroring the
+lifespan-task pattern `tvt_edge/alerting/receiver.py`'s alert dispatcher
+already uses for `OutboxWorker`) drives every transition except operator
+start/cancel: activation-applied detection, capture polling, timeout,
+restoration-applied detection, and resuming a non-terminal session after a
+process/host restart. This satisfies the "not the daily retention timer"
+requirement without adding a new metrics port or systemd unit.
+
+**Capture correlation without touching embeddings.** The management plane
+polls apexfabric-control's existing, unmodified
+`GET /api/telemetry/events?deployment_id=` (already used by the live-feed
+panel) and reads only the outer envelope's `event_id`/`event_type`/
+`application`/`camera_id`/`occurred_at`, plus the vendor's optional
+non-sensitive `payload.payload.quality` block for an operator-configured
+quality floor -- it never reads or forwards `payload.payload.embeddings`.
+Outcome (`created` vs. `duplicate`) is derived by cross-referencing the
+accepted event's ID against `GET /api/persons` (also unmodified,
+already-existing), which already carries `enrollment_source_event_id` per
+person; no new apexfabric-control endpoint was added. Naming an
+auto-enrolled person calls the existing, unmodified
+`POST /api/persons/rename`.
+
+**Known, deliberately unpatched upstream gap.** Person creation semantics
+live entirely in `apexfabric/control_plane/identity.py::resolve_identity`
+(pinned copy per §6/AGENTS.md §1 -- "never edit to fix a TVT problem"),
+which today:
+
+1. Auto-creates a new `auto_enrolled` person for **any** unmatched
+   `face_detection_event`, not only an authorized `enrollment_capture_event`
+   during an active session (`tests/test_identity.py::
+   test_unmatched_face_auto_enrolls_and_a_near_duplicate_matches` already
+   encodes this as current behavior). TVT enrollment sessions correctly gate
+   *their own* person creation (only an accepted `enrollment_capture_event`
+   inside a `capturing` session is ever treated as a capture), but cannot
+   prevent identity.py from continuing to auto-enroll people from ordinary
+   face-recognition traffic outside any session -- that requires an
+   event-type/authorization check inside `resolve_identity` itself.
+2. Appends a new embedding row on every matched sighting, not only on
+   creation -- an unbounded per-sighting vector-table growth
+   `MONITORING.md` §18-style retention does not currently address.
+
+The correct upstream (`k3s-prototype`) fix is to change
+`resolve_identity` so that (a) `face_detection_event` only ever matches, (b)
+only `enrollment_capture_event` may create a person, and ideally (c) an
+optional authorization hook lets a management plane gate that creation on
+an active, revision-confirmed session, plus (d) bound repeat-sighting vector
+inserts. No TVT-side workaround was attempted that would duplicate this
+logic or the vectors it protects into PostgreSQL; this repository's
+TVT-authored contribution stops at the deployment/session boundary and
+leaves `apexfabric/control_plane/identity.py` and its tests unmodified per
+AGENTS.md §1/§6.
+
+**Retention, deletion, backup/restore, and filesystem protection for the
+identity/vector store.** `apexfabric-control`'s `TelemetryStore.
+enforce_retention()` prunes the `events`/`snapshots` tables on age, count,
+and size, but does **not** prune `persons`, `person_face_embedding_meta`, or
+the `person_face_embeddings`/`person_body_embeddings` sqlite-vec virtual
+tables -- those accumulate for the life of the host today (same frozen-file
+boundary as above; no TVT-side deletion job may reach into that database).
+Filesystem protection already exists via `deploy/systemd/
+apexfabric-control.service`'s hardening (`StateDirectoryMode=0750`,
+`ProtectSystem=strict`, dedicated `tvt-edge:tvt-edge` ownership of
+`/var/lib/apexfabric/control`). Per HLD.md §11, faces/embeddings/attendance
+data are explicitly **out of the V1 backup set** already -- this holds for
+enrollment-created persons too. Until an upstream identity.py retention
+change lands, an operator who needs to remove a specific enrolled person
+(e.g. a mis-capture) has no bounded deletion path from either UI; this is a
+known V1 limitation, not something enrollment's TVT-side code silently
+works around.
+
 ### 12.5 Implemented daily vehicle-traffic and attendance reports
 
 The daily vehicle-traffic and attendance reports are the first narrow

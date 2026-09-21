@@ -4,6 +4,7 @@ import {
   ConfirmButton, DataTable, EmptyState, Field, FormActions, Icon, JsonView, MetricCard,
   Modal, PageHeader, Panel, SearchBox, StatusPill, cx, submitForm,
 } from "./components";
+import { EnrollmentAssignmentControl, PendingPeoplePanel } from "./enrollment";
 import { CameraGeometryEditor } from "./geometry";
 import { ReportsPage } from "./reports";
 import type {
@@ -123,38 +124,6 @@ function LiveFeedPanel({ cameraId }: { cameraId: string }) {
   </>;
 }
 
-interface EnrollmentWindowView { window_id: string; deployment_key: string; camera_id: string; started_at: string; expires_at: string | null; ended_at: string | null; status: string }
-
-function EnrollmentStartModal({ cameraId, deploymentId, close, mutate }: { cameraId: string; deploymentId: string; close: () => void; mutate: Mutate }) {
-  return <Modal title="Use as enrollment camera" description="This camera will exclusively run face enrollment until reverted. Attendance tracking through this camera's gate pauses for the duration — there is no dedicated enrollment camera, so any face-recognition camera can be borrowed temporarily." onClose={close}>
-    <form className="form-grid" onSubmit={(event) => submitForm(event, async (form) => {
-      const minutes = form.get("duration_minutes");
-      const duration_seconds = minutes ? Number(minutes) * 60 : null;
-      if (await mutate(send(`/api/v1/deployments/${encodeURIComponent(deploymentId)}/enrollment/start`, "POST", { camera_id: cameraId, duration_seconds }), "Camera switched to enrollment mode")) close();
-    })}>
-      <Field label="Auto-revert after (minutes)" wide hint="Leave blank to revert only when you choose to">
-        <input name="duration_minutes" type="number" min="1" placeholder="15" />
-      </Field>
-      <FormActions><button type="button" className="button secondary" onClick={close}>Cancel</button><button className="button" type="submit">Start enrollment</button></FormActions>
-    </form>
-  </Modal>;
-}
-
-function EnrollmentControl({ cameraId, deploymentId, apps, mutate }: { cameraId: string; deploymentId: string; apps: string[]; mutate: Mutate }) {
-  const [windows, setWindows] = useState<EnrollmentWindowView[] | null>(null);
-  const [showStart, setShowStart] = useState(false);
-  const load = useCallback(async () => {
-    setWindows(await safeGet<EnrollmentWindowView[]>(`/api/v1/deployments/${encodeURIComponent(deploymentId)}/enrollment-windows`, []));
-  }, [deploymentId]);
-  useEffect(() => { void load(); }, [load]);
-  const active = windows?.find((item) => item.camera_id === cameraId && item.status === "active");
-  const combinedMutate: Mutate = async (promise, message) => { const succeeded = await mutate(promise, message); if (succeeded) await load(); return succeeded; };
-  if (active) {
-    return <div className="button-row"><StatusPill value="degraded" label={active.expires_at ? `Enrollment mode · reverts ${fmt(active.expires_at)}` : "Enrollment mode"} /><button className="button small secondary" onClick={() => void combinedMutate(send(`/api/v1/deployments/${encodeURIComponent(deploymentId)}/enrollment/stop`, "POST", { window_id: active.window_id }), "Camera reverted to its normal apps")}>Revert now</button></div>;
-  }
-  if (!apps.includes("face_recognition")) return null;
-  return <><button className="button small secondary" onClick={() => setShowStart(true)}>Use as enrollment camera</button>{showStart && <EnrollmentStartModal cameraId={cameraId} deploymentId={deploymentId} close={() => setShowStart(false)} mutate={combinedMutate} />}</>;
-}
 
 function CameraDetail({ cameraId, close, mutate }: { cameraId: string; close: () => void; mutate: Mutate }) {
   const [camera, setCamera] = useState<Camera | null>(null);
@@ -171,7 +140,7 @@ function CameraDetail({ cameraId, close, mutate }: { cameraId: string; close: ()
     <div className="drawer-body">
       {tab === "live" && <LiveFeedPanel cameraId={camera.camera_id} />}
       {tab === "geometry" && <CameraGeometryEditor cameraId={camera.camera_id} mutate={action} />}
-      {tab === "overview" && <><div className="detail-grid"><div><span>Enabled</span><strong>{camera.enabled ? "Yes" : "No"}</strong></div><div><span>Stream</span><strong>{camera.configured ? "Configured" : "Not configured"}</strong></div><div><span>Credentials</span><strong>{camera.credentials_configured ? "Configured" : "Not configured"}</strong></div></div><div className="button-row"><button className="button secondary" onClick={() => void action(send(`/api/v1/cameras/${encodeURIComponent(camera.camera_id)}/enabled`, "PATCH", { enabled: !camera.enabled }), camera.enabled ? "Camera disabled" : "Camera enabled")}>{camera.enabled ? "Disable" : "Enable"}</button></div><h3>Identifiers</h3><div className="tag-list">{camera.identifiers.map((item) => <span key={`${item.kind}-${item.value}`}>{item.kind}: {item.value}</span>)}{!camera.identifiers.length && <span>No strong identifiers</span>}</div><h3>Assignments</h3>{camera.assignments?.length ? camera.assignments.map((item) => <div className="line-item" key={item.deployment_id}><strong>{item.deployment_id}</strong><span>{item.apps.join(", ")} · {item.fps} FPS</span><EnrollmentControl cameraId={camera.camera_id} deploymentId={item.deployment_id} apps={item.apps} mutate={action} /></div>) : <p className="muted">No active assignments.</p>}</>}
+      {tab === "overview" && <><div className="detail-grid"><div><span>Enabled</span><strong>{camera.enabled ? "Yes" : "No"}</strong></div><div><span>Stream</span><strong>{camera.configured ? "Configured" : "Not configured"}</strong></div><div><span>Credentials</span><strong>{camera.credentials_configured ? "Configured" : "Not configured"}</strong></div></div><div className="button-row"><button className="button secondary" onClick={() => void action(send(`/api/v1/cameras/${encodeURIComponent(camera.camera_id)}/enabled`, "PATCH", { enabled: !camera.enabled }), camera.enabled ? "Camera disabled" : "Camera enabled")}>{camera.enabled ? "Disable" : "Enable"}</button></div><h3>Identifiers</h3><div className="tag-list">{camera.identifiers.map((item) => <span key={`${item.kind}-${item.value}`}>{item.kind}: {item.value}</span>)}{!camera.identifiers.length && <span>No strong identifiers</span>}</div><h3>Assignments</h3>{camera.assignments?.length ? camera.assignments.map((item) => <div className="line-item" key={item.deployment_id}><strong>{item.deployment_id}</strong><span>{item.apps.join(", ")} · {item.fps} FPS</span><EnrollmentAssignmentControl cameraId={camera.camera_id} deploymentId={item.deployment_id} apps={item.apps} mutate={action} /></div>) : <p className="muted">No active assignments.</p>}</>}
       {tab === "stream" && <form className="form-grid" onSubmit={(event) => submitForm(event, async (form) => { await action(send(`/api/v1/cameras/${encodeURIComponent(camera.camera_id)}/stream`, "PUT", { scheme: form.get("scheme"), host: form.get("host"), port: Number(form.get("port")), path: form.get("path"), profile_token: form.get("profile_token"), transport: form.get("transport"), codec: form.get("codec") || null, width: form.get("width") ? Number(form.get("width")) : null, height: form.get("height") ? Number(form.get("height")) : null, fps: form.get("fps") ? Number(form.get("fps")) : null }), "Stream configuration saved"); })}><Field label="Scheme"><select name="scheme" defaultValue={camera.selected_profile?.scheme || "rtsp"}><option>rtsp</option><option>rtsps</option></select></Field><Field label="Transport"><select name="transport" defaultValue={camera.selected_profile?.transport || "tcp"}><option>tcp</option><option>udp</option></select></Field><Field label="Host" wide><input name="host" defaultValue={camera.selected_profile?.host || ""} placeholder="192.168.20.11" required /></Field><Field label="Port"><input name="port" type="number" defaultValue={camera.selected_profile?.port || 554} required /></Field><Field label="Profile token"><input name="profile_token" defaultValue={camera.selected_profile?.profile_token || "main"} required /></Field><Field label="Path" wide><input name="path" defaultValue={camera.selected_profile?.path || "/live/main"} required /></Field><Field label="Codec"><input name="codec" defaultValue={camera.selected_profile?.codec || ""} placeholder="h264" /></Field><Field label="FPS"><input name="fps" type="number" step="0.1" defaultValue={camera.selected_profile?.fps || ""} /></Field><Field label="Width"><input name="width" type="number" defaultValue={camera.selected_profile?.width || ""} /></Field><Field label="Height"><input name="height" type="number" defaultValue={camera.selected_profile?.height || ""} /></Field><FormActions><button className="button" type="submit">Save stream</button></FormActions></form>}
       {tab === "credentials" && <><div className="security-note"><Icon name="eye" /><span>Credentials are write-only. Existing values are never returned to this browser.</span></div><form className="form-grid" autoComplete="off" onSubmit={(event) => { const formElement = event.currentTarget; submitForm(event, async (form) => { if (await action(send(`/api/v1/cameras/${encodeURIComponent(camera.camera_id)}/credentials`, "PUT", { username: form.get("username") || null, password: form.get("password") || null, query: {} }), "Credentials replaced")) formElement.reset(); }); }}><Field label="Username" wide><input name="username" autoComplete="off" /></Field><Field label="Password" wide><input name="password" type="password" autoComplete="new-password" /></Field><FormActions><button className="button" type="submit">Replace credentials</button>{camera.credentials_configured && <ConfirmButton message="Permanently destroy the stored camera credentials?" onConfirm={() => { void action(send(`/api/v1/cameras/${encodeURIComponent(camera.camera_id)}/credentials`, "DELETE"), "Credentials cleared"); }}>Clear credentials</ConfirmButton>}</FormActions></form></>}
     </div>
@@ -182,6 +151,7 @@ function CamerasPage({ data, mutate }: { data: Snapshot; mutate: Mutate }) {
   const [query, setQuery] = useState(""); const [create, setCreate] = useState(false); const [selected, setSelected] = useState<string | null>(null);
   const filtered = data.cameras.filter((camera) => `${camera.camera_id} ${camera.friendly_name} ${camera.manufacturer} ${camera.model}`.toLowerCase().includes(query.toLowerCase()));
   return <><PageHeader eyebrow="Camera management" title="Cameras" description="Onboard, configure, assign, and monitor every physical camera at this site." actions={<button className="button" onClick={() => setCreate(true)}><Icon name="plus" /> Add camera</button>} />
+    <PendingPeoplePanel mutate={mutate} />
     <div className="toolbar"><SearchBox value={query} onChange={setQuery} placeholder="Search cameras" /><div className="filter-summary"><StatusPill value="healthy" label={`${data.cameras.filter((item) => item.enabled).length} enabled`} /><StatusPill value="unconfigured" label={`${data.cameras.filter((item) => !item.configured).length} unconfigured`} /></div></div>
     <Panel className="flush">{filtered.length ? <DataTable headers={["Camera", "Status", "Stream", "Credentials", ""]}>{filtered.map((camera) => <tr key={camera.camera_id}><td><button className="primary-cell" onClick={() => setSelected(camera.camera_id)}><span className="camera-glyph"><Icon name="camera" /></span><span><strong>{camera.friendly_name}</strong><small>{camera.camera_id} · {[camera.manufacturer, camera.model].filter(Boolean).join(" ") || "Unknown model"}</small></span></button></td><td><StatusPill {...cameraStatus(camera)} /></td><td><strong>{camera.selected_profile?.codec?.toUpperCase() || (camera.selected_profile_id ? "Configured" : "Not configured")}</strong><small className="table-sub">{camera.selected_profile?.width ? `${camera.selected_profile.width}×${camera.selected_profile.height}` : "—"}</small></td><td>{camera.credentials_configured ? <span className="check-label"><Icon name="check" size={15} /> Configured</span> : <span className="muted">Not configured</span>}</td><td><button className="icon-button" onClick={() => setSelected(camera.camera_id)}><Icon name="arrow" /></button></td></tr>)}</DataTable> : <EmptyState icon="camera" title="No matching cameras" description={data.cameras.length ? "Try a different search." : "Add a camera manually."} />}</Panel>
     {create && <CameraCreateModal close={() => setCreate(false)} mutate={mutate} />}{selected && <CameraDetail cameraId={selected} close={() => setSelected(null)} mutate={mutate} />}
@@ -202,7 +172,10 @@ function CatalogDeploymentModal({ deployment, solutions, cameras, close, mutate 
   const [error, setError] = useState<string | null>(null);
   const selectedCatalog = available.find((item) => item.catalog_id === catalogId);
   const catalogCamera = (selectedCatalog?.contract as { ui?: { camera?: { defaultApp?: unknown; apps?: Record<string, unknown> } } } | undefined)?.ui?.camera;
-  const choices = catalogCamera?.apps && typeof catalogCamera.apps === "object" ? Object.keys(catalogCamera.apps) : ["anpr", "vehicle_counting", "pedestrian_counting", "wrong_way", "illegal_parking"];
+  // face_enrollment is a temporary operational mode the operator triggers
+  // from the camera drawer's Enrollment control, never a co-selectable
+  // deployment app -- see docs/contracts/tvt-mills-v1/README.md.
+  const choices = (catalogCamera?.apps && typeof catalogCamera.apps === "object" ? Object.keys(catalogCamera.apps) : ["anpr", "vehicle_counting", "pedestrian_counting", "wrong_way", "illegal_parking"]).filter((app) => app !== "face_enrollment");
   const defaultApp = typeof catalogCamera?.defaultApp === "string" && choices.includes(catalogCamera.defaultApp) ? catalogCamera.defaultApp : choices[0];
   const buildPayload = () => ({
     catalog_id: catalogId, deployment_id: deploymentId, namespace: "apexfabric", inference_mode: inferenceMode,

@@ -225,3 +225,51 @@ export interface TelemetryResponse {
   kubernetes?: Record<string, unknown>;
   error?: string;
 }
+
+export type EnrollmentSessionStatus =
+  | "activating" | "capturing" | "restoring" | "completed" | "timed_out" | "cancelled" | "failed";
+export type EnrollmentNamingStatus = "not_applicable" | "pending_name" | "named";
+export type EnrollmentCaptureResult = "created" | "duplicate" | null;
+
+// Never carries an embedding, a display name, a snapshot URL, or a raw
+// event body -- see AGENTS.md security invariants and
+// ManagementService._enrollment_session_view.
+export interface EnrollmentSessionView {
+  session_id: string;
+  deployment_key: string;
+  camera_id: string;
+  status: EnrollmentSessionStatus;
+  naming_status: EnrollmentNamingStatus;
+  capture_result: EnrollmentCaptureResult;
+  person_id: string | null;
+  result_code: string | null;
+  error_code: string | null;
+  capture_window_seconds: number;
+  started_at: string;
+  activated_at: string | null;
+  capture_deadline_at: string | null;
+  captured_at: string | null;
+  restoration_started_at: string | null;
+  restored_at: string | null;
+  completed_at: string | null;
+}
+
+export interface EnrollmentStatusResponse {
+  deployment_key: string;
+  designated_camera_id: string | null;
+  session: EnrollmentSessionView | null;
+  degraded: boolean;
+}
+
+export interface EnrollmentCameraResponse {
+  deployment_key: string;
+  camera_id: string | null;
+}
+
+export interface PendingPerson {
+  session_id: string;
+  person_id: string;
+  deployment_key: string;
+  camera_id: string | null;
+  captured_at: string | null;
+}

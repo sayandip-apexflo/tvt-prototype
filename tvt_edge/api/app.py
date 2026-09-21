@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -19,6 +21,7 @@ from tvt_edge import __version__
 from tvt_edge.alerting import AlertingService
 from tvt_edge.apex_client import ApexClient, ApexUnavailableError
 from tvt_edge.cluster import ClusterStatusReader
+from tvt_edge.enrollment import EnrollmentReconciler
 from tvt_edge.observability import (
     EdgeMetrics,
     WatchdogMetricsCollector,
@@ -97,6 +100,18 @@ class EnrollmentStartInput(StrictModel):
 
 class EnrollmentStopInput(StrictModel):
     window_id: str
+
+
+class EnrollmentCameraDesignationInput(StrictModel):
+    camera_id: str
+
+
+class EnrollmentSessionStartInput(StrictModel):
+    capture_window_seconds: int | None = None
+
+
+class PersonNameInput(StrictModel):
+    display_name: str
 
 
 class CameraIdentifierInput(StrictModel):
@@ -192,14 +207,17 @@ def create_app(
     kubectl: Kubectl | None = None,
     watchdog_state_path: Path = STATE_PATH,
     apex_url: str = "http://127.0.0.1:8088",
+    enrollment_reconcile_interval_seconds: float | None = None,
 ) -> FastAPI:
-    app = FastAPI(
-        title="TVT edge management",
-        version="1",
-        docs_url=None,
-        redoc_url=None,
-        openapi_url=None,
-    )
+    """`enrollment_reconcile_interval_seconds` starts a bounded background
+    task (tvt_edge.enrollment.EnrollmentReconciler) inside this process's
+    event loop that advances non-terminal enrollment sessions -- see
+    ManagementService.reconcile_enrollment_sessions. It defaults to disabled
+    (None) so importing/constructing this app in tests never starts a real
+    background loop; tvt_edge/cli.py's `api` command is the only caller that
+    passes a positive interval in production. Mirrors the worker lifespan
+    task tvt_edge/alerting/receiver.py's create_alert_app already uses."""
+
     service = ManagementService(sessions, keyring)
     alerting = AlertingService(sessions)
     apex = ApexClient(apex_url)
@@ -207,6 +225,55 @@ def create_app(
     metrics = EdgeMetrics("edge-management")
     metrics.set_build(__version__)
     watchdog = WatchdogStatusReader(watchdog_state_path)
+    enrollment_logger = get_logger("tvt_edge.enrollment")
+    reconciler = (
+        EnrollmentReconciler(
+            service,
+            apex,
+            metrics=metrics,
+            logger=enrollment_logger,
+            interval_seconds=enrollment_reconcile_interval_seconds,
+        )
+        if enrollment_reconcile_interval_seconds and enrollment_reconcile_interval_seconds > 0
+        else None
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        task: asyncio.Task[None] | None = None
+        if reconciler is not None:
+
+            async def run_reconciler() -> None:
+                while True:
+                    try:
+                        await asyncio.to_thread(reconciler.run_once)
+                    except Exception:
+                        enrollment_logger.exception(
+                            "Enrollment reconciler cycle failed",
+                            extra={"event": "enrollment_reconciler_failed", "error_code": "INTERNAL_ERROR"},
+                        )
+                        metrics.application_error("INTERNAL_ERROR")
+                    await asyncio.sleep(reconciler.interval_seconds)
+
+            task = asyncio.create_task(run_reconciler())
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    app = FastAPI(
+        title="TVT edge management",
+        version="1",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     metrics.registry.register(WatchdogMetricsCollector(watchdog))
     logger = get_logger("tvt_edge.http")
     app.state.metrics = metrics
@@ -739,6 +806,88 @@ def create_app(
     @app.get("/api/v1/deployments/{deployment_id}/enrollment-windows")
     def enrollment_windows(deployment_id: str) -> list[dict[str, Any]]:
         return service.list_enrollment_windows(deployment_id)
+
+    @app.post("/api/v1/deployments/{deployment_id}/enrollment/camera")
+    def designate_enrollment_camera(
+        deployment_id: str,
+        body: EnrollmentCameraDesignationInput,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        return service.designate_enrollment_camera(
+            deployment_key=deployment_id, camera_id=body.camera_id, actor=actor, request_id=request_id,
+        )
+
+    @app.get("/api/v1/deployments/{deployment_id}/enrollment/camera")
+    def enrollment_camera(deployment_id: str) -> dict[str, Any]:
+        return service.get_enrollment_designation(deployment_id) or {
+            "deployment_key": deployment_id,
+            "camera_id": None,
+        }
+
+    @app.post("/api/v1/deployments/{deployment_id}/enrollment/sessions")
+    def start_enrollment_session(
+        deployment_id: str,
+        body: EnrollmentSessionStartInput,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        return service.start_enrollment_session(
+            deployment_key=deployment_id,
+            actor=actor,
+            request_id=request_id,
+            capture_window_seconds=body.capture_window_seconds,
+        )
+
+    @app.get("/api/v1/deployments/{deployment_id}/enrollment/sessions")
+    def enrollment_sessions(deployment_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        return service.list_enrollment_sessions(deployment_id, limit)
+
+    @app.get("/api/v1/deployments/{deployment_id}/enrollment/status")
+    def enrollment_status(deployment_id: str) -> dict[str, Any]:
+        return service.get_enrollment_status(deployment_id)
+
+    @app.post("/api/v1/deployments/{deployment_id}/enrollment/sessions/{session_id}/cancel")
+    def cancel_enrollment_session(
+        deployment_id: str,
+        session_id: str,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        return service.cancel_enrollment_session(
+            deployment_key=deployment_id, session_id=session_id, actor=actor, request_id=request_id,
+        )
+
+    @app.get("/api/v1/enrollment/people")
+    def enrollment_people(deployment_id: str | None = None) -> list[dict[str, Any]]:
+        return service.list_people_awaiting_names(deployment_id)
+
+    @app.post("/api/v1/enrollment/people/{person_id}/name")
+    def set_person_display_name(
+        person_id: str,
+        body: PersonNameInput,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        try:
+            return service.set_person_display_name(
+                person_id=person_id,
+                display_name=body.display_name,
+                apex=apex,
+                actor=actor,
+                request_id=request_id,
+            )
+        except ApexUnavailableError as error:
+            metrics.application_error("DATABASE_UNAVAILABLE")
+            logger.error(
+                "Enrollment naming failed: apex unavailable",
+                extra={"event": "enrollment_naming_failed", "error_code": "DATABASE_UNAVAILABLE"},
+            )
+            raise ValueError("naming is temporarily unavailable") from error
 
     def _proxy_report(path: str, query: dict[str, str | None]) -> Response:
         # Thin proxy to apexfabric-control's already-implemented, already-tested
