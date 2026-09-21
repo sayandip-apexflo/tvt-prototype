@@ -153,6 +153,17 @@ class PipelineImportTests(unittest.TestCase):
         self.assertIn('SOURCE_MODE=bundled', script)
         self.assertNotIn("PIPELINE_DELIVERY_BRANCH", script)
 
+    def test_oci_loader_initializes_archive_before_derived_local(self):
+        script = self.operation("import-pipeline-traffic-image.sh")
+        self.assertIn(
+            'local archive="$1"\n  local load_archive="${archive}"',
+            script,
+        )
+        self.assertNotIn(
+            'local archive="$1" load_archive="${archive}"',
+            script,
+        )
+
     def test_import_rejects_invalid_archive_and_image_contract(self):
         script = self.operation("import-pipeline-traffic-image.sh")
         combined = script + self.operation("verify-pipeline-image-inspect.py")

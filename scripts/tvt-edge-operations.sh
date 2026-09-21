@@ -1224,7 +1224,8 @@ retry_with_timeout() {
 
 oci_load_directory=""
 docker_load_container_archive() {
-  local archive="$1" load_archive="${archive}"
+  local archive="$1"
+  local load_archive="${archive}"
   if tar -tf "${archive}" | grep -qx 'index.json'; then
     oci_load_directory="$(mktemp -d "${WORK_DIR}/oci-docker-load.XXXXXX")"
     load_archive="${oci_load_directory}/image.tar"
