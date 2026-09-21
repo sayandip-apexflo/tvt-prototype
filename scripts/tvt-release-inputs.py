@@ -71,9 +71,9 @@ def load_env(path: pathlib.Path) -> dict[str, str]:
             fields = shlex.split(value, comments=False, posix=True)
         except ValueError as error:
             raise InputError(f"invalid environment value at {path}:{number}") from error
-        if len(fields) != 1:
+        if len(fields) > 1:
             raise InputError(f"environment value must resolve to one field at {path}:{number}")
-        values[key.strip()] = fields[0]
+        values[key.strip()] = fields[0] if fields else ""
     return values
 
 

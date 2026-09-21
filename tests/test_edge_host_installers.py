@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import tempfile
 import unittest
@@ -15,6 +16,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class EdgeHostInstallerTests(unittest.TestCase):
+    def test_release_input_environment_parser_accepts_optional_empty_values(self) -> None:
+        module = runpy.run_path(str(ROOT / "scripts/tvt-release-inputs.py"))
+        with tempfile.TemporaryDirectory() as directory:
+            environment = Path(directory) / "pipeline.env"
+            environment.write_text(
+                "REQUIRED=value\nOPTIONAL=\nQUOTED='one field'\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                module["load_env"](environment),
+                {"REQUIRED": "value", "OPTIONAL": "", "QUOTED": "one field"},
+            )
+
     def test_host_package_list_excludes_redundant_tools(self) -> None:
         prepare = (ROOT / "prepare-tvt-edge-host.sh").read_text(encoding="utf-8")
         package_install = prepare.split("install_host_packages()", 1)[1].split(
