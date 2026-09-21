@@ -1,6 +1,6 @@
 [Unit]
-Description=Send the TVT daily ANPR duration report
-After=network-online.target tvt-anpr-report-collector.service
+Description=Send the TVT daily vehicle entry/exit report
+After=network-online.target apexfabric-control.service
 Wants=network-online.target
 
 [Service]
@@ -8,7 +8,7 @@ Type=oneshot
 User=tvt-report
 Group=tvt-report
 EnvironmentFile=/etc/tvt/anpr-report.env
-ExecStart=/opt/tvt/venv/bin/tvt-anpr-report send-daily
+ExecStart=/opt/tvt/venv/bin/tvt-anpr-report send-daily-vehicle-traffic
 NoNewPrivileges=true
 PrivateDevices=true
 PrivateTmp=true

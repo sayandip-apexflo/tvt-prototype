@@ -1,5 +1,5 @@
 [Unit]
-Description=Send the TVT daily ANPR duration report at 18:30 Asia/Kolkata
+Description=Send the TVT daily vehicle entry/exit report at 18:30 Asia/Kolkata
 
 [Timer]
 OnCalendar=*-*-* 18:30:00 Asia/Kolkata

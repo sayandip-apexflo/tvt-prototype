@@ -1,4 +1,4 @@
-"""Strict settings for ANPR collection and daily email delivery."""
+"""Strict settings for the daily vehicle-traffic/attendance report emails."""
 
 from __future__ import annotations
 
@@ -32,11 +32,9 @@ def _addresses(name: str) -> tuple[str, ...]:
 class ReportingSettings:
     state_directory: Path
     apex_url: str
-    camera_ids: frozenset[str]
     timezone_name: str
     window_start: time
     window_end: time
-    poll_interval: float
     retention_days: int
     smtp_host: str
     smtp_port: int
@@ -69,16 +67,6 @@ class ReportingSettings:
         if parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password:
             raise ValueError("TVT_REPORT_APEX_URL must contain only scheme, host, and port")
 
-        camera_ids = frozenset(
-            item.strip()
-            for item in os.getenv("TVT_REPORT_CAMERA_IDS", "").split(",")
-            if item.strip()
-        )
-        if not camera_ids:
-            raise ValueError("TVT_REPORT_CAMERA_IDS must contain at least one camera ID")
-        if any(len(item) > 128 or any(character in item for character in "\r\n") for item in camera_ids):
-            raise ValueError("TVT_REPORT_CAMERA_IDS contains an invalid camera ID")
-
         timezone_name = os.getenv("TVT_REPORT_TIMEZONE", "Asia/Kolkata")
         try:
             ZoneInfo(timezone_name)
@@ -89,12 +77,9 @@ class ReportingSettings:
         if window_start >= window_end:
             raise ValueError("the reporting window must begin before it ends")
 
-        poll_interval = float(os.getenv("TVT_REPORT_POLL_INTERVAL", "3"))
         retention_days = int(os.getenv("TVT_REPORT_RETENTION_DAYS", "90"))
         smtp_port = int(os.getenv("TVT_REPORT_SMTP_PORT", "587"))
         smtp_timeout = float(os.getenv("TVT_REPORT_SMTP_TIMEOUT", "15"))
-        if not 1 <= poll_interval <= 300:
-            raise ValueError("TVT_REPORT_POLL_INTERVAL must be between 1 and 300")
         if not 7 <= retention_days <= 3650:
             raise ValueError("TVT_REPORT_RETENTION_DAYS must be between 7 and 3650")
         if not 1 <= smtp_port <= 65535:
@@ -105,11 +90,9 @@ class ReportingSettings:
         return cls(
             state_directory=Path(os.getenv("TVT_REPORT_STATE_DIR", "/var/lib/tvt-reporting")),
             apex_url=apex_url,
-            camera_ids=camera_ids,
             timezone_name=timezone_name,
             window_start=window_start,
             window_end=window_end,
-            poll_interval=poll_interval,
             retention_days=retention_days,
             smtp_host=os.getenv("TVT_REPORT_SMTP_HOST", "smtp.sendgrid.net"),
             smtp_port=smtp_port,

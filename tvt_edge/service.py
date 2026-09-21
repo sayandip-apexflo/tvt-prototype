@@ -39,6 +39,7 @@ from tvt_edge.db.models import (
     CameraCredentialVersion,
     CameraDeploymentAssignment,
     CameraEndpoint,
+    CameraGeometryShape,
     CameraIdentifier,
     CameraRole,
     CameraRoleAssignment,
@@ -56,6 +57,7 @@ from tvt_edge.db.models import (
     SolutionDeployment,
     utc_now,
 )
+from tvt_edge.geometry import ShapeInput, compile_camera_config, line_shape_key, slugify, validate_shape
 from tvt_edge.security import CredentialKeyring, redact, redact_text
 
 
@@ -435,6 +437,194 @@ class ManagementService:
                 details={"role_key": role_key, "direction": direction},
             )
             return assignment
+
+    @staticmethod
+    def _geometry_view(shape: CameraGeometryShape) -> dict[str, Any]:
+        return {
+            "shape_id": str(shape.id),
+            "kind": shape.kind,
+            "shape_key": shape.shape_key,
+            "name": shape.name,
+            "points": shape.points,
+            "role_key": shape.role_key,
+            "direction": shape.direction,
+            "inside_side": shape.inside_side,
+            "enabled": shape.enabled,
+            "created_at": shape.created_at.isoformat(),
+            "updated_at": shape.updated_at.isoformat(),
+        }
+
+    def list_camera_geometry(self, camera_key: str) -> list[dict[str, Any]]:
+        with self.sessions() as session:
+            camera = self._camera(session, camera_key)
+            shapes = session.scalars(
+                select(CameraGeometryShape)
+                .where(
+                    CameraGeometryShape.camera_id == camera.id,
+                    CameraGeometryShape.deleted_at.is_(None),
+                )
+                .order_by(CameraGeometryShape.kind, CameraGeometryShape.shape_key)
+            ).all()
+            return [self._geometry_view(shape) for shape in shapes]
+
+    def camera_geometry_config(self, camera_key: str) -> dict[str, Any]:
+        """Compile this camera's enabled zones/lines into the vendor pack's
+        `config.zones.anpr[]`/`config.lines[]` shape (see tvt_edge/geometry.py)."""
+        with self.sessions() as session:
+            camera = self._camera(session, camera_key)
+            shapes = session.scalars(
+                select(CameraGeometryShape).where(
+                    CameraGeometryShape.camera_id == camera.id,
+                    CameraGeometryShape.deleted_at.is_(None),
+                )
+            ).all()
+            inputs = [
+                ShapeInput(
+                    kind=shape.kind,
+                    shape_key=shape.shape_key,
+                    name=shape.name,
+                    points=shape.points,
+                    role_key=shape.role_key,
+                    direction=shape.direction,
+                    inside_side=shape.inside_side,
+                    enabled=shape.enabled,
+                )
+                for shape in shapes
+            ]
+            return compile_camera_config(inputs)
+
+    def create_camera_zone(
+        self,
+        camera_key: str,
+        name: str,
+        points: list[list[float]],
+        actor: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        with self.sessions.begin() as session:
+            camera = self._camera(session, camera_key)
+            existing_keys = set(
+                session.scalars(
+                    select(CameraGeometryShape.shape_key).where(
+                        CameraGeometryShape.camera_id == camera.id,
+                        CameraGeometryShape.deleted_at.is_(None),
+                    )
+                )
+            )
+            base = slugify(name)
+            shape_key = base
+            suffix = 2
+            while shape_key in existing_keys:
+                shape_key = f"{base}-{suffix}"
+                suffix += 1
+            normalized_points = [[float(x), float(y)] for x, y in points]
+            validate_shape(
+                ShapeInput(kind="zone", shape_key=shape_key, name=name, points=normalized_points)
+            )
+            row = CameraGeometryShape(
+                camera_id=camera.id,
+                kind="zone",
+                shape_key=shape_key,
+                name=name,
+                points=normalized_points,
+            )
+            session.add(row)
+            session.flush()
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="camera.geometry.zone.create",
+                target_type="camera",
+                target_id=camera_key,
+                details={"shape_key": shape_key},
+            )
+            return self._geometry_view(row)
+
+    def create_camera_line(
+        self,
+        camera_key: str,
+        name: str,
+        points: list[list[float]],
+        role_key: str,
+        direction: str,
+        inside_side: str,
+        actor: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        if not DNS_ID.fullmatch(role_key):
+            raise ValueError("role_key must be a DNS-safe identifier")
+        shape_key = line_shape_key(role_key, direction)
+        normalized_points = [[float(x), float(y)] for x, y in points]
+        validate_shape(
+            ShapeInput(
+                kind="line",
+                shape_key=shape_key,
+                name=name,
+                points=normalized_points,
+                role_key=role_key,
+                direction=direction,
+                inside_side=inside_side,
+            )
+        )
+        with self.sessions.begin() as session:
+            camera = self._camera(session, camera_key)
+            existing = session.scalar(
+                select(CameraGeometryShape).where(
+                    CameraGeometryShape.camera_id == camera.id,
+                    CameraGeometryShape.shape_key == shape_key,
+                    CameraGeometryShape.deleted_at.is_(None),
+                )
+            )
+            if existing is not None:
+                raise ValueError(
+                    f"camera already has a {direction} line for gate {role_key!r}"
+                )
+            row = CameraGeometryShape(
+                camera_id=camera.id,
+                kind="line",
+                shape_key=shape_key,
+                name=name,
+                points=normalized_points,
+                role_key=role_key,
+                direction=direction,
+                inside_side=inside_side,
+            )
+            session.add(row)
+            session.flush()
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="camera.geometry.line.create",
+                target_type="camera",
+                target_id=camera_key,
+                details={"shape_key": shape_key, "role_key": role_key, "direction": direction},
+            )
+            return self._geometry_view(row)
+
+    def delete_camera_geometry(
+        self, camera_key: str, shape_id: str, actor: str, request_id: str
+    ) -> None:
+        try:
+            shape_uuid = uuid.UUID(shape_id)
+        except ValueError as error:
+            raise ValueError(f"unknown geometry shape {shape_id!r}") from error
+        with self.sessions.begin() as session:
+            camera = self._camera(session, camera_key)
+            shape = session.get(CameraGeometryShape, shape_uuid)
+            if shape is None or shape.camera_id != camera.id or shape.deleted_at is not None:
+                raise ValueError(f"unknown geometry shape {shape_id!r}")
+            shape.deleted_at = utc_now()
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="camera.geometry.delete",
+                target_type="camera",
+                target_id=camera_key,
+                details={"shape_key": shape.shape_key, "kind": shape.kind},
+            )
 
     def list_cameras(self) -> list[dict[str, Any]]:
         with self.sessions() as session:

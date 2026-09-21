@@ -459,6 +459,153 @@ class ManagementPlaneTests(unittest.TestCase):
         self.assertEqual(deleted.status_code, 204)
         self.assertEqual(missing.status_code, 409)
 
+    def test_camera_geometry_http_routes_cover_zone_line_and_role_lifecycle(self):
+        self.service.create_site(
+            "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"
+        )
+        self.service.create_camera(
+            camera_key="camera-01", friendly_name="Main entrance",
+            manufacturer=None, model=None, identifiers=[],
+            actor="test", request_id="camera",
+        )
+        app = create_app(self.sessions, self.keyring)
+
+        async def exercise():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+                zone = await client.post("/api/v1/cameras/camera-01/zones", json={
+                    "name": "ANPR capture area",
+                    "points": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]],
+                })
+                bad_zone = await client.post("/api/v1/cameras/camera-01/zones", json={
+                    "name": "degenerate",
+                    "points": [[0.1, 0.1], [0.1, 0.1], [0.1, 0.1]],
+                })
+                line = await client.post("/api/v1/cameras/camera-01/lines", json={
+                    "name": "Main entrance entry",
+                    "points": [[0.0, 0.5], [1.0, 0.5]],
+                    "role_key": "main-entrance", "direction": "entry", "inside_side": "b",
+                })
+                duplicate_line = await client.post("/api/v1/cameras/camera-01/lines", json={
+                    "name": "Main entrance entry (again)",
+                    "points": [[0.0, 0.6], [1.0, 0.6]],
+                    "role_key": "main-entrance", "direction": "entry", "inside_side": "b",
+                })
+                geometry = await client.get("/api/v1/cameras/camera-01/geometry")
+                role = await client.put("/api/v1/cameras/camera-01/role", json={
+                    "role_key": "main-entrance", "display_name": "Main entrance",
+                    "direction": "entry",
+                })
+                deleted = await client.delete(
+                    f"/api/v1/cameras/camera-01/geometry/{zone.json()['shape_id']}"
+                )
+                after_delete = await client.get("/api/v1/cameras/camera-01/geometry")
+            return (
+                zone, bad_zone, line, duplicate_line, geometry, role, deleted, after_delete
+            )
+
+        zone, bad_zone, line, duplicate_line, geometry, role, deleted, after_delete = asyncio.run(
+            exercise()
+        )
+        self.assertEqual(zone.status_code, 201)
+        self.assertEqual(zone.json()["shape_key"], "anpr-capture-area")
+        self.assertEqual(bad_zone.status_code, 409)
+        self.assertEqual(line.status_code, 201)
+        self.assertEqual(line.json()["shape_key"], "main-entrance_entry")
+        self.assertEqual(duplicate_line.status_code, 409)
+        compiled = geometry.json()["compiled_config"]
+        self.assertEqual(compiled["zones"]["anpr"][0]["id"], "anpr-capture-area")
+        self.assertEqual(compiled["lines"][0]["id"], "main-entrance_entry")
+        self.assertEqual(compiled["lines"][0]["accepted"], ["A->B"])
+        self.assertEqual(len(geometry.json()["shapes"]), 2)
+        self.assertEqual(role.json()["roles"][0]["role_key"], "main-entrance")
+        self.assertEqual(deleted.status_code, 204)
+        self.assertEqual(len(after_delete.json()["shapes"]), 1)
+
+    def test_camera_snapshot_and_reports_proxy_to_apex(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class FakeApexHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path.startswith("/api/cameras/snapshot"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/jpeg")
+                    self.end_headers()
+                    self.wfile.write(b"\xff\xd8\xff\xd9")
+                elif self.path.startswith("/api/reports/attendance"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"sessions": [], "total_duration_seconds": 0}).encode())
+                elif self.path.startswith("/api/reports/vehicle-traffic"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"sessions": [], "entered_count": 0, "exited_count": 0}).encode())
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), FakeApexHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        # addCleanup runs LIFO: join must be registered first so shutdown()
+        # (which unblocks serve_forever) runs before we wait on the thread.
+        self.addCleanup(thread.join)
+        self.addCleanup(server.shutdown)
+
+        self.service.create_site(
+            "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"
+        )
+        self.service.create_camera(
+            camera_key="camera-01", friendly_name="Main entrance",
+            manufacturer=None, model=None, identifiers=[],
+            actor="test", request_id="camera",
+        )
+        app = create_app(
+            self.sessions, self.keyring,
+            apex_url=f"http://127.0.0.1:{server.server_port}",
+        )
+
+        async def exercise():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+                snapshot = await client.get("/api/v1/cameras/camera-01/snapshot")
+                attendance = await client.get("/api/v1/reports/attendance")
+                vehicles = await client.get("/api/v1/reports/vehicle-traffic")
+                missing_camera = await client.get("/api/v1/cameras/unknown-camera/snapshot")
+            return snapshot, attendance, vehicles, missing_camera
+
+        snapshot, attendance, vehicles, missing_camera = asyncio.run(exercise())
+        self.assertEqual(snapshot.status_code, 200)
+        self.assertEqual(snapshot.headers["content-type"], "image/jpeg")
+        self.assertEqual(attendance.json(), {"sessions": [], "total_duration_seconds": 0})
+        self.assertEqual(vehicles.json()["entered_count"], 0)
+        self.assertEqual(missing_camera.status_code, 409)
+
+    def test_camera_snapshot_returns_502_when_apex_is_unreachable(self):
+        self.service.create_site(
+            "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"
+        )
+        self.service.create_camera(
+            camera_key="camera-01", friendly_name="Main entrance",
+            manufacturer=None, model=None, identifiers=[],
+            actor="test", request_id="camera",
+        )
+        app = create_app(self.sessions, self.keyring, apex_url="http://127.0.0.1:1")
+
+        async def exercise():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+                return await client.get("/api/v1/cameras/camera-01/snapshot")
+
+        response = asyncio.run(exercise())
+        self.assertEqual(response.status_code, 502)
+
     def test_catalog_preview_builds_digest_only_complete_runtime_bundle(self):
         self.service.create_site(
             "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"

@@ -196,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
             keyring,
             settings.sync_namespace,
             kubectl_client(settings.kubeconfig),
+            apex_url=settings.apex_url,
         )
         start_http_server(
             settings.metrics_port,

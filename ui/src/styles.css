@@ -319,3 +319,25 @@ td strong { color: #202b42; font-weight: 600; }
   .search-box { width: 100%; }
   .cluster-banner p { display: none; }
 }
+
+.geometry-editor { display: flex; flex-direction: column; gap: 16px; }
+.geometry-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.mode-toggle { display: inline-flex; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; }
+.mode-toggle button { padding: 8px 12px; color: #55617a; background: white; font-size: 10px; font-weight: 600; border-right: 1px solid var(--line); }
+.mode-toggle button:last-child { border-right: 0; }
+.mode-toggle button.active { color: white; background: var(--brand); }
+.geometry-canvas { position: relative; overflow: hidden; width: 100%; border: 1px solid var(--line); border-radius: 12px; background: #0d1424; cursor: crosshair; user-select: none; }
+.geometry-canvas img { display: block; width: 100%; height: auto; pointer-events: none; }
+.geometry-snapshot-error { min-height: 240px; color: #b8c1d6; }
+.geometry-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.geometry-shape.geometry-zone, .geometry-zone { fill: rgba(74, 98, 232, .18); stroke: var(--brand); stroke-width: 2; }
+.geometry-line { stroke-width: 3; }
+.geometry-line-entry { stroke: var(--teal); }
+.geometry-line-exit { stroke: var(--red); }
+.geometry-draft { fill: none; stroke: var(--amber); stroke-width: 2; stroke-dasharray: 0.01 0.008; }
+.geometry-vertex { fill: var(--amber); stroke: white; stroke-width: 0.004; }
+.geometry-point-label { position: absolute; transform: translate(-50%, -140%); padding: 2px 6px; border-radius: 5px; color: white; background: rgba(13, 20, 36, .85); font-size: 9px; font-weight: 700; white-space: nowrap; pointer-events: none; }
+.geometry-save-form { padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: white; }
+.geometry-shape-list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 12px; background: white; overflow: hidden; }
+.geometry-shape-list .line-item { padding: 0 16px; }
+.geometry-shape-list small { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; }

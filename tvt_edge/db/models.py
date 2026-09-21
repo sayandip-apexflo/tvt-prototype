@@ -693,3 +693,57 @@ class LegacyImport(Base, IdMixin):
     imported_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
+
+
+class CameraGeometryShape(Base, IdMixin, TimeMixin):
+    """Operator-drawn ANPR capture zone or entry/exit crossing line for a
+    camera, in normalized (0-1) image coordinates.
+
+    Compiled into the vendor pack's `config.zones.anpr[]`/`config.lines[]`
+    shape by tvt_edge/geometry.py -- see
+    solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1/desired-state.schema.json
+    and docs/contracts/tvt-mills-v1/README.md. Per that pack's two-lines-per-gate
+    direction convention, a line belongs to exactly one camera and carries a
+    single role (entry or exit); `inside_side` records which endpoint ('a' or
+    'b') faces the interior of the plant, which the compiler uses to derive
+    the vendor line's `accepted` crossing direction. Zones carry no direction
+    -- they are a pure capture ROI, matching the vendor's own zone semantics.
+    """
+
+    __tablename__ = "camera_geometry_shapes"
+    __table_args__ = (
+        UniqueConstraint("camera_id", "shape_key"),
+        CheckConstraint("kind IN ('zone','line')", name="camera_geometry_kind"),
+        CheckConstraint(
+            "direction IS NULL OR direction IN ('entry','exit')",
+            name="camera_geometry_direction",
+        ),
+        CheckConstraint(
+            "inside_side IS NULL OR inside_side IN ('a','b')",
+            name="camera_geometry_inside_side",
+        ),
+        CheckConstraint(
+            "(kind = 'line') = (direction IS NOT NULL)",
+            name="camera_geometry_line_has_direction",
+        ),
+        CheckConstraint(
+            "(kind = 'line') = (inside_side IS NOT NULL)",
+            name="camera_geometry_line_has_inside_side",
+        ),
+        CheckConstraint(
+            "(kind = 'line') = (role_key IS NOT NULL)",
+            name="camera_geometry_line_has_role_key",
+        ),
+    )
+    camera_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("cameras.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    shape_key: Mapped[str] = mapped_column(String(63), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    points: Mapped[list[list[float]]] = mapped_column(JSON, nullable=False)
+    role_key: Mapped[str | None] = mapped_column(String(63))
+    direction: Mapped[str | None] = mapped_column(String(8))
+    inside_side: Mapped[str | None] = mapped_column(String(1))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -66,6 +66,10 @@ export function Field({ label, children, hint, wide = false }: { label: string; 
 
 export function JsonView({ value }: { value: unknown }) { return <pre className="json-view">{JSON.stringify(value, null, 2)}</pre>; }
 
+export function DataTable({ headers, children }: { headers: string[]; children: ReactNode }) {
+  return <div className="table-scroll"><table><thead><tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr></thead><tbody>{children}</tbody></table></div>;
+}
+
 export function ConfirmButton({ children, message, onConfirm, className = "button danger", disabled = false }: { children: ReactNode; message: string; onConfirm: () => void | Promise<void>; className?: string; disabled?: boolean }) {
   return <button className={className} disabled={disabled} onClick={() => window.confirm(message) && void onConfirm()}>{children}</button>;
 }

@@ -159,31 +159,58 @@ and TLS using the site's certificate or installer-managed local CA. V1 has one
 administrator role; additional roles or identity-provider integration require
 a later access-control design.
 
-### 3.7 Isolate the once-daily ANPR business report
+### 3.7 Isolate the once-daily vehicle-traffic and attendance business reports
 
-`tvt-anpr-report-collector.service` polls the loopback Apex telemetry endpoint
-every three seconds. Loss during polling, service interruption, or source
-retention is accepted for this version; neither SSE replay nor a lossless event
-bus is introduced. It accepts only `plate_read_event` records from the two
-configured camera IDs, deduplicates by event ID, normalizes the plate for exact
-matching, and updates one compact observation row per local date and plate.
+`tvt-anpr-report.service`/`tvt-anpr-report-attendance.service` have no local
+collector or event-polling loop. Each fetches its content live, at send time,
+from apexfabric-control's already-aggregated reporting endpoints (`GET
+/api/reports/vehicle-traffic`, `GET /api/reports/attendance` --
+`apexfabric/control_plane/reporting.py`), which derive gate + entry/exit role
+from the `_entry`/`_exit` suffix on each configured line's ID (see §3.8) as
+`plate_read_event`/`face_detection_event` records arrive, maintaining
+`vehicle_sessions`/`attendance_sessions` continuously. This is a
+direction-aware entry/exit session model, not a raw observation span: a gate
+only contributes sessions once a camera has a saved Entry line and a paired
+camera (or the same camera) has a saved Exit line for that gate (a camera's
+Zones & Lines tab in the console — see §3.8).
 
-For the half-open daily window `[09:00, 18:00)` in `Asia/Kolkata`, a vehicle's
-observed duration is `last_seen - first_seen` across both cameras. Repeated
-reads do not create multiple rows, a single read has zero duration, and the
-daily total is the sum of the per-vehicle durations. This is an observation
-span, not a direction-aware entry/exit session; separate visits by the same
-plate in one day are intentionally merged by the stated rule.
+For the half-open daily window `[09:00, 18:00)` in `Asia/Kolkata`, each
+report's generator (`tvt_edge/reporting/email_report.py`) filters that day's
+sessions to ones starting in the window, then computes entered/exited counts
+(vehicle traffic) or total duration inside (attendance).
 
-`tvt-anpr-report.timer` invokes a oneshot at exactly 18:30 Asia/Kolkata. The
-timer is non-persistent, so a stopped host does not send a late catch-up mail.
-A unique report-date row and deterministic message ID prevent a second logical
-send after success. There is one delivery attempt; failure is recorded locally
-and is not retried later that day. SendGrid is reached through certificate-
-verified SMTP/STARTTLS using a protected key file. The email contains summary
-counts, the total duration, and a CSV keyed by opaque vehicle references; raw
-number plates remain in the local business store and never enter email, logs,
+`tvt-anpr-report.timer` invokes a oneshot at exactly 18:30 Asia/Kolkata;
+`tvt-anpr-report-attendance.timer` at 18:35. Both timers are non-persistent,
+so a stopped host does not send a late catch-up mail. A unique
+(report-date, report-kind) row and deterministic message ID prevent a second
+logical send after success, tracked independently per report kind. There is
+one delivery attempt per kind per day; failure is recorded locally and is not
+retried later that day. SendGrid is reached through certificate-verified
+SMTP/STARTTLS using a protected key file. The vehicle-traffic email contains
+summary counts and a CSV keyed by opaque vehicle references; the attendance
+email contains the total duration and a CSV keyed by internal person ID. Raw
+number plates and person display names remain in apexfabric's local business
+store and the loopback management API/UI, and never enter email, logs,
 metrics, or operational alerts.
+
+### 3.8 Camera zones and entry/exit lines
+
+Operators draw ANPR capture zones (polygons; a plate is only recorded when
+its center falls inside one) and gate crossing lines (two points; which
+endpoint faces the plant interior, plus an Entry/Exit role) per camera from
+that camera's Zones & Lines tab, over a live snapshot proxied from
+apexfabric-control's existing ffmpeg-backed endpoint
+(`GET /api/v1/cameras/{camera_id}/snapshot`). `tvt_edge/geometry.py` validates
+each shape (non-self-intersecting, non-zero-area polygons; non-degenerate
+lines; the vendor's `_entry`/`_exit` line-ID suffix convention) and compiles a
+camera's saved shapes into the exact `config.zones.anpr[]`/`config.lines[]`
+shape the vendored pack's `desired-state.schema.json` requires — the existing
+`Draft202012Validator` check in `ManagementService._catalog_deployment_candidate`
+still gates every deployment, so a compiled config is validated the same way
+a hand-typed one always was. Two cameras at one physical gate (one facing
+inside, one facing outside) each carry one line tagged with a single role,
+correlated by a shared gate name — matching the vendor's two-lines-per-gate
+direction convention.
 
 ## 4. System context
 
@@ -198,9 +225,8 @@ flowchart TB
         Edge[TVT edge service<br/>health, catalog and audit]
         CameraSync[TVT camera inventory sync]
         Dispatcher[Alert dispatcher<br/>systemd service]
-        ReportCollector[ANPR report collector]
-        DailyMailer[18:30 daily report oneshot]
-        ReportDB[(Reporting SQLite<br/>daily aggregate)]
+        DailyMailer[Daily report oneshots<br/>vehicle traffic 18:30, attendance 18:35]
+        ReportDB[(Reporting SQLite<br/>per-report-kind delivery state)]
         DB[(Host PostgreSQL<br/>TVT management data)]
         Watchdog[K3s health watchdog]
 
@@ -221,7 +247,7 @@ flowchart TB
 
     Operator --> Apex
     Apex -->|discovery and RTSP validation| Cameras
-    Apex -->|bounded recent events| ReportCollector
+    Apex -->|aggregated vehicle-traffic and attendance reports API| DailyMailer
     CameraSync -->|non-secret inventory API| Apex
     CameraSync <--> DB
     Edge <--> DB
@@ -230,7 +256,6 @@ flowchart TB
     Edge -->|host alerts| Dispatcher
     Systemd --> Edge
     Systemd --> Apex
-    Systemd --> ReportCollector
     Systemd --> DailyMailer
     Systemd --> Dispatcher
     Systemd --> DB
@@ -249,9 +274,8 @@ flowchart TB
     Alertmanager -->|authenticated webhook| Dispatcher
     Dispatcher <--> DB
     Dispatcher -->|STARTTLS email| SMTP
-    ReportCollector --> ReportDB
     DailyMailer --> ReportDB
-    DailyMailer -->|one daily STARTTLS email| SMTP
+    DailyMailer -->|one STARTTLS email per report kind per day| SMTP
 ```
 
 The operator-facing React UI and authoritative camera inventory are served by
@@ -266,8 +290,8 @@ on an in-cluster ingress controller or Service.
 | TVT edge service | Host `systemd` service | Health, catalog, deployment lifecycle, audit, and operational-alert views | Authoritative camera credentials or CV processing |
 | Camera inventory sync | Host `systemd` service | Mirror non-secret Apex inventory into PostgreSQL for deployment synchronization | Camera discovery or credential ownership |
 | Alert dispatcher | Host `systemd` service | Authenticated alert ingestion, durable outbox, acknowledgement-aware reminders, recovery email, SMTP retry and delivery audit | PromQL evaluation, business-report email, arbitrary templates or recipients from alert payloads |
-| ANPR report collector/mailer | Host `systemd` service and timer | Loss-tolerant event polling, daily aggregation, immutable report, one 18:30 SendGrid attempt | Source replay, snapshots, operational alert mail, or plate data in observability/email |
-| Reporting SQLite | Host filesystem | Deduplication, compact plate observations, report/send state | Camera inventory, snapshots, operational alerts, or complete raw event retention |
+| Vehicle-traffic/attendance mailers | Host `systemd` services and timers | Fetch that day's aggregated sessions live from Apex's reports API, render an immutable report, one SendGrid attempt each (18:30 vehicle traffic, 18:35 attendance) | Event polling or aggregation (owned by Apex), source replay, snapshots, operational alert mail, or plate/name data in observability/email |
+| Reporting SQLite | Host filesystem | Per-(date, report-kind) delivery/send state so a retry never double-sends | Camera inventory, snapshots, operational alerts, event aggregation, or complete raw event retention |
 | Management PostgreSQL | Host `systemd` service | Deployment-sync camera projection, operational alerts, notification outbox and audit metadata | CV event, video, ANPR, or business-report retention |
 | K3s health watchdog | Host `systemd` timer/service | Detect sustained API failure and perform bounded recovery | General cluster orchestration |
 | Node reporter | K3s DaemonSet Pod | Report host capabilities through `ApexNodeStatus` | Active camera discovery or Node labelling |
@@ -632,10 +656,10 @@ Host services are enabled at boot with these dependencies:
 ```text
 network-online.target
   -> apexfabric-control.service
-  -> tvt-anpr-report-collector.service
 
 timers.target
   -> tvt-anpr-report.timer (18:30 Asia/Kolkata, non-persistent)
+  -> tvt-anpr-report-attendance.timer (18:35 Asia/Kolkata, non-persistent)
 
 network-online.target
   -> postgresql.service

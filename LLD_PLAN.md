@@ -1,6 +1,6 @@
 # TVT prototype: sample low-level design plan
 
-**Status:** Current architecture documented; daily ANPR report implemented
+**Status:** Current architecture documented; daily vehicle-traffic and attendance reports implemented; camera zone/entry-exit-line geometry editor implemented
 **Scope:** Single physical server, single-node K3s, five initially installed cameras with a design ceiling of eight  
 **Reference implementation:** `../k3s-prototype`  
 **Related TVT documents:** `README.md`, `HLD.md`, `MONITORING.md`, `APEXFABRIC_ARCHITECTURE.md`
@@ -42,10 +42,12 @@ reconciled. Consequently, the older camera/API/database details in sections
 6-10 are retained as background design but must not be implemented as a second
 camera authority.
 
-The daily ANPR report is a TVT-owned consumer of the Apex loopback telemetry
-API. It is neither an Apex reporting-table extension nor an operational-alert
-dispatcher feature. The source feed and polling are explicitly loss-tolerant
-in this version.
+The daily vehicle-traffic and attendance reports are a TVT-owned consumer of
+Apex's loopback reporting API (`GET /api/reports/vehicle-traffic`, `GET
+/api/reports/attendance`), which itself aggregates gate-crossing events as
+they arrive using the `_entry`/`_exit` line-ID convention. Neither report is
+an Apex reporting-table extension nor an operational-alert dispatcher
+feature; TVT only renders and emails Apex's already-aggregated sessions.
 
 This plan deliberately excludes:
 
@@ -700,54 +702,62 @@ privacy, backup/restore, schema migration, and deletion requirements are
 approved, those workloads are integration stubs rather than restart-safe
 product features.
 
-### 12.5 Implemented daily ANPR duration report
+### 12.5 Implemented daily vehicle-traffic and attendance reports
 
-The daily ANPR report is the first narrow business-data exception to the stub
-status above. Its implementation is intentionally independent of management
-PostgreSQL and the frozen Solution Pack plane:
+The daily vehicle-traffic and attendance reports are the first narrow
+business-data exception to the stub status above. Their implementation is
+intentionally independent of management PostgreSQL and the frozen Solution
+Pack plane. There is no local collector or polling loop -- each report's
+content is fetched live, at send time, from Apex's already-aggregated
+reporting API, which itself derives gate + entry/exit role from each
+configured line's `_entry`/`_exit` ID suffix as `plate_read_event`/
+`face_detection_event` records arrive (see §13 and `HLD.md` §3.8):
 
-1. `tvt-anpr-report-collector.service` requests
-   `GET http://127.0.0.1:8088/api/telemetry/events?limit=1000` every three
-   seconds. It accepts only `application=anpr`, `plate_read_event`, and an
-   explicitly configured camera ID. Poll/SSE reconnect loss and ingestion loss
-   are accepted; the component does not promise source replay.
-2. Event IDs are inserted into `consumed_events` for deduplication. A valid
-   plate is NFKC-normalized, uppercased, and stripped of spaces/hyphens before
-   exact matching. The store keeps raw plate text only in its local business
-   table, uses a SHA-256 key for matching, and assigns an unrelated random
-   per-day vehicle reference for email.
-3. Events are converted to `Asia/Kolkata` and only timestamps in the half-open
-   interval `[09:00, 18:00)` are aggregated. For each local date and plate the
-   row holds `MIN(occurred_at)`, `MAX(occurred_at)`, cameras at those extrema,
-   and read count. Duration is `MAX - MIN`; one read produces zero seconds.
-4. The report total is the sum of all per-plate spans. Multiple visits by the
-   same plate are merged and can overstate actual occupancy; this follows the
-   requested first/last rule and is labelled “observed duration.”
-5. `/var/lib/tvt-reporting/reporting.sqlite3` holds deduplication keys, compact
-   aggregates, an immutable CSV snapshot, and the one-attempt send state.
-   Ninety-day retention is the default. It stores no snapshots or raw event
-   bodies.
-6. `tvt-anpr-report.timer` uses
-   `OnCalendar=*-*-* 18:30:00 Asia/Kolkata`, `AccuracySec=1s`, and
-   `Persistent=false`. A stopped host therefore misses that day's send instead
-   of producing an unexpected late email.
-7. The oneshot creates at most one report row per date and assigns a
-   deterministic `Message-ID`. State moves from `pending` to either `sent` or
-   terminal `failed`; there is no reminder, retry timer, or second same-day
-   send. SMTP acceptance followed by a lost response remains the usual
-   unavoidable ambiguity.
-8. SendGrid is used through SMTP port 587 with STARTTLS certificate validation,
-   username `apikey`, and a root-managed key readable by `tvt-report`. The
-   report mail has summary counts/total and a CSV of opaque vehicle references,
-   first/last timestamps, duration, count, and camera IDs. Plate text, images,
-   credentials, and event bodies are excluded from email and observability.
+1. `tvt-anpr-report.service` (vehicle traffic) requests
+   `GET http://127.0.0.1:8088/api/reports/vehicle-traffic?date=<today>`;
+   `tvt-anpr-report-attendance.service` requests
+   `GET http://127.0.0.1:8088/api/reports/attendance?date=<today>`. Both go
+   through the loopback management API's thin proxy
+   (`GET /api/v1/reports/vehicle-traffic`, `GET /api/v1/reports/attendance`)
+   when called from the console; the systemd units call apexfabric-control
+   directly. Apex's own aggregation is the sessions' source of truth --
+   TVT does not re-derive or store per-event state.
+2. `tvt_edge/reporting/email_report.py` filters that day's sessions to ones
+   starting in the half-open interval `[09:00, 18:00)` `Asia/Kolkata`, then
+   computes `entered_count`/`exited_count` (vehicle traffic) or the sum of
+   `duration_seconds` across closed sessions (attendance).
+3. The vehicle-traffic CSV never carries plate text: a `vehicle_ref` token is
+   assigned per distinct plate within that render only (not persisted, not
+   stable across days). The attendance CSV never carries a person's display
+   name: it uses the internal `person_id` only. This mirrors the discipline
+   the (retired) collector-era store applied to plate text.
+4. `/var/lib/tvt-reporting/reporting.sqlite3` holds only per-`(report_date,
+   report_kind)` delivery state (`pending`/`sending`/`sent`/`failed`), an
+   immutable CSV snapshot, and a deterministic `Message-ID` -- no
+   deduplication keys or aggregates, since Apex owns those now. Ninety-day
+   retention is the default.
+5. `tvt-anpr-report.timer` uses `OnCalendar=*-*-* 18:30:00 Asia/Kolkata`;
+   `tvt-anpr-report-attendance.timer` uses `18:35:00`. Both set
+   `AccuracySec=1s` and `Persistent=false`. A stopped host therefore misses
+   that day's send instead of producing an unexpected late email.
+6. Each oneshot creates at most one report row per `(date, report_kind)` and
+   assigns a deterministic `Message-ID`. State moves from `pending` to either
+   `sent` or terminal `failed`; there is no reminder, retry timer, or second
+   same-day send per kind. SMTP acceptance followed by a lost response
+   remains the usual unavoidable ambiguity. If Apex itself is unreachable when
+   a report is generated, delivery fails before any row is created and the
+   next day's timer simply tries again -- there is no same-day retry.
+7. SendGrid is used through SMTP port 587 with STARTTLS certificate
+   validation, username `apikey`, and a root-managed key readable by
+   `tvt-report`. Plate text, person display names, images, credentials, and
+   event bodies are excluded from both emails and from observability.
 
-The reporting OS account has write access only to its state directory. The
-collector unit can reach loopback only; the delivery oneshot is the sole
-reporting process allowed outbound network access. Operators configure the two
-camera IDs, verified sender, and recipient in `/etc/tvt/anpr-report.env`, place
-the SendGrid key in `/etc/tvt/anpr-report-sendgrid-key` with owner
-`root:tvt-report` and mode `0640`, then enable the collector and timer.
+The reporting OS account has write access only to its state directory; the
+delivery oneshots are the only reporting processes allowed outbound network
+access (to SendGrid) alongside loopback access to Apex. Operators configure
+the verified sender and recipient in `/etc/tvt/anpr-report.env` (shared by
+both jobs), place the SendGrid key in `/etc/tvt/anpr-report-sendgrid-key`
+with owner `root:tvt-report` and mode `0640`, then enable both timers.
 
 ## 13. Camera assignment
 
@@ -768,6 +778,13 @@ has suitable plate angle, resolution, illumination, and shutter behavior.
 Camera-to-use-case assignment is desired state stored outside application
 images. A camera may feed several CV workloads, and each independently deployed
 consumer opens its own physical RTSP session.
+
+Each camera's ANPR zone and/or entry/exit line geometry (which endpoint faces
+the plant interior, and its Entry/Exit role) is configured per camera through
+the console's Zones & Lines tab, over a live snapshot -- see `HLD.md` §3.8.
+The "Site role"/"Direction" columns above are the gate name and role that
+tab's Entry/Exit line configuration is expected to use, correlating the two
+cameras at a physical gate.
 
 ## 14. Observability and error handling
 

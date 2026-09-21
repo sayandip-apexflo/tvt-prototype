@@ -212,26 +212,29 @@ curl --fail --silent --show-error \
   http://127.0.0.1:8089/api/v1/solutions | python3 -m json.tool
 ```
 
-The same bootstrap installs the disabled daily ANPR reporting units. After
-reviewing `/etc/tvt/anpr-report.env`, setting the two camera IDs/sender/
-recipient, and installing the SendGrid key with protected ownership, enable
-only the collector and the once-daily timer:
+The same bootstrap installs the disabled daily vehicle-traffic and
+attendance reporting units. Both fetch their content live from
+apexfabric-control at send time (no local collector to run) — a gate only
+appears once a camera has saved Entry and Exit lines. After reviewing
+`/etc/tvt/anpr-report.env`, setting sender/recipient, and installing the
+SendGrid key with protected ownership, enable the once-daily timers:
 
 ```bash
 sudo install -o root -g tvt-report -m 0640 /path/to/sendgrid-key \
   /etc/tvt/anpr-report-sendgrid-key
-sudo systemctl enable --now tvt-anpr-report-collector.service \
-  tvt-anpr-report.timer
-systemctl list-timers tvt-anpr-report.timer
+sudo systemctl enable --now tvt-anpr-report.timer \
+  tvt-anpr-report-attendance.timer
+systemctl list-timers 'tvt-anpr-report*.timer'
 ```
 
-The timer is fixed at 18:30 Asia/Kolkata and is non-persistent. Use the
-following read-only checks; do not manually start the mail service in
-production because that consumes the date's sole delivery attempt:
+The vehicle-traffic timer is fixed at 18:30 Asia/Kolkata, attendance at
+18:35, both non-persistent. Use the following read-only checks; do not
+manually start either mail service in production because that consumes the
+date's sole delivery attempt for that report:
 
 ```bash
-systemctl status tvt-anpr-report-collector.service tvt-anpr-report.timer
-journalctl -u tvt-anpr-report-collector.service --since today
+systemctl status tvt-anpr-report.timer tvt-anpr-report-attendance.timer
+journalctl -u tvt-anpr-report.service -u tvt-anpr-report-attendance.service --since today
 ```
 
 Run refresh only after image synchronization succeeds. The entry becomes

@@ -6,6 +6,7 @@ import ipaddress
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 def require_loopback_ip(value: str, setting: str = "TVT_LISTEN_HOST") -> str:
@@ -17,6 +18,21 @@ def require_loopback_ip(value: str, setting: str = "TVT_LISTEN_HOST") -> str:
         raise ValueError(f"{setting} must be an explicit loopback IP address") from error
     if not address.is_loopback:
         raise ValueError(f"{setting} must bind to loopback")
+    return value
+
+
+def require_loopback_http_url(value: str, setting: str) -> str:
+    """Require an explicit loopback HTTP URL with no path/query/credentials.
+
+    Same policy tvt_edge/reporting/settings.py applies to TVT_REPORT_APEX_URL --
+    both reach the same apexfabric-control HTTP API on the loopback interface.
+    """
+
+    parsed = urlsplit(value)
+    if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "::1"}:
+        raise ValueError(f"{setting} must be an explicit loopback HTTP URL")
+    if parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password:
+        raise ValueError(f"{setting} must contain only scheme, host, and port")
     return value
 
 
@@ -32,6 +48,7 @@ class Settings:
     sync_namespace: str = "apexfabric"
     sync_worker_id: str = "tvt-edge"
     rollout_timeout: int = 180
+    apex_url: str = "http://127.0.0.1:8088"
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -53,6 +70,9 @@ class Settings:
             raise ValueError("TVT_METRICS_LISTEN_HOST must be an explicit IP address") from error
         if metrics_address.is_unspecified:
             raise ValueError("TVT_METRICS_LISTEN_HOST must not expose every host interface")
+        apex_url = require_loopback_http_url(
+            os.getenv("TVT_APEX_URL", cls.apex_url).rstrip("/"), "TVT_APEX_URL"
+        )
         return cls(
             database_url=os.getenv("TVT_DATABASE_URL", cls.database_url),
             credential_key_dir=Path(
@@ -66,4 +86,5 @@ class Settings:
             sync_namespace=os.getenv("TVT_SYNC_NAMESPACE", "apexfabric"),
             sync_worker_id=os.getenv("TVT_SYNC_WORKER_ID", "tvt-edge"),
             rollout_timeout=timeout,
+            apex_url=apex_url,
         )

@@ -46,6 +46,35 @@ export interface Camera {
   updated_at: string;
 }
 
+export interface GeometryShape {
+  shape_id: string;
+  kind: "zone" | "line";
+  shape_key: string;
+  name: string;
+  points: number[][];
+  role_key?: string | null;
+  direction?: "entry" | "exit" | null;
+  inside_side?: "a" | "b" | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+export interface CameraGeometryResponse {
+  shapes: GeometryShape[];
+  compiled_config: Record<string, unknown>;
+}
+
+export interface AttendanceSession {
+  id: string; person_id: string; gate: string; display_name?: string;
+  entry_time?: number | null; exit_time?: number | null; duration_seconds?: number | null; status: string;
+}
+export interface AttendanceReport { sessions: AttendanceSession[]; total_duration_seconds: number }
+export interface VehicleSession {
+  id: string; plate_text: string; gate: string;
+  entry_time?: number | null; exit_time?: number | null; status: string;
+}
+export interface VehicleTrafficReport { sessions: VehicleSession[]; entered_count: number; exited_count: number }
+
 export interface LiveFeedSnapshot { snapshot_id: string; source_url: string; url: string }
 export interface LiveFeedEvent {
   event_id: string;

@@ -176,14 +176,17 @@ install -o root -g root -m 0644 \
   "${REPO_ROOT}/deploy/systemd/tvt-alert-dispatcher.service" \
   /etc/systemd/system/tvt-alert-dispatcher.service
 install -o root -g root -m 0644 \
-  "${REPO_ROOT}/deploy/systemd/tvt-anpr-report-collector.service" \
-  /etc/systemd/system/tvt-anpr-report-collector.service
-install -o root -g root -m 0644 \
   "${REPO_ROOT}/deploy/systemd/tvt-anpr-report.service" \
   /etc/systemd/system/tvt-anpr-report.service
 install -o root -g root -m 0644 \
   "${REPO_ROOT}/deploy/systemd/tvt-anpr-report.timer" \
   /etc/systemd/system/tvt-anpr-report.timer
+install -o root -g root -m 0644 \
+  "${REPO_ROOT}/deploy/systemd/tvt-anpr-report-attendance.service" \
+  /etc/systemd/system/tvt-anpr-report-attendance.service
+install -o root -g root -m 0644 \
+  "${REPO_ROOT}/deploy/systemd/tvt-anpr-report-attendance.timer" \
+  /etc/systemd/system/tvt-anpr-report-attendance.timer
 install -o root -g root -m 0644 \
   "${REPO_ROOT}/deploy/systemd/tvt-k3s-watchdog.service" \
   /etc/systemd/system/tvt-k3s-watchdog.service

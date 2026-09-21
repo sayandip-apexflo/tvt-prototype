@@ -1,0 +1,11 @@
+[Unit]
+Description=Send the TVT daily attendance report at 18:35 Asia/Kolkata
+
+[Timer]
+OnCalendar=*-*-* 18:35:00 Asia/Kolkata
+AccuracySec=1s
+Persistent=false
+Unit=tvt-anpr-report-attendance.service
+
+[Install]
+WantedBy=timers.target

@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from apexfabric.solution_management.renderer import Kubectl
 from tvt_edge import __version__
 from tvt_edge.alerting import AlertingService
+from tvt_edge.apex_client import ApexClient, ApexUnavailableError
 from tvt_edge.cluster import ClusterStatusReader
 from tvt_edge.observability import (
     EdgeMetrics,
@@ -136,6 +137,26 @@ class CameraCredentialsInput(StrictModel):
     path_suffix: str | None = None
 
 
+class CameraZoneInput(StrictModel):
+    name: str
+    points: list[list[float]]
+
+
+class CameraLineInput(StrictModel):
+    name: str
+    points: list[list[float]]
+    role_key: str
+    direction: str
+    inside_side: str
+
+
+class CameraRoleInput(StrictModel):
+    role_key: str
+    display_name: str
+    direction: str = "unknown"
+    ordinal: int | None = None
+
+
 MAX_API_REQUEST_BYTES = 1024 * 1024
 
 
@@ -170,6 +191,7 @@ def create_app(
     allowed_namespace: str = "apexfabric",
     kubectl: Kubectl | None = None,
     watchdog_state_path: Path = STATE_PATH,
+    apex_url: str = "http://127.0.0.1:8088",
 ) -> FastAPI:
     app = FastAPI(
         title="TVT edge management",
@@ -180,6 +202,7 @@ def create_app(
     )
     service = ManagementService(sessions, keyring)
     alerting = AlertingService(sessions)
+    apex = ApexClient(apex_url)
     cluster_status = ClusterStatusReader(kubectl, allowed_namespace)
     metrics = EdgeMetrics("edge-management")
     metrics.set_build(__version__)
@@ -454,6 +477,96 @@ def create_app(
         service.clear_credentials(camera_id, actor, request_id)
         return Response(status_code=204)
 
+    @app.get("/api/v1/cameras/{camera_id}/geometry")
+    def list_camera_geometry(camera_id: str) -> dict[str, Any]:
+        return {
+            "shapes": service.list_camera_geometry(camera_id),
+            "compiled_config": service.camera_geometry_config(camera_id),
+        }
+
+    @app.post("/api/v1/cameras/{camera_id}/zones", status_code=201)
+    def create_camera_zone(
+        camera_id: str,
+        body: CameraZoneInput,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        return service.create_camera_zone(
+            camera_id, body.name, body.points, actor, request_id
+        )
+
+    @app.post("/api/v1/cameras/{camera_id}/lines", status_code=201)
+    def create_camera_line(
+        camera_id: str,
+        body: CameraLineInput,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        return service.create_camera_line(
+            camera_id,
+            body.name,
+            body.points,
+            body.role_key,
+            body.direction,
+            body.inside_side,
+            actor,
+            request_id,
+        )
+
+    @app.delete("/api/v1/cameras/{camera_id}/geometry/{shape_id}", status_code=204)
+    def delete_camera_geometry(
+        camera_id: str,
+        shape_id: str,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> Response:
+        actor, request_id = identity(request, x_tvt_actor)
+        service.delete_camera_geometry(camera_id, shape_id, actor, request_id)
+        return Response(status_code=204)
+
+    @app.put("/api/v1/cameras/{camera_id}/role")
+    def assign_camera_role(
+        camera_id: str,
+        body: CameraRoleInput,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        service.assign_camera_role(
+            camera_id,
+            body.role_key,
+            body.display_name,
+            body.direction,
+            body.ordinal,
+            actor,
+            request_id,
+        )
+        return service.get_camera(camera_id)
+
+    @app.get("/api/v1/cameras/{camera_id}/snapshot")
+    def camera_snapshot(camera_id: str) -> Response:
+        # Not credential-bearing: this is a single rendered JPEG frame from
+        # apexfabric-control's existing ffmpeg-backed snapshot endpoint, never
+        # the RTSP URL itself (AGENTS.md security invariants).
+        service.get_camera(camera_id)  # 404s cleanly if the camera is unknown
+        try:
+            result = apex.get("/api/cameras/snapshot", {"camera_id": camera_id})
+        except ApexUnavailableError:
+            return Response(
+                content='{"detail":"camera preview is unavailable"}',
+                status_code=502,
+                media_type="application/json",
+            )
+        if result.status != 200:
+            return Response(
+                content='{"detail":"camera preview is unavailable"}',
+                status_code=502,
+                media_type="application/json",
+            )
+        return Response(content=result.body, media_type="image/jpeg")
+
     @app.delete("/api/v1/cameras/{camera_id}", status_code=204)
     def delete_camera(
         camera_id: str,
@@ -626,5 +739,34 @@ def create_app(
     @app.get("/api/v1/deployments/{deployment_id}/enrollment-windows")
     def enrollment_windows(deployment_id: str) -> list[dict[str, Any]]:
         return service.list_enrollment_windows(deployment_id)
+
+    def _proxy_report(path: str, query: dict[str, str | None]) -> Response:
+        # Thin proxy to apexfabric-control's already-implemented, already-tested
+        # attendance/vehicle-traffic aggregation (apexfabric/control_plane/reporting.py).
+        # Returns plate text and person id/display name, matching what that
+        # endpoint already returns -- no new PII exposure.
+        try:
+            result = apex.get(path, query)
+        except ApexUnavailableError:
+            return Response(
+                content='{"detail":"reporting is unavailable"}',
+                status_code=502,
+                media_type="application/json",
+            )
+        return Response(
+            content=result.body, status_code=result.status, media_type=result.content_type
+        )
+
+    @app.get("/api/v1/reports/attendance")
+    def attendance_report(person_id: str | None = None, date: str | None = None) -> Response:
+        return _proxy_report(
+            "/api/reports/attendance", {"person_id": person_id, "date": date}
+        )
+
+    @app.get("/api/v1/reports/vehicle-traffic")
+    def vehicle_traffic_report(date: str | None = None, gate: str | None = None) -> Response:
+        return _proxy_report(
+            "/api/reports/vehicle-traffic", {"date": date, "gate": gate}
+        )
 
     return app

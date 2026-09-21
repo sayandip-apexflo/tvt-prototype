@@ -568,21 +568,28 @@ links. It must not contain camera credentials, direct RTSP URLs, faces,
 embeddings, people, plates, Kubernetes Secret values, raw logs, or stack traces.
 The dispatcher is not the automated daily business-report mailer.
 
-### 10.3 Daily ANPR report boundary
+### 10.3 Daily vehicle-traffic/attendance report boundary
 
 The separate `tvt-anpr-report` component uses SendGrid but does not reuse the
 operational-alert webhook, policy, outbox, reminders, recovery notifications,
-or metrics. Its non-persistent systemd timer has one firing at 18:30
-Asia/Kolkata and its per-date row permits one delivery attempt only. A failed
-daily report is recorded as a bounded failure code and JSON error log; it is
-not retried or sent late.
+or metrics. It has no local collector: both the vehicle-traffic and
+attendance reports fetch their content live from apexfabric-control's
+already-aggregated reporting endpoints (`GET /api/reports/vehicle-traffic`,
+`GET /api/reports/attendance`) at send time. Each report kind has its own
+non-persistent systemd timer (18:30 Asia/Kolkata for vehicle traffic, 18:35
+for attendance) and its own per-(date, report_kind) row that permits one
+delivery attempt only. A failed daily report is recorded as a bounded
+failure code and JSON error log; it is not retried or sent late.
 
-Collector and delivery logs may state only lifecycle/result/error-code facts.
-They must not include plate text, event bodies, recipient addresses, SMTP
-responses, or exception messages outside the existing application redactor.
-The emailed CSV also uses opaque vehicle references rather than plates. Report
-counts, duration totals, and send state are business-report data and must not be
-added as Prometheus labels.
+Delivery logs may state only lifecycle/result/error-code facts. They must
+not include plate text, person display names, event bodies, recipient
+addresses, SMTP responses, or exception messages outside the existing
+application redactor. The emailed vehicle-traffic CSV uses opaque
+`vehicle_ref` tokens rather than plates; the emailed attendance CSV uses the
+internal `person_id` rather than a display name (the loopback management
+API/UI may show plates and display names -- see `AGENTS.md` §4 -- only the
+email channel is restricted). Report counts, duration totals, and send state
+are business-report data and must not be added as Prometheus labels.
 
 ## 11. Structured JSON logging
 
