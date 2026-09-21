@@ -282,6 +282,10 @@ class TvtMillsQualificationTests(unittest.TestCase):
                     "analytics-event.example.json"
                 ],
             },
+            "compatibility": {
+                "plan_compiler": metadata["plan_compiler_compatibility"]["id"],
+                "sha256": metadata["plan_compiler_compatibility"]["sha256"],
+            },
         }
         return TvtMillsQualifier(
             api or FakeApi(),

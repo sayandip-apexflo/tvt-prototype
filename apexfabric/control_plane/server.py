@@ -39,6 +39,10 @@ IMAGE_RE = re.compile(r"[^@\s]+")
 TVT_MILLS_APPS = {"face_recognition", "face_enrollment", "anpr"}
 CAMERA_INVENTORY_CONFIG_MAP = "apexfabric-camera-inventory"
 CAMERA_INVENTORY_SECRET = "apexfabric-camera-sources"
+# The "people/vehicles currently in frame" feature was removed from the
+# dashboard; drop these event types at ingestion so no telemetry endpoint
+# serves them, rather than just hiding them client-side.
+SUPPRESSED_TELEMETRY_EVENT_TYPES = {"pedestrian_count_per_frame", "vehicle_count_per_frame"}
 TRAFFIC_INFERENCE_MODES = {
     "cpu-compatible": {"VEHICLE_DEVICE": "CPU", "PLATE_DEVICE": "CPU", "OCR_DEVICE": "CPU"},
     "intel-gpu-npu": {"VEHICLE_DEVICE": "GPU", "PLATE_DEVICE": "NPU", "OCR_DEVICE": "MULTI:GPU,NPU"},
@@ -1325,7 +1329,9 @@ class Controller:
                         if not line:
                             if data_lines:
                                 payload = json.loads("\n".join(data_lines))
-                                if isinstance(payload, dict):
+                                event_type = payload.get("type") or payload.get("event_type") or payload.get("event") \
+                                    if isinstance(payload, dict) else None
+                                if isinstance(payload, dict) and event_type not in SUPPRESSED_TELEMETRY_EVENT_TYPES:
                                     # Snapshot fetches shell out to kubectl and must not
                                     # block draining the SSE pipe, or ingestion falls
                                     # behind the live stream. Insert the event inline

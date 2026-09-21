@@ -60,6 +60,8 @@ class PipelineImageSyncTests(unittest.TestCase):
         self.assertIn("metrics_schema_sha256", verifier)
         self.assertIn("analytics_event_schema_sha256", verifier)
         self.assertIn("analytics_event_example_sha256", verifier)
+        self.assertIn("plan compiler compatibility", verifier)
+        self.assertIn("plan compiler checksum", verifier)
         self.assertNotIn("kubectl", verifier)
 
     def test_all_phase3_shell_scripts_have_valid_syntax(self):

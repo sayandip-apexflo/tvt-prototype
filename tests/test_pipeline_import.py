@@ -113,6 +113,12 @@ class PipelineImportTests(unittest.TestCase):
                     "PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256"
                 ],
             },
+            "compatibility": {
+                "plan_compiler": values[
+                    "PIPELINE_TRAFFIC_PLAN_COMPILER_COMPATIBILITY_ID"
+                ],
+                "sha256": values["PIPELINE_TRAFFIC_PLAN_COMPILER_SHA256"],
+            },
             "verification_timestamp": "2026-09-03T00:00:00+00:00",
         }
 
@@ -143,6 +149,10 @@ class PipelineImportTests(unittest.TestCase):
         self.assertEqual(
             values["PIPELINE_TRAFFIC_LOCAL_TAG"],
             "intel-285h-2026.09.18-v1",
+        )
+        self.assertEqual(
+            values["PIPELINE_TRAFFIC_PLAN_COMPILER_COMPATIBILITY_ID"],
+            "tvt-direct-desired-state-v1",
         )
         self.assertNotIn("latest", self.text("config/pipeline.env").lower())
 
@@ -178,6 +188,7 @@ class PipelineImportTests(unittest.TestCase):
             'config.get("User")',
             'config.get("ExposedPorts")',
             "edge-main.py",
+            "edge-agent.py",
             "vehicle.xml",
             "license_plate.bin",
             "ocr.xml",
@@ -187,6 +198,8 @@ class PipelineImportTests(unittest.TestCase):
             self.assertIn(required, combined)
         self.assertNotIn("docker run", script)
         self.assertIn('docker create "${source_image}"', script)
+        self.assertIn("docker start --attach", script)
+        self.assertIn("TVT Mills compatibility image build", script)
 
     def test_source_build_is_rejected_for_the_vendor_release(self):
         script = self.operation("import-pipeline-traffic-image.sh")
@@ -277,6 +290,8 @@ class PipelineImportTests(unittest.TestCase):
             '"metrics_schema_sha256"',
             '"analytics_event_schema_sha256"',
             '"analytics_event_example_sha256"',
+            '"compatibility"',
+            '"plan_compiler"',
             '"verification_timestamp"',
         ):
             self.assertIn(field, script)

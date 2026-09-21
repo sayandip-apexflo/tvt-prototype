@@ -28,10 +28,32 @@ runtime and baked traffic and face models. It declares Linux `amd64`, Intel
 `tvt-mills-pilot-v1` contract. It exposes `/healthz`, `/readyz`, `/metrics`,
 `/events`, and snapshot routes.
 
-The importer validates the image metadata and all configured model hashes by
-creating, but never starting, a temporary container. It then retags the source
-image to the edge-local `apexfabric/tvt-mills-pilot` repository, pushes it to
-the loopback registry, and records the registry-produced digest.
+The vendor runtime consumes and watches `/configs/desired_state.json`
+directly. It does not ship the historical
+`edge_runtime.agent.edge_agent` module that the frozen ApexFabric V1 renderer
+invokes as its plan-compiler init container. During import, TVT therefore
+adds a checksum-pinned compatibility layer containing that module. The module
+validates revision, camera IDs, application selection, protected `file:`
+source references, and the baked model root, then writes only a deterministic,
+non-secret plan receipt. The main `python -m edge` process remains responsible
+for interpreting and hot-reloading desired state.
+
+ANPR event emission also requires spatial configuration: a confirmed plate is
+published only when its center is inside a configured `config.zones.anpr`
+polygon or crosses an accepted `config.lines` entry. Enabling the `anpr`
+application without either geometry type can leave snapshots healthy while
+producing no `plate_read_event` records. If a live geometry revision times out,
+restart the allowlisted runtime workload so it starts from the current
+desired-state ConfigMap revision.
+
+The importer validates the image metadata and all configured model hashes with
+a stopped temporary container, builds the compatibility layer without network
+access, verifies the installed module checksum, and starts only its bounded
+`--help` path to prove the final image can import it. It never starts camera or
+inference processing. It then retags the derived image to the edge-local
+`apexfabric/tvt-mills-pilot` repository, pushes it to the loopback registry,
+and records the registry-produced digest plus compatibility identity in the
+private image lock.
 
 ## Vendored metadata and catalog
 

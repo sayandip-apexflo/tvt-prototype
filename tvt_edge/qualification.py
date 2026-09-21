@@ -639,6 +639,8 @@ class TvtMillsQualifier:
                 lock_archive = image_lock.get("archive", {})
                 lock_image = image_lock.get("image", {})
                 lock_metadata = image_lock.get("metadata", {})
+                lock_compatibility = image_lock.get("compatibility", {})
+                plan_compiler = metadata["plan_compiler_compatibility"]
                 expected_metadata = {
                     "image_contract_sha256": metadata["checksums"][
                         "image-contract.yaml"
@@ -675,6 +677,11 @@ class TvtMillsQualifier:
                     == (deployment or {}).get("applied_image_digest")
                     and lock_image.get("architecture") == "amd64"
                     and lock_metadata == expected_metadata
+                    and lock_compatibility
+                    == {
+                        "plan_compiler": plan_compiler["id"],
+                        "sha256": plan_compiler["sha256"],
+                    }
                 )
                 self._check(
                     "image_lock.immutable",

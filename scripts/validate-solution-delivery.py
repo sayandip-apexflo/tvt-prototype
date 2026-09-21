@@ -76,6 +76,9 @@ def validate(catalog: Path, config: Path, archive: Path) -> None:
     pipeline = provenance.get("pipeline") or {}
     delivery = provenance.get("delivery") or {}
     archive_record = provenance.get("archive") or {}
+    plan_compiler = (provenance.get("platform_compatibility") or {}).get(
+        "plan_compiler"
+    ) or {}
     archive_size = archive.stat().st_size
     archive_sha256 = sha256(archive)
 
@@ -93,6 +96,14 @@ def validate(catalog: Path, config: Path, archive: Path) -> None:
         "archive image": (archive_record.get("loaded_image"), values.get("PIPELINE_TRAFFIC_ARCHIVE_IMAGE")),
         "delivery directory": (delivery.get("directory"), values.get("PIPELINE_TRAFFIC_DELIVERY_DIR")),
         "source commit": (pipeline.get("commit"), values.get("PIPELINE_REVISION")),
+        "plan compiler compatibility": (
+            plan_compiler.get("id"),
+            values.get("PIPELINE_TRAFFIC_PLAN_COMPILER_COMPATIBILITY_ID"),
+        ),
+        "plan compiler checksum": (
+            plan_compiler.get("sha256"),
+            values.get("PIPELINE_TRAFFIC_PLAN_COMPILER_SHA256"),
+        ),
     }
     configured_repository = values.get("PIPELINE_REPOSITORY", "").removesuffix(".git")
     expected["source repository"] = (pipeline.get("repository"), configured_repository)

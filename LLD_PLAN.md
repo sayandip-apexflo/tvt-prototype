@@ -564,6 +564,15 @@ device mounts exactly as in `k3s-prototype`. The physical RTSP URL, including
 credentials when required, is the file content. The CV application opens that
 source directly and owns reconnect, decode, readiness and metrics.
 
+For the TVT Mills vendor image, the init-container module is supplied by a
+checksum-pinned TVT compatibility layer added during image import. The vendor
+runtime natively consumes and watches the mounted desired-state document, so
+the compatibility compiler acts as a startup gate: it validates the public
+desired-state structure and writes a non-secret receipt to `/plans`; it never
+reads or copies the camera-source file contents. This preserves the unchanged
+reference renderer and its init sequencing without pretending the vendor
+runtime consumes the legacy compiled-plan format.
+
 Every CV Pod must have egress to DNS and the explicitly configured camera
 subnet because it reaches physical cameras. The unchanged reference renderer
 does not render egress policy, so the installer applies an additive TVT

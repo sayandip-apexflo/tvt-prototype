@@ -20,6 +20,13 @@
     "repository": "apexfabric/tvt-mills-pilot",
     "tag": "intel-285h-2026.09.18-v1"
   },
+  "platform_compatibility": {
+    "plan_compiler": {
+      "id": "tvt-direct-desired-state-v1",
+      "module": "edge_runtime.agent.edge_agent",
+      "sha256": "8f431f567e0474b7f5a84725cb09f47d7cd3c50e5c153173044f60ea46e39f65"
+    }
+  },
   "files": {
     "image-contract.yaml": {
       "sha256": "27b829b98f11fcdfa2e444ac8072b23885dca89f4a7c2c312e61934cd5eaeb16"
@@ -40,7 +47,7 @@
       "sha256": "681d42d8757adda5a23169029461a4503cf600bcc1236d256f38482992e573e8"
     }
   },
-  "note": "image-contract.yaml, desired-state.schema.json, and desired-state.example.json in this directory are repo-authored, not copied from the vendor delivery verbatim -- see docs/contracts/tvt-mills-v1/README.md for what changed and why (cameras.items inlined for apexfabric/solution_management/catalog.py ingestion; line id pattern tightened to require an _entry/_exit suffix; metrics.schema.json is a permissive placeholder because the vendor never published one). analytics-event.schema.json is reproduced unmodified because it describes what the shipped binary actually emits. MANAGER-UI-HANDOFF.md, management-api.openapi.yaml, and manifests/tvt-edge.yaml are vendor documentation only, not consumed by this platform's ingestion path, and are not vendored into this directory. The archive's sha256 above is the vendor's published release digest (release tag tvt-edge-intel-285h-2026.09.18-v1); the six `files` checksums are self-checksums of this directory's own files (`sha256sum image-contract.yaml desired-state.schema.json desired-state.example.json metrics.schema.json analytics-event.schema.json analytics-event.example.json`), the same way the legacy traffic pack's provenance.json was populated. Recompute them whenever any of those six files change -- tvt_edge/delivery_metadata.py:load_delivery_metadata rejects a mismatch.",
+  "note": "image-contract.yaml, desired-state.schema.json, and desired-state.example.json in this directory are repo-authored, not copied from the vendor delivery verbatim -- see docs/contracts/tvt-mills-v1/README.md for what changed and why (cameras.items inlined for apexfabric/solution_management/catalog.py ingestion; line id pattern tightened to require an _entry/_exit suffix; metrics.schema.json is a permissive placeholder because the vendor never published one). analytics-event.schema.json is reproduced unmodified because it describes what the shipped binary actually emits. MANAGER-UI-HANDOFF.md, management-api.openapi.yaml, and manifests/tvt-edge.yaml are vendor documentation only, not consumed by this platform's ingestion path, and are not vendored into this directory. The archive's sha256 above is the vendor's published release digest (release tag tvt-edge-intel-285h-2026.09.18-v1); the six `files` checksums are self-checksums of this directory's own files (`sha256sum image-contract.yaml desired-state.schema.json desired-state.example.json metrics.schema.json analytics-event.schema.json analytics-event.example.json`), the same way the legacy traffic pack's provenance.json was populated. Recompute them whenever any of those six files change -- tvt_edge/delivery_metadata.py:load_delivery_metadata rejects a mismatch. The platform_compatibility record pins the TVT-owned direct-desired-state compiler shim layered onto the vendor archive; the private import lock binds the resulting registry digest to that identity and checksum.",
   "known_deviation_from_vendor_schema": {
     "desired-state.schema.json": "vendor's cameras array used {\"items\": {\"$ref\": \"#/$defs/camera\"}}; this repo's copy inlines the camera object under cameras.items so SolutionCatalog._validate_ui_annotations (apexfabric/solution_management/catalog.py) can read the apps enum without resolving refs, and tightens line.id's pattern to require an _entry/_exit suffix. Both are additive/structural-only: they reject a strict subset of what the vendor's original pattern accepted and do not change how the running image interprets desired_state.json."
   },

@@ -92,6 +92,9 @@ def load_delivery_metadata(directory: Path, expected_name: str = "tvt-mills-pilo
     delivery = provenance.get("delivery") or {}
     archive = provenance.get("archive") or {}
     local_image = provenance.get("local_image") or {}
+    plan_compiler = (provenance.get("platform_compatibility") or {}).get(
+        "plan_compiler"
+    )
     if contract.get("name") != expected_name:
         raise CatalogError("unexpected solution name in image contract")
     if str(contract.get("version")) != delivery.get("version"):
@@ -113,6 +116,14 @@ def load_delivery_metadata(directory: Path, expected_name: str = "tvt-mills-pilo
         raise CatalogError("catalog ID disagrees with the image contract")
     if local_image.get("tag") != f"intel-285h-{contract['version']}":
         raise CatalogError("local image tag disagrees with the image contract")
+    if (
+        not isinstance(plan_compiler, dict)
+        or plan_compiler.get("id") != "tvt-direct-desired-state-v1"
+        or plan_compiler.get("module") != "edge_runtime.agent.edge_agent"
+        or not isinstance(plan_compiler.get("sha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", plan_compiler["sha256"])
+    ):
+        raise CatalogError("plan-compiler compatibility provenance is invalid")
 
     return {
         "catalog_id": expected_catalog_id,
@@ -128,6 +139,7 @@ def load_delivery_metadata(directory: Path, expected_name: str = "tvt-mills-pilo
         "metrics_schema": metrics_schema,
         "analytics_event_schema": event_schema,
         "analytics_event_example": event_example,
+        "plan_compiler_compatibility": dict(plan_compiler),
         "provenance": provenance,
         "checksums": checksums,
     }

@@ -1168,6 +1168,7 @@ for digest_variable in \
   PIPELINE_TRAFFIC_METRICS_SCHEMA_SHA256 \
   PIPELINE_TRAFFIC_ANALYTICS_EVENT_SCHEMA_SHA256 \
   PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256 \
+  PIPELINE_TRAFFIC_PLAN_COMPILER_SHA256 \
   PIPELINE_FACE_MODEL_ADAFACE_XML_SHA256 \
   PIPELINE_FACE_MODEL_ADAFACE_BIN_SHA256 \
   PIPELINE_FACE_MODEL_DETECTOR_SHA256 \
@@ -1183,6 +1184,10 @@ done
 }
 [[ "${PIPELINE_TRAFFIC_LOCAL_TAG}" == *"${PIPELINE_TRAFFIC_VERSION}"* ]] || {
   echo "PIPELINE_TRAFFIC_LOCAL_TAG must include ${PIPELINE_TRAFFIC_VERSION}" >&2
+  exit 1
+}
+[[ "${PIPELINE_TRAFFIC_PLAN_COMPILER_COMPATIBILITY_ID}" == "tvt-direct-desired-state-v1" ]] || {
+  echo "unsupported TVT Mills plan-compiler compatibility ID" >&2
   exit 1
 }
 [[ "${LOCAL_REGISTRY_ADDRESS}" == "127.0.0.1:5000" ]] || {
@@ -1327,7 +1332,9 @@ if [[ -f "${LOCK_OUTPUT}" && "$(stat -c '%a' "${LOCK_OUTPUT}")" == 600 ]]; then
     "${PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256}" \
     "${PIPELINE_TRAFFIC_METRICS_SCHEMA_SHA256}" \
     "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_SCHEMA_SHA256}" \
-    "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256}" "${SOURCE_MODE}" <<'PY'
+    "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256}" \
+    "${PIPELINE_TRAFFIC_PLAN_COMPILER_COMPATIBILITY_ID}" \
+    "${PIPELINE_TRAFFIC_PLAN_COMPILER_SHA256}" "${SOURCE_MODE}" <<'PY'
 import json
 import re
 import sys
@@ -1342,6 +1349,7 @@ archive = lock.get("archive", {})
 image = lock.get("image", {})
 metadata = lock.get("metadata", {})
 source = lock.get("source", {})
+compatibility = lock.get("compatibility", {})
 matches = (
     lock.get("format_version") == 2
     and lock.get("catalog_id") == sys.argv[2]
@@ -1359,7 +1367,9 @@ matches = (
     and metadata.get("metrics_schema_sha256") == sys.argv[14]
     and metadata.get("analytics_event_schema_sha256") == sys.argv[15]
     and metadata.get("analytics_event_example_sha256") == sys.argv[16]
-    and source.get("mode") == sys.argv[17]
+    and compatibility.get("plan_compiler") == sys.argv[17]
+    and compatibility.get("sha256") == sys.argv[18]
+    and source.get("mode") == sys.argv[19]
 )
 digest = image.get("digest", "")
 reference = f"{sys.argv[9]}/{sys.argv[10]}@{digest}"
@@ -1396,13 +1406,14 @@ source_dir="${WORK_DIR}/source-${PIPELINE_REVISION}"
 credential_helper=""
 verification_dir=""
 temporary_context=""
+compatibility_context=""
 verification_container=""
 cleanup() {
   if [[ -n "${verification_container}" ]]; then
     timeout 30s docker rm --force "${verification_container}" >/dev/null 2>&1 || true
   fi
   for temporary_path in "${credential_helper}" "${verification_dir}" "${temporary_context}" \
-    "${oci_load_directory}"; do
+    "${compatibility_context}" "${oci_load_directory}"; do
     if [[ -n "${temporary_path}" && "${temporary_path}" == "${WORK_DIR}"/* ]]; then
       rm -rf -- "${temporary_path}"
     fi
@@ -1551,8 +1562,51 @@ else
 fi
 fi
 
+# The vendor TVT Mills image consumes /configs/desired_state.json directly,
+# while the frozen ApexFabric V1 renderer first invokes
+# edge_runtime.agent.edge_agent in an init container. Add a TVT-owned,
+# checksum-pinned compatibility module as a derived layer. This keeps the
+# reference renderer untouched and does not copy camera Secret contents into
+# the image or the generated plan receipt.
+compatibility_source=""
+for candidate in \
+  "${REPO_ROOT}/tvt_runtime/image_compat/edge_runtime/agent/edge_agent.py" \
+  "/opt/tvt/venv/lib/python3.12/site-packages/tvt_runtime/image_compat/edge_runtime/agent/edge_agent.py"; do
+  if [[ -f ${candidate} && ! -L ${candidate} ]]; then
+    compatibility_source="${candidate}"
+    break
+  fi
+done
+[[ -n ${compatibility_source} ]] || {
+  echo "TVT Mills plan-compiler compatibility module is unavailable" >&2
+  exit 1
+}
+echo "${PIPELINE_TRAFFIC_PLAN_COMPILER_SHA256}  ${compatibility_source}" \
+  | sha256sum --check --status || {
+  echo "TVT Mills plan-compiler compatibility checksum failed" >&2
+  exit 1
+}
+compatibility_context="$(mktemp -d "${WORK_DIR}/plan-compiler.XXXXXX")"
+install -d -m 0755 "${compatibility_context}/edge_runtime/agent"
+install -m 0644 /dev/null "${compatibility_context}/edge_runtime/__init__.py"
+install -m 0644 /dev/null "${compatibility_context}/edge_runtime/agent/__init__.py"
+install -m 0644 "${compatibility_source}" \
+  "${compatibility_context}/edge_runtime/agent/edge_agent.py"
+printf '%s\n' \
+  'ARG BASE_IMAGE' \
+  'FROM ${BASE_IMAGE}' \
+  'COPY --chown=10001:10001 edge_runtime /opt/tvt/edge_runtime' \
+  "LABEL io.tvt.plan-compiler.compatibility=${PIPELINE_TRAFFIC_PLAN_COMPILER_COMPATIBILITY_ID}" \
+  >"${compatibility_context}/Dockerfile"
+compatible_image="tvt-mills-pilot-compat:${PIPELINE_TRAFFIC_VERSION}-${PIPELINE_TRAFFIC_PLAN_COMPILER_SHA256:0:12}"
+retry_with_timeout "TVT Mills compatibility image build" 10m docker build \
+  --pull=false --network=none --platform linux/amd64 \
+  --build-arg "BASE_IMAGE=${source_image}" \
+  -t "${compatible_image}" "${compatibility_context}"
+source_image="${compatible_image}"
+
 verification_dir="$(mktemp -d "${WORK_DIR}/verify.XXXXXX")"
-echo "Inspecting the stopped v4 solution image and baked models."
+echo "Inspecting the stopped TVT Mills solution image, compatibility module, and baked models."
 timeout 1m docker image inspect "${source_image}" \
   >"${verification_dir}/image-inspect.json"
 "${REPO_ROOT}/scripts/tvt-edge-operations.sh" verify-pipeline-image-inspect \
@@ -1576,6 +1630,9 @@ timeout 10m docker cp "${verification_container}:/models/face/." \
   "${verification_dir}/models/face"
 timeout 1m docker cp "${verification_container}:/opt/tvt/edge/__main__.py" \
   "${verification_dir}/modules/edge-main.py"
+timeout 1m docker cp \
+  "${verification_container}:/opt/tvt/edge_runtime/agent/edge_agent.py" \
+  "${verification_dir}/modules/edge-agent.py"
 while read -r model_file model_sha256; do
   [[ -s "${verification_dir}/models/traffic/${model_file}" ]] || {
     echo "Traffic image is missing baked model ${model_file}" >&2
@@ -1614,6 +1671,21 @@ EOF
   echo "TVT Mills image is missing its Python runtime entrypoint" >&2
   exit 1
 }
+echo "${PIPELINE_TRAFFIC_PLAN_COMPILER_SHA256}  ${verification_dir}/modules/edge-agent.py" \
+  | sha256sum --check --status || {
+  echo "TVT Mills image has the wrong plan-compiler compatibility module" >&2
+  exit 1
+}
+timeout 30s docker rm "${verification_container}" >/dev/null
+verification_container=""
+
+# Start only the bounded compiler help path. This proves that Python can import
+# the module from the final derived image without starting camera or inference
+# processing.
+verification_container="$(timeout 1m docker create --network none \
+  --entrypoint python "${source_image}" \
+  -m edge_runtime.agent.edge_agent --help)"
+timeout 1m docker start --attach "${verification_container}" >/dev/null
 timeout 30s docker rm "${verification_container}" >/dev/null
 verification_container=""
 
@@ -1640,7 +1712,9 @@ python3 - "${temporary_lock}" "${PIPELINE_TRAFFIC_CATALOG_ID}" \
   "${PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256}" \
   "${PIPELINE_TRAFFIC_METRICS_SCHEMA_SHA256}" \
   "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_SCHEMA_SHA256}" \
-  "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256}" <<'PY'
+  "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256}" \
+  "${PIPELINE_TRAFFIC_PLAN_COMPILER_COMPATIBILITY_ID}" \
+  "${PIPELINE_TRAFFIC_PLAN_COMPILER_SHA256}" <<'PY'
 import datetime
 import json
 import sys
@@ -1675,6 +1749,10 @@ document = {
         "metrics_schema_sha256": sys.argv[17],
         "analytics_event_schema_sha256": sys.argv[18],
         "analytics_event_example_sha256": sys.argv[19],
+    },
+    "compatibility": {
+        "plan_compiler": sys.argv[20],
+        "sha256": sys.argv[21],
     },
     "verification_timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
 }
@@ -1822,7 +1900,11 @@ done
 "${ready}" || { echo "apexfabric-control.service did not become ready on 127.0.0.1:8088" >&2; exit 1; }
 
 if ! k3s kubectl get secret apexfabric-ui-admin-auth -n apexfabric >/dev/null 2>&1; then
-  password="$(openssl rand -base64 24)"
+  # APEXFABRIC_UI_ADMIN_PASSWORD lets an operator pin a known password
+  # instead of the generated-per-install random one (e.g. to match a site's
+  # existing device-admin password). Never hardcode a real password value
+  # here; pass it as an environment variable on the host at install time.
+  password="${APEXFABRIC_UI_ADMIN_PASSWORD:-$(openssl rand -base64 24)}"
   temporary_htpasswd="$(mktemp)"
   trap 'rm -f "${temporary_htpasswd}"' EXIT
   printf 'admin:%s\n' "$(openssl passwd -apr1 "${password}")" >"${temporary_htpasswd}"
@@ -1840,8 +1922,12 @@ if ! k3s kubectl get secret apexfabric-ui-admin-auth -n apexfabric >/dev/null 2>
   printf '%s\n' "${password}" >"${temporary_password}"
   chmod 0600 "${temporary_password}"
   mv -f "${temporary_password}" /etc/tvt/apexfabric-ui-admin-password
-  echo "Generated the apexfabricdashboard admin password (saved to /etc/tvt/apexfabric-ui-admin-password):"
-  echo "${password}"
+  if [[ -n "${APEXFABRIC_UI_ADMIN_PASSWORD:-}" ]]; then
+    echo "Set the apexfabricdashboard admin password from APEXFABRIC_UI_ADMIN_PASSWORD (saved to /etc/tvt/apexfabric-ui-admin-password)."
+  else
+    echo "Generated the apexfabricdashboard admin password (saved to /etc/tvt/apexfabric-ui-admin-password):"
+    echo "${password}"
+  fi
   unset password
 fi
 
@@ -3316,7 +3402,9 @@ lock_values="$(python3 - "${LOCK_OUTPUT}" "${PIPELINE_TRAFFIC_CATALOG_ID}" \
   "${PIPELINE_TRAFFIC_DESIRED_STATE_SCHEMA_SHA256}" \
   "${PIPELINE_TRAFFIC_METRICS_SCHEMA_SHA256}" \
   "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_SCHEMA_SHA256}" \
-  "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256}" <<'PY'
+  "${PIPELINE_TRAFFIC_ANALYTICS_EVENT_EXAMPLE_SHA256}" \
+  "${PIPELINE_TRAFFIC_PLAN_COMPILER_COMPATIBILITY_ID}" \
+  "${PIPELINE_TRAFFIC_PLAN_COMPILER_SHA256}" <<'PY'
 import json
 import re
 import sys
@@ -3329,6 +3417,7 @@ archive = lock.get("archive", {})
 image = lock.get("image", {})
 metadata = lock.get("metadata", {})
 source = lock.get("source", {})
+compatibility = lock.get("compatibility", {})
 expected = {
     "catalog": (lock.get("catalog_id"), sys.argv[2]),
     "repository": (pipeline.get("repository"), sys.argv[3]),
@@ -3345,6 +3434,8 @@ expected = {
     "metrics schema checksum": (metadata.get("metrics_schema_sha256"), sys.argv[14]),
     "event schema checksum": (metadata.get("analytics_event_schema_sha256"), sys.argv[15]),
     "event example checksum": (metadata.get("analytics_event_example_sha256"), sys.argv[16]),
+    "plan compiler compatibility": (compatibility.get("plan_compiler"), sys.argv[17]),
+    "plan compiler checksum": (compatibility.get("sha256"), sys.argv[18]),
     "architecture": (image.get("architecture"), "amd64"),
 }
 if lock.get("format_version") != 2:

@@ -360,6 +360,20 @@ applies the UI Deployment/Service/Ingress. Reaching `/apexfabricdashboard` and
 `/dashboard` requires Traefik, which `install-k3s-single-node` now enables by
 default (see "Current limitations").
 
+To pin a known password instead of the generated random one (e.g. to match a
+site's existing device-admin password), set `APEXFABRIC_UI_ADMIN_PASSWORD` in
+the environment before running `install-apexfabric-ui` — never write the
+actual password value into a tracked file:
+
+```bash
+sudo APEXFABRIC_UI_ADMIN_PASSWORD='<password>' scripts/tvt-edge-operations.sh install-apexfabric-ui \
+  --image-lock /tmp/ui-image.lock.json
+```
+
+This only takes effect the first time the `apexfabric-ui-admin-auth` secret is
+created; delete that k3s secret first to force a password change (via this
+variable or a freshly generated one).
+
 ## Rebuild after a GitHub commit
 
 A push to GitHub is an input event, not a release event. For each desired
