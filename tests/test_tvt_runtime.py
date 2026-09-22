@@ -12,6 +12,8 @@ import yaml
 from apexfabric.node_management.discovery.discovery import discover
 from apexfabric.solution_management.renderer import render
 from apexfabric.solution_management.validation import validate_bundle
+from tvt_edge.bundles import BundleCamera, catalog_traffic_bundle
+from tvt_edge.delivery_metadata import load_delivery_metadata
 from tvt_runtime.camera_secrets import build_camera_secret_list, secret_names
 from tvt_runtime.cli import main
 
@@ -49,6 +51,43 @@ class TvtRuntimeTests(unittest.TestCase):
 
     def test_reference_traffic_pack_validates_unchanged(self):
         self.assertEqual(validate_bundle(self.bundle, self.schema), [])
+
+    def test_catalog_bundle_accepts_twelve_cameras_and_rejects_thirteen(self):
+        delivery = load_delivery_metadata(
+            ROOT / "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
+        )
+        catalog = {
+            **delivery,
+            "status": "available",
+            "image": {
+                "registry": "registry.local:5000",
+                "repository": delivery["repository"],
+                "tag": delivery["tag"],
+                "digest": "sha256:" + "a" * 64,
+            },
+        }
+        cameras = [
+            BundleCamera(f"camera-{index:02d}", 5, ("anpr",))
+            for index in range(1, 14)
+        ]
+        arguments = {
+            "inference_mode": "cpu-compatible",
+            "cpu_request": "4",
+            "cpu_limit": "16",
+            "memory_request": "8Gi",
+            "memory_limit": "24Gi",
+            "state_size": "20Gi",
+        }
+
+        bundle = catalog_traffic_bundle(
+            catalog, "capacity-test", "edge-01", cameras[:12], **arguments
+        )
+        self.assertEqual(bundle["applications"][0]["resources"]["camera_streams"], 12)
+
+        with self.assertRaisesRegex(ValueError, "maximum of 12 streams"):
+            catalog_traffic_bundle(
+                catalog, "capacity-test", "edge-01", cameras, **arguments
+            )
 
     def test_renderer_mounts_direct_camera_urls_without_camera_affinity(self):
         deployment = next(

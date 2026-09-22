@@ -28,10 +28,10 @@ ROOT = Path(__file__).resolve().parents[1]
 class MetricsTests(unittest.TestCase):
     def test_metric_labels_are_allowlisted_and_camera_cardinality_is_bounded(self):
         policy = LabelPolicy()
-        for number in range(1, 9):
+        for number in range(1, 13):
             policy.camera_id(f"camera-{number:02d}")
         with self.assertRaisesRegex(MetricsContractError, "ceiling"):
-            policy.camera_id("camera-09")
+            policy.camera_id("camera-13")
         with self.assertRaises(MetricsContractError):
             policy.reason("exception containing rtsp://user:pass@192.0.2.1/live")
         with self.assertRaises(MetricsContractError):

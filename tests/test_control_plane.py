@@ -47,7 +47,10 @@ class WorkloadRunner(FakeRunner):
                 }
             Result.stdout = json.dumps({
                 "metadata": {
-                    "labels": {"app.kubernetes.io/managed-by": "apexfabric-node-agent" if self.managed else "someone-else"},
+                    "labels": {
+                        "app.kubernetes.io/managed-by": "apexfabric-node-agent" if self.managed else "someone-else",
+                        "apexfabric.com/deployment-id": "demo",
+                    },
                     "annotations": annotations,
                 },
                 "spec": {
@@ -182,6 +185,29 @@ class ControlPlaneTests(unittest.TestCase):
                 controller.generate_bundle({
                     "solution_type": "tvt-mills-pilot",
                     "camera_configuration": [{"camera_id": "cam-1", "apps": ["wrong_way"]}],
+                })
+
+    def test_tvt_mills_pilot_runtime_accepts_twelve_cameras_and_rejects_thirteen(self):
+        with tempfile.TemporaryDirectory() as directory:
+            controller = Controller(Path(directory), FakeRunner())
+            cameras = [
+                {"camera_id": f"cam-{index}", "fps": 5, "apps": ["anpr"]}
+                for index in range(1, 14)
+            ]
+
+            generated = controller.generate_bundle({
+                "solution_type": "tvt-mills-pilot",
+                "camera_configuration": cameras[:12],
+            })
+            self.assertEqual(
+                generated["bundle"]["applications"][0]["resources"]["camera_streams"],
+                12,
+            )
+
+            with self.assertRaisesRegex(ValueError, "maximum of 12 streams"):
+                controller.generate_bundle({
+                    "solution_type": "tvt-mills-pilot",
+                    "camera_configuration": cameras,
                 })
 
     def test_tvt_mills_pilot_runtime_apply_creates_secrets_without_persisting_values(self):
@@ -345,6 +371,30 @@ class ControlPlaneTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unsupported"):
                 controller.workload_action({"log": []}, {
                     "name": "traffic-pilot-people-285h-pipeline", "action": "exec",
+                })
+
+    def test_workload_action_delete_prunes_all_managed_kinds_by_deployment_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = WorkloadRunner()
+            controller = Controller(Path(directory), runner)
+            result = controller.workload_action({"log": []}, {
+                "name": "traffic-pilot-people-285h-pipeline", "action": "delete",
+            })
+            self.assertEqual(result["action"], "delete")
+            delete_calls = [call for call in runner.calls if call[2] == "delete"]
+            self.assertEqual(len(delete_calls), 5)
+            kinds_deleted = {call[3] for call in delete_calls}
+            self.assertEqual(kinds_deleted, {"deployment", "configmap", "secret", "service", "networkpolicy"})
+            for call in delete_calls:
+                selector = call[call.index("-l") + 1]
+                self.assertIn("apexfabric.com/deployment-id=demo", selector)
+                self.assertIn("app.kubernetes.io/managed-by=apexfabric-node-agent", selector)
+                self.assertIn("--ignore-not-found=true", call)
+
+            untrusted = Controller(Path(directory), WorkloadRunner(managed=False))
+            with self.assertRaisesRegex(ValueError, "restricted"):
+                untrusted.workload_action({"log": []}, {
+                    "name": "kube-system-component", "action": "delete",
                 })
 
     def test_workload_telemetry_uses_cluster_service_proxy(self):

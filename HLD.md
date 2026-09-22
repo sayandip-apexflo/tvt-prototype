@@ -3,7 +3,7 @@
 ## 1. Purpose
 
 This document describes a single physical edge server that discovers and reads
-RTSP streams from five to eight LAN-connected cameras. The server runs a
+RTSP streams from five to twelve LAN-connected cameras. The server runs a
 single-node K3s cluster. All stream ingestion and computer-vision (CV)
 processing runs in K3s Pods.
 
@@ -33,7 +33,8 @@ scheduling, probe, and failure-recovery model described in
 ### 2.1 In scope
 
 - One Linux server acting as both the K3s server and its only compute node.
-- Five to eight IP cameras on a LAN reachable from the server.
+- Five initially installed IP cameras, with up to twelve enabled for capacity
+  testing, on a LAN reachable from the server.
 - Discovery of previously unknown cameras.
 - Persistent authoritative camera inventory in ApexFabric control, with a
   non-secret deployment-sync projection in host PostgreSQL.

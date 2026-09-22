@@ -133,6 +133,19 @@
 .cu-table .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px;overflow-wrap:anywhere}
 .cu-table-actions{display:flex;gap:6px;flex-wrap:wrap}
 
+/* Catalog deployment enrollment-camera designation. */
+.enrollment-designation-row>td{padding:0 12px 18px;background:var(--cu-soft,#f8f7fb)}
+.enrollment-designation{display:grid;grid-template-columns:minmax(220px,1fr) minmax(300px,1.4fr);gap:12px 22px;padding:16px;border:1px solid var(--cu-border);border-radius:7px;background:#fff}
+.enrollment-designation-copy>strong{font-size:11px}
+.enrollment-designation-copy>small{display:block;margin-top:6px;color:var(--cu-muted);font-size:9px}
+.enrollment-designation-copy>p{margin:8px 0 0;color:var(--cu-muted);font-size:10px;line-height:1.5}
+.enrollment-designation form{display:flex;align-items:flex-end;gap:8px}
+.enrollment-designation label{flex:1;color:var(--cu-muted);font-size:10px}
+.enrollment-designation select{display:block;width:100%;margin-top:6px;padding:9px 10px;border:1px solid var(--cu-border);border-radius:6px;background:#fff;color:var(--cu-ink);font:inherit}
+.enrollment-designation-empty{align-self:center;margin:0;color:var(--cu-muted);font-size:10px}
+.enrollment-designation>.cu-notice{grid-column:1/-1;margin:0}
+[data-theme='dark'] .customer-app :is(.enrollment-designation,.enrollment-designation select){background:var(--cu-surface);border-color:var(--cu-border)}
+
 /* Solution/deployment modal. */
 .deployment-camera-list{display:flex;flex-direction:column;gap:10px;margin:14px 0}
 .deployment-camera-row{flex-direction:column;align-items:stretch}
@@ -147,4 +160,4 @@
 [data-theme='dark'] .customer-app .deployment-geometry-field textarea{background:var(--cu-soft);border-color:#414052}
 [data-theme='dark'] .customer-app .cu-event-facts>div{background:var(--cu-soft);border:1px solid var(--cu-border);color:var(--cu-ink)}
 [data-theme='dark'] .customer-app .cu-event-facts :is(dt,dd){color:inherit}
-@media(max-width:600px){.cu-brand{align-items:center}.cu-brand>img{width:140px}.cu-site-form{align-items:stretch;flex-direction:column}}
+@media(max-width:600px){.cu-brand{align-items:center}.cu-brand>img{width:140px}.cu-site-form{align-items:stretch;flex-direction:column}.enrollment-designation{grid-template-columns:1fr}.enrollment-designation form{align-items:stretch;flex-direction:column}.enrollment-designation form .cu-btn{width:100%}}

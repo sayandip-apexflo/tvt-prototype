@@ -1,0 +1,116 @@
+import {expect,test} from '@playwright/test';
+
+const deployments=[{
+  deployment_id:'dep-primary',catalog_id:'traffic-v4',namespace:'apexfabric',
+  lifecycle_intent:'Running',sync_state:'applied',applied_revision:3,desired_revision:3,
+  applied_image_digest:'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  desired_bundle_sha256:'bundle-current',bundle_history:[],
+}];
+const solutions=[{
+  catalog_id:'traffic-v4',solution_name:'Traffic',version:'4',hardware_profile:'intel-285h',
+  status:'available',image:{digest:'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',reference:'registry/traffic@sha256:aaaaaaaa'},
+  contract:{ui:{camera:{apps:{face_recognition:{},anpr:{}}}}},
+}];
+const tvtCameras=[
+  {camera_id:'cam-both',friendly_name:'Front entrance',configured:true,enabled:true,assignments:[
+    {deployment_id:'dep-other',apps:['anpr'],fps:8},
+    {deployment_id:'dep-primary',apps:['anpr','face_recognition'],fps:8},
+  ]},
+  {camera_id:'cam-face',friendly_name:'Reception',configured:true,enabled:true,assignments:[
+    {deployment_id:'dep-primary',apps:['face_recognition'],fps:8},
+  ]},
+  {camera_id:'cam-anpr',friendly_name:'Vehicle gate',configured:true,enabled:true,assignments:[
+    {deployment_id:'dep-primary',apps:['anpr'],fps:8},
+  ]},
+];
+const apexCameras=tvtCameras.map(camera=>({
+  camera_id:camera.camera_id,name:camera.friendly_name,in_use:true,
+  assigned_to:camera.camera_id==='cam-both'?['raw-wrong-deployment']:['dep-primary'],
+}));
+
+async function mockDashboard(page,{active=false,postError=false}={}){
+  let designated='cam-both';
+  const posts=[];
+  await page.route('**/dashboard/api/**',async route=>{
+    const request=route.request(),url=new URL(request.url()),path=url.pathname;
+    if(path==='/dashboard/api/customer')return route.fulfill({json:{site_id:'test-site',cameras:apexCameras,deployments:[]}});
+    if(path==='/dashboard/api/telemetry/events')return route.fulfill({json:{events:[],has_more:false}});
+    if(path==='/dashboard/api/cameras/snapshot')return route.fulfill({status:404,json:{error:'unavailable in test'}});
+    if(path==='/dashboard/api/v1/alerts')return route.fulfill({json:[]});
+    if(path==='/dashboard/api/v1/cameras')return route.fulfill({json:tvtCameras});
+    if(path==='/dashboard/api/v1/solutions')return route.fulfill({json:solutions});
+    if(path==='/dashboard/api/v1/deployments')return route.fulfill({json:deployments});
+    const designation=path.match(/^\/dashboard\/api\/v1\/deployments\/([^/]+)\/enrollment\/camera$/);
+    if(designation){
+      const deploymentId=decodeURIComponent(designation[1]);
+      if(request.method()==='POST'){
+        const body=request.postDataJSON();posts.push(body);
+        if(postError)return route.fulfill({status:409,json:{detail:'camera is no longer eligible for face enrollment'}});
+        designated=body.camera_id;
+      }
+      const cameraId=deploymentId==='dep-primary'?designated:'another-camera';
+      return route.fulfill({json:{deployment_key:deploymentId,camera_id:cameraId}});
+    }
+    const status=path.match(/^\/dashboard\/api\/v1\/deployments\/([^/]+)\/enrollment\/status$/);
+    if(status){
+      const deploymentId=decodeURIComponent(status[1]);
+      return route.fulfill({json:{deployment_key:deploymentId,designated_camera_id:deploymentId==='dep-primary'?designated:'another-camera',session:active?{session_id:'session-1',status:'capturing'}:null,degraded:false}});
+    }
+    return route.fulfill({status:404,json:{detail:`Unhandled test route: ${request.method()} ${path}`}});
+  });
+  return {posts};
+}
+
+test('designates only eligible cameras with the exact request body',async({page})=>{
+  const state=await mockDashboard(page);
+  await page.goto('/dashboard');
+  await page.getByRole('button',{name:'Solutions',exact:true}).click();
+
+  const control=page.locator('.enrollment-designation[data-deployment-id="dep-primary"]');
+  await expect(control.getByText('Current: Front entrance · cam-both')).toBeVisible();
+  const selector=control.getByLabel('Enrollment camera for dep-primary');
+  await expect(selector.locator('option')).toHaveCount(2);
+  await expect(selector.locator('option')).toHaveText(['Front entrance · cam-both','Reception · cam-face']);
+  await expect(selector.locator('option',{hasText:'Vehicle gate'})).toHaveCount(0);
+
+  await selector.selectOption('cam-face');
+  await control.getByRole('button',{name:'Change enrollment camera'}).click();
+  await expect.poll(()=>state.posts).toEqual([{camera_id:'cam-face'}]);
+  await expect(control.getByRole('status')).toHaveText('Enrollment camera saved.');
+  await expect(control.getByText('Current: Reception · cam-face')).toBeVisible();
+});
+
+test('surfaces backend designation validation errors',async({page})=>{
+  await mockDashboard(page,{postError:true});
+  await page.goto('/dashboard');
+  await page.getByRole('button',{name:'Solutions',exact:true}).click();
+
+  const control=page.locator('.enrollment-designation[data-deployment-id="dep-primary"]');
+  await control.getByLabel('Enrollment camera for dep-primary').selectOption('cam-face');
+  await control.getByRole('button',{name:'Change enrollment camera'}).click();
+  await expect(control.getByRole('alert')).toContainText('camera is no longer eligible for face enrollment');
+});
+
+test('disables designation changes while enrollment is active',async({page})=>{
+  await mockDashboard(page,{active:true});
+  await page.goto('/dashboard');
+  await page.getByRole('button',{name:'Solutions',exact:true}).click();
+
+  const control=page.locator('.enrollment-designation[data-deployment-id="dep-primary"]');
+  await expect(control.getByLabel('Enrollment camera for dep-primary')).toBeDisabled();
+  await expect(control.getByRole('button',{name:'Change enrollment camera'})).toBeDisabled();
+  await expect(control.getByRole('status')).toContainText('capturing');
+});
+
+test('Live enrollment follows every TVT assignment instead of raw assignment order',async({page})=>{
+  await mockDashboard(page);
+  await page.goto('/dashboard');
+
+  await page.getByRole('button',{name:/Front entrance/}).click();
+  await expect(page.getByRole('button',{name:'Start enrollment'})).toBeVisible();
+  await expect(page.getByText('dep-primary',{exact:true})).toBeVisible();
+
+  await page.getByRole('button',{name:'Cameras',exact:true}).click();
+  await page.getByRole('button',{name:/Vehicle gate/}).click();
+  await expect(page.getByRole('button',{name:'Start enrollment'})).toHaveCount(0);
+});

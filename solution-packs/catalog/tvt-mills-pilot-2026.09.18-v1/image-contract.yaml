@@ -70,7 +70,7 @@ process:
 resources:
   cpuRequest: "4"
   memoryRequest: 8Gi
-  maxCameraStreams: 5
+  maxCameraStreams: 12
 accelerators:
   - intel-igpu
   - intel-npu

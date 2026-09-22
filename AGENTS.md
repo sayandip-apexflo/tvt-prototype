@@ -33,11 +33,16 @@ treat the exposure as an oversight to silently "fix."
   (`security.py`), config (`settings.py`, `service.py`, `paths.py`).
 - `apexfabric/` + `solution-packs/schema`, `solution-packs/traffic/`,
   `solution-packs/catalog/`, `solution-packs/review/`, `deploy/k8s/`,
-  `deploy/single-box/` — **exact copy** of `k3s-prototype` commit
-  `5ada504fbb3a5fc3c15e08428c6e996eeb6fbd44` (full `control_plane/`,
+  `deploy/single-box/` — started as an **exact copy** of `k3s-prototype`
+  commit `5ada504fbb3a5fc3c15e08428c6e996eeb6fbd44` (full `control_plane/`,
   validator, camera-locality, renderer, field-manager/apply/prune,
-  reporter/controller, catalog/install_catalog, and their tests stay
-  behavior-identical — never edit to fix a TVT problem, see §6).
+  reporter/controller, catalog/install_catalog). Direct edits to fix genuine
+  bugs (e.g. a missing/broken action, an incorrect guard) are allowed — note
+  the divergence from upstream in the commit message so it can be
+  cross-checked on the next `k3s-prototype` sync. Still don't change the
+  architectural invariants in §6 (bundle schema, camera-locality, renderer
+  output shape, revision hashing, etc.) casually or to route around a TVT
+  problem — those remain deliberate contracts other tests/components rely on.
 - `deploy/ui/` — **excluded from the exact-copy freeze above** (see the TVT
   frontend policy at the top of this file). `deploy/ui/web/src` is TVT-owned
   and actively developed: it drives the full TVT product (camera
@@ -46,12 +51,12 @@ treat the exposure as an oversight to silently "fix."
   `deploy/ui/nginx.conf` + entries in `image-contract.yaml`. The one
   exception *within* `deploy/ui/`: `deploy/ui/web/src/main.jsx`'s `Admin`
   component (served at `/apexfabricdashboard`, `auth_basic`-protected) is
-  apexfabric-control's own raw admin UI — genuinely frozen, not TVT, calls
-  apexfabric-control's `:8088` API directly (`api('cameras'|'bundles/generate'|
-  'workload-action'|...)`). Never give it TVT logic or point it at
-  `tvt_edge`; this is the same raw path that produced disconnected fixture
-  deployments (`test1`/`test2`) with zero `tvt_edge` awareness — a
-  cautionary example of what happens when TVT data flows through it.
+  apexfabric-control's own raw admin UI, not TVT, calling apexfabric-control's
+  `:8088` API directly (`api('cameras'|'bundles/generate'|'workload-action'|
+  ...)`). Bug fixes to its existing raw admin capabilities are fine; still
+  never give it TVT logic or point it at `tvt_edge` — this is the same raw
+  path that produced disconnected fixture deployments (`test1`/`test2`) with
+  zero `tvt_edge` awareness when TVT data flowed through it.
   Do not assume any file under `deploy/ui/` is still pristine when diffing
   against upstream `k3s-prototype` — check this note first.
   TVT-only extras kept alongside the copy: `tvt_edge/delivery_metadata.py`
@@ -198,13 +203,18 @@ touch:
   occurrence was delivered. Keep Prometheus as the alert source; Loki-derived
   alerts only when a metric cannot represent the condition.
 
-## 6. Frozen reference plane (STRICT)
+## 6. Reference plane invariants (STRICT)
 
-- Do not modify bundle schema/semantics, camera-locality, renderer output
-  (Namespace/Deployments/Services/ConfigMaps/Secrets/PVCs/policies/probes),
-  deterministic revision hashing, server-side apply field manager, ownership
-  labels, prune rules, PVC retention, `ApexNodeStatus` contract, or
-  reporter/controller label ownership to fix a TVT problem.
+- Do not casually modify bundle schema/semantics, camera-locality, renderer
+  output (Namespace/Deployments/Services/ConfigMaps/Secrets/PVCs/policies/
+  probes), deterministic revision hashing, server-side apply field manager,
+  ownership labels, prune rules, PVC retention, `ApexNodeStatus` contract, or
+  reporter/controller label ownership, and never change any of them just to
+  route around a TVT problem elsewhere. Genuine bug fixes within
+  `apexfabric/control_plane/` (missing/broken actions, incorrect guards,
+  etc.) are allowed — see §1 — but keep them scoped to the actual bug, note
+  the upstream divergence in the commit, and don't touch the listed
+  contracts above as part of an unrelated fix.
 - `solution-packs/` structure and the Traffic pack stay reference-format;
   per-deployment desired-state + camera-source Secrets keep bundle-derived
   names; camera URLs mount read-only at
@@ -214,10 +224,12 @@ touch:
 - Reference tests (`test_camera_locality.py`, `test_tvt_runtime.py`,
   reporter/controller tests) must keep passing unmodified. Add TVT coverage
   without altering reference assertions.
-- This freeze does **not** cover `deploy/ui/web/src` or the TVT-facing
+- These invariants do **not** apply to `deploy/ui/web/src` or the TVT-facing
   blocks of `deploy/ui/nginx.conf`/`image-contract.yaml` — see the carve-out
-  in §1 and the TVT frontend policy at the top of this file. It does still
-  cover `main.jsx`'s `Admin` component (`/apexfabricdashboard`).
+  in §1 and the TVT frontend policy at the top of this file. `main.jsx`'s
+  `Admin` component (`/apexfabricdashboard`) may receive bug fixes to its
+  existing raw admin capabilities (see §1) but must still never gain TVT
+  logic or a `tvt_edge` dependency.
 
 ## 7. API / DB / sync rules
 

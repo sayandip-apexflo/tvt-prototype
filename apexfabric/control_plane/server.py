@@ -58,7 +58,7 @@ PACK_PROFILES = {
     "tvt-mills-pilot": {
         "catalog_name": "tvt-mills-pilot",
         "allowed_apps": TVT_MILLS_APPS,
-        "max_streams": 5,
+        "max_streams": 12,
         "default_deployment": "tvt-mills-edge-intel-285h",
         "default_tag": "intel-285h-2026.09.18-v1",
         "default_version": "2026.09.18-v1",
@@ -982,6 +982,18 @@ class Controller:
         elif action == "describe":
             result = self.kubectl("describe", "deployment", name, "-n", "apexfabric")
             self.log(job, result.stdout)
+        elif action == "delete":
+            deployment_id = labels.get("apexfabric.com/deployment-id")
+            if not isinstance(deployment_id, str):
+                raise ValueError("deployment has no ApexFabric deployment ID")
+            selector = f"app.kubernetes.io/managed-by=apexfabric-node-agent,apexfabric.com/deployment-id={deployment_id}"
+            for kind in ("deployment", "configmap", "secret", "service", "networkpolicy"):
+                result = self.kubectl("delete", kind, "-n", "apexfabric", "-l", selector, "--ignore-not-found=true", check=False)
+                output = (result.stdout or result.stderr).strip()
+                if output:
+                    self.log(job, output)
+                if result.returncode:
+                    raise CommandError(output)
         else:
             raise ValueError("unsupported workload action")
         return {"action": action, "deployment": name}
@@ -1699,7 +1711,7 @@ class Handler(BaseHTTPRequestHandler):
                 job_id = self.controller.submit("solution-upgrade", self.controller.solution_upgrade_test)
             elif path == "/api/workload-action":
                 action = request.get("action")
-                if action not in {"restart", "scale", "logs", "describe"}:
+                if action not in {"restart", "scale", "logs", "describe", "delete"}:
                     raise ValueError("invalid workload action")
                 job_id = self.controller.submit(f"workload:{action}", self.controller.workload_action, request)
             else:

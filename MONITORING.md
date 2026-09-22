@@ -4,7 +4,7 @@
 
 This document defines monitoring and error reporting for the single-server TVT
 video-analytics system described in `HLD.md`. The physical server runs one K3s
-server/worker node, a host edge-management service, and five to eight cameras.
+server/worker node, a host edge-management service, and five to twelve cameras.
 Stream ingestion and CV inference run in K3s Pods.
 
 The design makes four deliberate choices:
@@ -333,7 +333,7 @@ paths containing IDs.
 
 Permitted labels have small, controlled value sets:
 
-- stable internal `camera_id` for the five to eight cameras;
+- stable internal `camera_id` for the five to twelve cameras;
 - `use_case` from a fixed use-case list;
 - `reason` or `error_code` from a documented error taxonomy;
 - normalized HTTP method, route, and status class; and
@@ -658,7 +658,7 @@ timestamp to Loki labels. Query them from parsed JSON:
 ```
 
 `camera_id` may remain structured metadata rather than an indexed label. With
-only five to eight stable cameras it is technically bounded, but keeping it out
+only five to twelve stable cameras it is technically bounded, but keeping it out
 of the base label set makes the schema safer if the deployment grows.
 
 Alloy's `--storage.path` must use persistent per-node storage. Components keep

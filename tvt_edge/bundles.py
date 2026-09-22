@@ -76,6 +76,13 @@ def catalog_traffic_bundle(
         raise ValueError("catalog entry must deliver baked-in models")
     if contract.get("hardwareProfile") != "intel-285h":
         raise ValueError("catalog entry is not for intel-285h")
+    max_streams = contract.get("resources", {}).get("maxCameraStreams")
+    if not isinstance(max_streams, int) or max_streams <= 0:
+        raise ValueError("catalog image contract has no valid camera stream maximum")
+    if len(cameras) > max_streams:
+        raise ValueError(
+            f"camera assignments exceed the image contract maximum of {max_streams} streams"
+        )
     repository = f"{image['registry'].rstrip('/')}/{image['repository']}"
     devices = (
         {"VEHICLE_DEVICE": "GPU", "PLATE_DEVICE": "NPU", "OCR_DEVICE": "MULTI:GPU,NPU"}

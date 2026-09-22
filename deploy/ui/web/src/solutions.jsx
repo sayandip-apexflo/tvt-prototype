@@ -3,6 +3,7 @@ import {Plus,X} from 'lucide-react';
 import {edgeApi} from './api';
 import {Pill,titleCase} from './shared';
 import {useTvtCameras} from './cameras';
+import {EnrollmentDesignationControl} from './enrollment';
 
 export function useSolutions(){
   const [solutions,setSolutions]=useState([]);
@@ -141,7 +142,7 @@ export function SolutionsPage({onChanged}){
       {deployments.length?<div className="cu-table-wrap"><table className="cu-table"><thead><tr><th>Deployment</th><th>Lifecycle</th><th>Sync</th><th>Revision</th><th>Image digest</th><th></th></tr></thead>
         <tbody>{deployments.map(d=>{
           const rollbackTarget=d.bundle_history?.find(e=>e.bundle_sha256!==d.desired_bundle_sha256);
-          return <tr key={d.deployment_id}>
+          return <React.Fragment key={d.deployment_id}><tr>
             <td><strong>{d.deployment_id}</strong><small>{d.catalog_id||d.solution_id} · {d.namespace}</small></td>
             <td><Pill value={d.lifecycle_intent}/></td>
             <td><Pill value={d.sync_state}/></td>
@@ -154,7 +155,9 @@ export function SolutionsPage({onChanged}){
                 ?<button className="cu-btn" onClick={()=>{if(confirm(`Stop ${d.deployment_id}?`))act(edgeApi(`deployments/${encodeURIComponent(d.deployment_id)}/stop`,{}))}}>Stop</button>
                 :<button className="cu-btn cu-primary" onClick={()=>act(edgeApi(`deployments/${encodeURIComponent(d.deployment_id)}/start`,{}))}>Start</button>}
             </div></td>
-          </tr>;
+          </tr>
+          {d.catalog_id&&<tr className="enrollment-designation-row"><td colSpan="6"><EnrollmentDesignationControl deployment={d} tvtCameras={tvtCameras}/></td></tr>}
+          </React.Fragment>;
         })}</tbody>
       </table></div>:<p className="cu-empty">No Solution Packs deployed. Select an available catalog entry and preview a deployment.</p>}
     </section>

@@ -26,7 +26,7 @@ from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 from tvt_edge.watchdog import WatchdogStatusReader
 
 
-MAX_CAMERAS = 8
+MAX_CAMERAS = 12
 IDENTIFIER = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$")
 VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
 

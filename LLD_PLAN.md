@@ -1,7 +1,7 @@
 # TVT prototype: sample low-level design plan
 
 **Status:** Current architecture documented; daily vehicle-traffic and attendance reports implemented; camera zone/entry-exit-line geometry editor implemented
-**Scope:** Single physical server, single-node K3s, five initially installed cameras with a design ceiling of eight  
+**Scope:** Single physical server, single-node K3s, five initially installed cameras with a capacity-test ceiling of twelve  
 **Reference implementation:** `../k3s-prototype`  
 **Related TVT documents:** `README.md`, `HLD.md`, `MONITORING.md`, `APEXFABRIC_ARCHITECTURE.md`
 
@@ -1262,8 +1262,8 @@ With all intended cameras and CV consumers active for a sustained run, record:
 - recovery times for camera, Pod, K3s, database, service, and host restart; and
 - monitoring disk growth and retention behavior.
 
-Five-camera success does not establish the eight-camera design ceiling unless
-the eight-camera workload is actually measured.
+Five-camera success does not establish the twelve-camera capacity-test ceiling
+unless the twelve-camera workload is actually measured.
 
 ### 18.5 Alert delivery acceptance
 
@@ -1417,6 +1417,6 @@ of every CV business feature. It is accepted when:
     through the approved SMTP relay.
 
 Production face/ANPR accuracy, durable attendance/report data, scheduled
-business-report email, and eight-camera capacity are separate acceptance gates
+business-report email, and twelve-camera capacity are separate acceptance gates
 with their own input data and evidence. Scheduled business-report email is not
 the alert-dispatcher path.
