@@ -20,17 +20,20 @@ install options:
   --source-commit SHA          defaults to the checked-out commit
   --output-directory DIR       release/state output outside the Git checkout
   --operator-directory DIR     private generated manifest/site-config directory
+  --interactive-sudo           prompt once for the edge sudo password
   --skip-tests                 development only; skip release source gates
   --allow-dirty-source         development only; permit a dirty checkout
 
 resume/status options:
   --version VERSION            selects the saved run (default: repository version)
   --operator-directory DIR     selects a non-default saved run directory
+  --interactive-sudo           use a password for an older saved run
 
 The install command probes, builds, transfers, prepares, reboots, installs,
 and verifies one edge. Resume continues the same saved run after a corrected
-failure. Site configuration contains identifiers only; credentials are never
-accepted by this command.
+failure. SSH key authentication is always required. An interactive sudo
+password is kept only in process memory and is never written to arguments,
+environment variables, files, state, or logs.
 EOF
 }
 
@@ -90,6 +93,7 @@ OUTPUT_DIRECTORY=""
 OPERATOR_DIRECTORY=""
 SKIP_TESTS=false
 ALLOW_DIRTY_SOURCE=false
+INTERACTIVE_SUDO=false
 
 while (($#)); do
   case "$1" in
@@ -102,6 +106,7 @@ while (($#)); do
     --source-commit) require_value "$1" "${2:-}"; SOURCE_COMMIT="$2"; shift 2 ;;
     --output-directory) require_value "$1" "${2:-}"; OUTPUT_DIRECTORY="$2"; shift 2 ;;
     --operator-directory) require_value "$1" "${2:-}"; OPERATOR_DIRECTORY="$2"; shift 2 ;;
+    --interactive-sudo) INTERACTIVE_SUDO=true; shift ;;
     --skip-tests) SKIP_TESTS=true; shift ;;
     --allow-dirty-source) ALLOW_DIRTY_SOURCE=true; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -144,15 +149,21 @@ if [[ ${COMMAND} == resume ]]; then
   STORED_EDGE_ID="$(jq -er '.edge_id' "${RUN_FILE}")" || fail "saved run metadata is invalid"
   STORED_VERSION="$(jq -er '.version' "${RUN_FILE}")" || fail "saved run metadata is invalid"
   STORED_COMMIT="$(jq -er '.source_commit' "${RUN_FILE}")" || fail "saved run metadata is invalid"
+  STORED_INTERACTIVE_SUDO="$(jq -er '.interactive_sudo // false' "${RUN_FILE}")" || fail "saved run metadata is invalid"
   [[ ${STORED_EDGE_ID} == "${EDGE_ID}" ]] || fail "saved run belongs to edge ${STORED_EDGE_ID}"
   [[ ${STORED_VERSION} == "${VERSION}" ]] || fail "saved run belongs to version ${STORED_VERSION}"
   [[ ${STORED_COMMIT} == "$(git -C "${REPO_ROOT}" rev-parse HEAD)" ]] || \
     fail "resume requires the saved source commit ${STORED_COMMIT}"
   [[ -f ${FLEET_MANIFEST} && ! -L ${FLEET_MANIFEST} ]] || fail "saved fleet manifest is missing"
-  exec "${FLEET_CONTROLLER}" resume \
-    --fleet "${FLEET_MANIFEST}" \
-    --state-directory "${STATE_DIRECTORY}" \
+  [[ ${STORED_INTERACTIVE_SUDO} == true ]] && INTERACTIVE_SUDO=true
+  resume_arguments=(
+    resume
+    --fleet "${FLEET_MANIFEST}"
+    --state-directory "${STATE_DIRECTORY}"
     --concurrency 1
+  )
+  ${INTERACTIVE_SUDO} && resume_arguments+=(--interactive-sudo)
+  exec "${FLEET_CONTROLLER}" "${resume_arguments[@]}"
 fi
 
 [[ "$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" == 3.12 ]] || \
@@ -210,14 +221,25 @@ SITE_CONFIG="${OPERATOR_DIRECTORY}/site-config.json"
 FLEET_MANIFEST="${OPERATOR_DIRECTORY}/fleet.json"
 STATE_DIRECTORY="${OUTPUT_DIRECTORY}/fleet-state"
 
-printf 'Checking SSH key access and non-interactive sudo on %s...\n' "${SSH_TARGET}"
-ssh \
-  -o BatchMode=yes \
-  -o ConnectTimeout=15 \
-  -o ServerAliveInterval=15 \
-  -o ServerAliveCountMax=3 \
-  "${SSH_TARGET}" 'sudo -n true' \
-  || fail "SSH key access and non-interactive sudo are required"
+if ${INTERACTIVE_SUDO}; then
+  printf 'Checking SSH key access to %s...\n' "${SSH_TARGET}"
+  ssh \
+    -o BatchMode=yes \
+    -o ConnectTimeout=15 \
+    -o ServerAliveInterval=15 \
+    -o ServerAliveCountMax=3 \
+    "${SSH_TARGET}" true \
+    || fail "SSH key access is required; run ssh-copy-id first"
+else
+  printf 'Checking SSH key access and non-interactive sudo on %s...\n' "${SSH_TARGET}"
+  ssh \
+    -o BatchMode=yes \
+    -o ConnectTimeout=15 \
+    -o ServerAliveInterval=15 \
+    -o ServerAliveCountMax=3 \
+    "${SSH_TARGET}" 'sudo -n true' \
+    || fail "SSH key access and non-interactive sudo are required, or use --interactive-sudo"
+fi
 
 jq -n \
   --arg site_key "${SITE_KEY}" \
@@ -241,6 +263,7 @@ jq -n \
   --arg output_directory "${OUTPUT_DIRECTORY}" \
   --arg state_directory "${STATE_DIRECTORY}" \
   --arg fleet_manifest "${FLEET_MANIFEST}" \
+  --argjson interactive_sudo "${INTERACTIVE_SUDO}" \
   '{
     schema_version: 1,
     edge_id: $edge_id,
@@ -248,7 +271,8 @@ jq -n \
     source_commit: $source_commit,
     output_directory: $output_directory,
     state_directory: $state_directory,
-    fleet_manifest: $fleet_manifest
+    fleet_manifest: $fleet_manifest,
+    interactive_sudo: $interactive_sudo
   }' >"${RUN_FILE}"
 chmod 0600 "${SITE_CONFIG}" "${FLEET_MANIFEST}" "${RUN_FILE}"
 
@@ -262,6 +286,7 @@ arguments=(
 )
 ${SKIP_TESTS} && arguments+=(--skip-tests)
 ${ALLOW_DIRTY_SOURCE} && arguments+=(--allow-dirty-source)
+${INTERACTIVE_SUDO} && arguments+=(--interactive-sudo)
 
 printf 'Installing TVT edge %s from commit %s.\n' "${EDGE_ID}" "${SOURCE_COMMIT}"
 printf 'Operator state: %s\n' "${OPERATOR_DIRECTORY}"

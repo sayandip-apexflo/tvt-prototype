@@ -35,6 +35,13 @@ For a development run where the checkout is intentionally dirty, add
 `--allow-dirty-source` explicitly. Production builds should use a clean
 checked-out commit.
 
+For a single edge whose trusted deployment account requires a sudo password,
+add `--interactive-sudo --concurrency 1`. The controller prompts once and
+passes the password to remote `sudo -S` over SSH stdin for each privileged
+operation. The password remains only in controller process memory and is not
+written to arguments, environment variables, fleet state, reports, or logs.
+This mode requires exactly one edge. SSH key authentication remains mandatory.
+
 ## Resume and inspect
 
 ```bash

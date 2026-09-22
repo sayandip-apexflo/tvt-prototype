@@ -3955,16 +3955,19 @@ umask 022
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT=""
 SSH_TARGET=""
+SUDO_STDIN=false
 
 usage() {
-  echo "usage: scripts/tvt-edge-operations.sh probe-edge-hardware --output FILE [--ssh TARGET]" >&2
+  echo "usage: scripts/tvt-edge-operations.sh probe-edge-hardware --output FILE [--ssh TARGET] [--sudo-stdin]" >&2
   echo "  Read-only edge probe. With --ssh, prompts for SSH and sudo credentials when needed." >&2
+  echo "  --sudo-stdin reads a sudo password from stdin without allocating a remote TTY." >&2
 }
 
 while (($#)); do
   case "$1" in
     --output) OUTPUT="${2:-}"; shift 2 ;;
     --ssh) SSH_TARGET="${2:-}"; shift 2 ;;
+    --sudo-stdin) SUDO_STDIN=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; exit 2 ;;
   esac
@@ -3983,10 +3986,18 @@ if [[ -n ${SSH_TARGET} ]]; then
   cleanup() { rm -f -- "${temporary}"; }
   trap cleanup EXIT
   encoded_probe="$(base64 -w 0 <"${REPO_ROOT}/scripts/tvt-hardware-inventory.py")"
-  ssh -tt -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-    "${SSH_TARGET}" \
-    "sudo python3 -c 'import base64; exec(compile(base64.b64decode(\"${encoded_probe}\"), \"tvt-hardware-inventory.py\", \"exec\"))' probe --output -" \
-    | tee /dev/tty | tr -d '\r' | sed -n '/^{/,$p' >"${temporary}"
+  if ${SUDO_STDIN}; then
+    ssh -o BatchMode=yes -o ConnectTimeout=15 \
+      -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+      "${SSH_TARGET}" \
+      "sudo -S -p '' python3 -c 'import base64; exec(compile(base64.b64decode(\"${encoded_probe}\"), \"tvt-hardware-inventory.py\", \"exec\"))' probe --output -" \
+      >"${temporary}"
+  else
+    ssh -tt -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+      "${SSH_TARGET}" \
+      "sudo python3 -c 'import base64; exec(compile(base64.b64decode(\"${encoded_probe}\"), \"tvt-hardware-inventory.py\", \"exec\"))' probe --output -" \
+      | tee /dev/tty | tr -d '\r' | sed -n '/^{/,$p' >"${temporary}"
+  fi
   python3 "${REPO_ROOT}/scripts/tvt-hardware-inventory.py" \
     verify --inventory "${temporary}" >/dev/null
   install -m 0644 "${temporary}" "${OUTPUT}"

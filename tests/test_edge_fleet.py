@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -111,6 +112,7 @@ class EdgeFleetTests(unittest.TestCase):
         self.assertIn("install", result.stderr)
         self.assertIn("resume", result.stderr)
         self.assertIn("status", result.stderr)
+        self.assertIn("--interactive-sudo", result.stderr)
         script = SINGLE_EDGE.read_text(encoding="utf-8")
         self.assertIn('"${FLEET_CONTROLLER}"', script)
         self.assertIn("sudo -n true", script)
@@ -152,6 +154,39 @@ class EdgeFleetTests(unittest.TestCase):
                 check=True,
             )
             self.assertIn('"verified": 1', result.stdout)
+
+    def test_interactive_sudo_password_is_stdin_only_and_never_logged(self):
+        controller = object.__new__(fleet.FleetController)
+        controller.sudo_password = "not-written-anywhere"
+        command, input_text = controller.sudo_invocation("systemctl", "reboot")
+        self.assertEqual(command, "sudo -S -p '' systemctl reboot")
+        self.assertEqual(input_text, "not-written-anywhere\n")
+        self.assertNotIn("not-written-anywhere", command)
+
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "command.log"
+            result = fleet.run_logged(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; print(len(sys.stdin.read()))",
+                ],
+                log,
+                input_text=input_text,
+            )
+            self.assertEqual(result.returncode, 0)
+            contents = log.read_text(encoding="utf-8")
+            self.assertNotIn("not-written-anywhere", contents)
+            self.assertIn(str(len(input_text)), contents)
+
+    def test_hardware_probe_supports_non_tty_sudo_stdin(self):
+        operations = (ROOT / "scripts/tvt-edge-operations.sh").read_text(encoding="utf-8")
+        probe = operations.split("tvt_op_probe_edge_hardware()")[1].split(
+            "tvt_operations_usage()"
+        )[0]
+        self.assertIn("--sudo-stdin", probe)
+        self.assertIn("sudo -S -p '' python3", probe)
+        self.assertIn("BatchMode=yes", probe)
 
     def test_example_manifest_is_parseable(self):
         # The example intentionally uses invalid hostnames, so only validate

@@ -11,14 +11,19 @@ scripts/tvt-edge-single.sh install \
   --site-key plant-1 \
   --edge-id edge-2c9-al007 \
   --display-name 'Plant 1 Edge' \
-  --timezone Asia/Kolkata
+  --timezone Asia/Kolkata \
+  --interactive-sudo
 ```
 
 The command validates the identifiers, creates a private identifier-only site
 file, probes the edge, builds its profile-specific offline release, transfers
 and verifies it, runs preparation, reboots the edge, waits for SSH, installs
 the application, and performs final verification. SSH key access and
-non-interactive `sudo -n` are required on the target.
+either non-interactive `sudo -n` or `--interactive-sudo` are required on the
+target. Interactive mode prompts once and holds the sudo password only in
+process memory; it is not written to argv, the environment, files, state, or
+logs. SSH password automation is intentionally unsupported—install the
+workstation's public key with `ssh-copy-id` first.
 
 Resume or inspect that run with:
 

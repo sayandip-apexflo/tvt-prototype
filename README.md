@@ -60,12 +60,18 @@ scripts/tvt-edge-single.sh install \
   --site-key plant-1 \
   --edge-id edge-2c9-al007 \
   --display-name 'Plant 1 Edge' \
-  --timezone Asia/Kolkata
+  --timezone Asia/Kolkata \
+  --interactive-sudo
 ```
 
 It derives the application version and source commit from the clean checkout,
 keeps its identifier-only site file under the gitignored `.tvt/` operator
 state, and delegates host changes to the two supported bundle entry points.
+SSH key authentication is required. With `--interactive-sudo`, the controller
+prompts once and keeps the sudo password only in process memory across the
+probe, preparation, reboot, installation, and verification; it never places
+the password in arguments, environment variables, files, state, or logs.
+Omit the option when the deployment account already has non-interactive sudo.
 After correcting a failed stage, resume the saved run with:
 
 ```bash

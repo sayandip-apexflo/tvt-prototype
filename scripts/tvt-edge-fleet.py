@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import getpass
 import hashlib
 import json
 import os
@@ -156,7 +157,13 @@ def atomic_write_json(path: Path, document: dict[str, Any]) -> None:
             os.unlink(temporary)
 
 
-def run_logged(command: list[str], log_path: Path, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+def run_logged(
+    command: list[str],
+    log_path: Path,
+    timeout: int | None = None,
+    *,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as log:
         log.write(f"\n$ {shlex.join(command)}\n")
@@ -168,6 +175,7 @@ def run_logged(command: list[str], log_path: Path, timeout: int | None = None) -
                 text=True,
                 stdout=log,
                 stderr=subprocess.STDOUT,
+                input=input_text,
                 timeout=timeout,
                 check=False,
             )
@@ -178,7 +186,13 @@ def run_logged(command: list[str], log_path: Path, timeout: int | None = None) -
         return result
 
 
-def capture_logged(command: list[str], log_path: Path, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+def capture_logged(
+    command: list[str],
+    log_path: Path,
+    timeout: int | None = None,
+    *,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run a command while retaining stdout for machine-readable responses."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as log:
@@ -189,6 +203,7 @@ def capture_logged(command: list[str], log_path: Path, timeout: int | None = Non
                 cwd=REPO_ROOT,
                 text=True,
                 capture_output=True,
+                input=input_text,
                 timeout=timeout,
                 check=False,
             )
@@ -241,6 +256,7 @@ class FleetController:
         allow_dirty_source: bool,
         source_commit: str,
         resume: bool,
+        sudo_password: str | None,
     ) -> None:
         self.state_dir = state_dir.resolve()
         self.state_path = self.state_dir / "fleet-state.json"
@@ -253,6 +269,9 @@ class FleetController:
         self.allow_dirty_source = allow_dirty_source
         self.source_commit = source_commit
         self.resume = resume
+        # Interactive sudo credentials are process-memory only. They are never
+        # written to argv, environment variables, state, reports, or logs.
+        self.sudo_password = sudo_password
         self.lock = threading.Lock()
         self.state = self._load_or_initialize()
 
@@ -318,6 +337,13 @@ class FleetController:
     def fail_edge(self, edge_id: str, stage: str, message: str) -> None:
         self.update_edge(edge_id, status=f"{stage}_failed", last_error=message)
 
+    def sudo_invocation(self, *arguments: str) -> tuple[str, str | None]:
+        if self.sudo_password is None:
+            command = ["sudo", "-n", *arguments]
+            return shlex.join(command), None
+        command = ["sudo", "-S", "-p", "", *arguments]
+        return shlex.join(command), f"{self.sudo_password}\n"
+
     def probe_one(self, edge_id: str) -> bool:
         edge = self.edges[edge_id]
         entry = self.state["edges"][edge_id]
@@ -326,7 +352,16 @@ class FleetController:
             return True
         inventory_path.parent.mkdir(parents=True, exist_ok=True)
         command = [str(OPERATIONS), "probe-edge-hardware", "--ssh", edge["ssh_target"], "--output", str(inventory_path)]
-        result = run_logged(command, self.edge_log(edge_id, "probe"), timeout=300)
+        input_text = None
+        if self.sudo_password is not None:
+            command.append("--sudo-stdin")
+            input_text = f"{self.sudo_password}\n"
+        result = run_logged(
+            command,
+            self.edge_log(edge_id, "probe"),
+            timeout=300,
+            input_text=input_text,
+        )
         if result.returncode != 0:
             self.fail_edge(edge_id, "probe", f"probe command exited {result.returncode}")
             return False
@@ -428,9 +463,13 @@ class FleetController:
         return False
 
     def remote_prepare_state(self, edge: dict[str, Any], edge_id: str) -> dict[str, Any] | None:
+        remote, input_text = self.sudo_invocation(
+            "cat", "/var/lib/tvt/install/prepare-state.json"
+        )
         result = capture_logged(
-            ssh_command(edge["ssh_target"], "sudo -n cat /var/lib/tvt/install/prepare-state.json"),
-            self.edge_log(edge_id, "prepare"), timeout=60)
+            ssh_command(edge["ssh_target"], remote),
+            self.edge_log(edge_id, "prepare"), timeout=60,
+            input_text=input_text)
         if result.returncode != 0:
             return None
         try:
@@ -441,9 +480,11 @@ class FleetController:
 
     def reboot_edge(self, edge: dict[str, Any], edge_id: str) -> bool:
         self.update_edge(edge_id, status="reboot_required")
+        remote, input_text = self.sudo_invocation("systemctl", "reboot")
         reboot = run_logged(
-            ssh_command(edge["ssh_target"], "sudo -n systemctl reboot"),
-            self.edge_log(edge_id, "reboot"), timeout=60)
+            ssh_command(edge["ssh_target"], remote),
+            self.edge_log(edge_id, "reboot"), timeout=60,
+            input_text=input_text)
         if reboot.returncode != 0:
             # SSH commonly closes with a non-zero result as reboot starts.
             time.sleep(5)
@@ -493,9 +534,15 @@ class FleetController:
                 return False
             prepare_state = None
         if not prepare_state:
+            remote, input_text = self.sudo_invocation(
+                remote_bundle + "/prepare-tvt-edge-host.sh",
+                "--bundle", remote_bundle,
+                "--mode", "offline",
+            )
             prepare = run_logged(
-                ssh_command(edge["ssh_target"], f"sudo -n {shlex.quote(remote_bundle + '/prepare-tvt-edge-host.sh')} --bundle {shlex.quote(remote_bundle)} --mode offline"),
-                self.edge_log(edge_id, "prepare"), timeout=3600)
+                ssh_command(edge["ssh_target"], remote),
+                self.edge_log(edge_id, "prepare"), timeout=3600,
+                input_text=input_text)
             if prepare.returncode != 0:
                 self.fail_edge(edge_id, "prepare", f"remote preparation exited {prepare.returncode}")
                 return False
@@ -512,31 +559,40 @@ class FleetController:
 
         self.update_edge(edge_id, status="installing")
         install_arguments = [
-            "sudo", "-n", remote_bundle + "/install-tvt-edge-host.sh",
+            remote_bundle + "/install-tvt-edge-host.sh",
             "--bundle", remote_bundle,
             "--site-config", remote_site,
             "--prepare-mode", "offline",
         ]
         if self.resume:
             install_arguments.append("--resume")
+        remote, input_text = self.sudo_invocation(*install_arguments)
         install = run_logged(
-            ssh_command(edge["ssh_target"], shlex.join(install_arguments)),
-            self.edge_log(edge_id, "install"), timeout=7200)
+            ssh_command(edge["ssh_target"], remote),
+            self.edge_log(edge_id, "install"), timeout=7200,
+            input_text=input_text)
         if install.returncode != 0:
             self.fail_edge(edge_id, "install", f"remote installation exited {install.returncode}")
             return False
+        remote, input_text = self.sudo_invocation(
+            remote_bundle + "/install-tvt-edge-host.sh",
+            "--bundle", remote_bundle,
+            "--verify-only",
+        )
         verify = run_logged(
-            ssh_command(edge["ssh_target"], f"sudo -n {shlex.quote(remote_bundle + '/install-tvt-edge-host.sh')} --bundle {shlex.quote(remote_bundle)} --verify-only"),
-            self.edge_log(edge_id, "verify"), timeout=1800)
+            ssh_command(edge["ssh_target"], remote),
+            self.edge_log(edge_id, "verify"), timeout=1800,
+            input_text=input_text)
         if verify.returncode != 0:
             self.fail_edge(edge_id, "verify", f"remote verification exited {verify.returncode}")
             return False
+        remote, input_text = self.sudo_invocation(
+            "cat", "/var/lib/tvt/install/installation-report.json"
+        )
         evidence = capture_logged(
-            ssh_command(
-                edge["ssh_target"],
-                "sudo -n cat /var/lib/tvt/install/installation-report.json",
-            ),
-            self.edge_log(edge_id, "evidence"), timeout=60)
+            ssh_command(edge["ssh_target"], remote),
+            self.edge_log(edge_id, "evidence"), timeout=60,
+            input_text=input_text)
         if evidence.returncode != 0:
             self.fail_edge(edge_id, "evidence", f"installation evidence retrieval exited {evidence.returncode}")
             return False
@@ -615,6 +671,11 @@ def parser() -> argparse.ArgumentParser:
     common.add_argument("--skip-tests", action="store_true", help="skip release-builder tests (not recommended for production)")
     common.add_argument("--allow-dirty-source", action="store_true", help="pass the development-only dirty-source override to the release builder")
     common.add_argument("--source-commit", default=None)
+    common.add_argument(
+        "--interactive-sudo",
+        action="store_true",
+        help="prompt once for one edge's sudo password; never stores or logs it",
+    )
 
     root = argparse.ArgumentParser(description=__doc__)
     sub = root.add_subparsers(dest="command", required=True)
@@ -646,6 +707,17 @@ def main(argv: list[str] | None = None) -> int:
         raise FleetError("--concurrency must be between 1 and 32")
     fleet_path = args.fleet.resolve()
     edges = load_fleet(fleet_path)
+    if args.interactive_sudo and (len(edges) != 1 or args.concurrency != 1):
+        raise FleetError("--interactive-sudo requires exactly one edge and --concurrency 1")
+    sudo_password = None
+    if args.interactive_sudo:
+        if not sys.stdin.isatty():
+            raise FleetError("--interactive-sudo requires an interactive terminal")
+        sudo_password = getpass.getpass(
+            f"Sudo password for {edges[0]['ssh_target']}: "
+        )
+        if not sudo_password:
+            raise FleetError("sudo password cannot be empty")
     if args.command == "resume":
         state_path = args.state_directory.resolve() / "fleet-state.json"
         if not state_path.is_file():
@@ -670,6 +742,7 @@ def main(argv: list[str] | None = None) -> int:
         allow_dirty_source=args.allow_dirty_source,
         source_commit=source_commit,
         resume=resume,
+        sudo_password=sudo_password,
     )
     return controller.run()
 
