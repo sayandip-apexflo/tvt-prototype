@@ -97,6 +97,56 @@ install_host_packages() {
     ca-certificates curl gnupg python3 python3-venv docker.io postgresql-16
     openssl
   )
+  local -a offline_package_requests=()
+  local replace_onevpl_tools=false
+
+  if [[ ${MODE} == offline ]]; then
+    local package_directory="${BUNDLE}/packages/apt"
+    [[ -d ${package_directory} ]] || tvt_fail "offline APT package directory is missing"
+    shopt -s nullglob
+    local -a debs=("${package_directory}"/*.deb)
+    shopt -u nullglob
+    (( ${#debs[@]} > 0 )) || tvt_fail "offline APT package directory contains no .deb files"
+    offline_package_requests=("${debs[@]}")
+
+    # Ubuntu 24.04 calls the legacy tools package onevpl-tools, while the
+    # qualified Intel graphics PPA calls its replacement libvpl-tools.  The
+    # latter currently lacks Conflicts/Replaces metadata even though both
+    # packages own sample_decode.  Make the rename an explicit APT transaction
+    # instead of forcing dpkg to overwrite a file owned by another package.
+    local package_file bundled_package_name
+    for package_file in "${debs[@]}"; do
+      bundled_package_name="$(dpkg-deb -f "${package_file}" Package 2>/dev/null || true)"
+      if [[ ${bundled_package_name} == libvpl-tools ]]; then
+        if [[ $(dpkg-query -W -f='${db:Status-Status}' onevpl-tools 2>/dev/null || true) == installed ]]; then
+          apt-mark showhold | grep -Fxq onevpl-tools && \
+            tvt_fail "onevpl-tools is held; unhold it before installing its libvpl-tools replacement"
+          offline_package_requests=(onevpl-tools- "${debs[@]}")
+          replace_onevpl_tools=true
+        fi
+        break
+      fi
+    done
+
+    # Validate the complete transaction before stopping Docker or
+    # otherwise changing the host.  Only the known onevpl-tools transition may
+    # remove an installed package.
+    local transaction_simulation removed_package
+    if ! transaction_simulation="$(
+      LC_ALL=C apt-get --simulate install --no-install-recommends \
+        "${offline_package_requests[@]}" 2>&1
+    )"; then
+      printf '%s\n' "${transaction_simulation}" >&2
+      tvt_fail "offline APT package transaction simulation failed"
+    fi
+    while IFS= read -r removed_package; do
+      removed_package="${removed_package%%:*}"
+      if ${replace_onevpl_tools} && [[ ${removed_package} == onevpl-tools ]]; then
+        continue
+      fi
+      tvt_fail "offline APT package transaction would remove unexpected package ${removed_package}"
+    done < <(awk '$1 == "Remv" {print $2}' <<<"${transaction_simulation}")
+  fi
 
   # docker.io may replace docker.socket while an older instance is still
   # active.  systemd cannot hand dockerd the old socket after that transition,
@@ -115,13 +165,15 @@ install_host_packages() {
     apt-get update
     apt-get install -y --no-install-recommends "${packages[@]}"
   else
-    local package_directory="${BUNDLE}/packages/apt"
-    [[ -d ${package_directory} ]] || tvt_fail "offline APT package directory is missing"
-    shopt -s nullglob
-    local -a debs=("${package_directory}"/*.deb)
-    shopt -u nullglob
-    (( ${#debs[@]} > 0 )) || tvt_fail "offline APT package directory contains no .deb files"
-    apt-get install -y --no-install-recommends "${debs[@]}"
+    ${replace_onevpl_tools} && \
+      tvt_log "replacing installed onevpl-tools with bundled libvpl-tools"
+    apt-get install -y --no-install-recommends "${offline_package_requests[@]}"
+    if ${replace_onevpl_tools}; then
+      [[ $(dpkg-query -W -f='${db:Status-Status}' onevpl-tools 2>/dev/null || true) != installed ]] || \
+        tvt_fail "legacy onevpl-tools remains installed after its replacement transaction"
+      [[ $(dpkg-query -W -f='${db:Status-Status}' libvpl-tools 2>/dev/null || true) == installed ]] || \
+        tvt_fail "libvpl-tools was not installed by the replacement transaction"
+    fi
   fi
   for command_name in curl docker openssl python3 psql systemctl; do
     command -v "${command_name}" >/dev/null 2>&1 || tvt_fail "host package installation did not provide ${command_name}"

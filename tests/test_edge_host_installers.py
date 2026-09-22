@@ -63,6 +63,23 @@ class EdgeHostInstallerTests(unittest.TestCase):
         )
         self.assertIn('tvt_fail "Docker is active but not healthy"', service_setup)
 
+    def test_offline_install_safely_replaces_legacy_onevpl_tools(self) -> None:
+        prepare = (ROOT / "prepare-tvt-edge-host.sh").read_text(encoding="utf-8")
+        package_install = prepare.split("install_host_packages()", 1)[1].split(
+            "enable_host_services()", 1
+        )[0]
+
+        self.assertIn("offline_package_requests=(onevpl-tools-", package_install)
+        self.assertIn("apt-mark showhold", package_install)
+        self.assertIn("apt-get --simulate install", package_install)
+        self.assertIn("would remove unexpected package", package_install)
+        self.assertIn("libvpl-tools was not installed", package_install)
+        self.assertNotIn("--force-overwrite", package_install)
+        self.assertLess(
+            package_install.index("apt-get --simulate install"),
+            package_install.index("systemctl stop docker.service docker.socket"),
+        )
+
     def test_all_installer_shell_is_syntactically_valid(self) -> None:
         scripts = [
             ROOT / "prepare-tvt-edge-host.sh",
