@@ -49,7 +49,10 @@ scripts/tvt-edge-fleet.sh status \
 
 The controller keeps inventory, bundle-group, transfer, preparation, reboot,
 installation, and verification status separately for each edge. Resuming
-reuses successful probes and already-built group bundles.
+reuses successful probes and already-built group bundles. After final host
+verification it also retrieves the non-secret
+`/var/lib/tvt/install/installation-report.json` into the edge's fleet-state
+directory and records that local path in `fleet-report.json`.
 
 ## Compatibility grouping
 

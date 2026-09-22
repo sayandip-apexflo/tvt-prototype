@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -9,6 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "scripts/tvt-edge-fleet.py"
+SINGLE_EDGE = ROOT / "scripts/tvt-edge-single.sh"
 SPEC = importlib.util.spec_from_file_location("tvt_edge_fleet", MODULE_PATH)
 assert SPEC and SPEC.loader
 fleet = importlib.util.module_from_spec(SPEC)
@@ -97,6 +99,59 @@ class EdgeFleetTests(unittest.TestCase):
         self.assertIn("install", result.stdout)
         self.assertIn("resume", result.stdout)
         self.assertIn("status", result.stdout)
+
+    def test_single_edge_front_door_is_valid_and_documents_commands(self):
+        subprocess.run(["bash", "-n", str(SINGLE_EDGE)], check=True)
+        result = subprocess.run(
+            ["bash", str(SINGLE_EDGE), "--help"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertIn("install", result.stderr)
+        self.assertIn("resume", result.stderr)
+        self.assertIn("status", result.stderr)
+        script = SINGLE_EDGE.read_text(encoding="utf-8")
+        self.assertIn('"${FLEET_CONTROLLER}"', script)
+        self.assertIn("sudo -n true", script)
+        self.assertNotIn("prepare-tvt-edge-host.sh", script)
+        self.assertNotIn("install-tvt-edge-host.sh", script)
+
+    def test_fleet_resume_requests_explicit_host_installer_resume(self):
+        script = MODULE_PATH.read_text(encoding="utf-8")
+        self.assertIn('if self.resume:', script)
+        self.assertIn('install_arguments.append("--resume")', script)
+
+    def test_fleet_collects_installation_evidence_after_verification(self):
+        script = MODULE_PATH.read_text(encoding="utf-8")
+        self.assertIn("/var/lib/tvt/install/installation-report.json", script)
+        self.assertIn('self.edge_dir(edge_id) / "installation-report.json"', script)
+        self.assertIn('installation_report=str(evidence_path)', script)
+
+    def test_single_edge_status_reads_its_saved_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            state.mkdir()
+            (state / "fleet-report.json").write_text(
+                json.dumps({"schema_version": 1, "counts": {"verified": 1}}) + "\n",
+                encoding="utf-8",
+            )
+            (root / "run.json").write_text(
+                json.dumps({"state_directory": str(state)}) + "\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    "bash", str(SINGLE_EDGE), "status",
+                    "--edge-id", "edge-01",
+                    "--operator-directory", str(root),
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertIn('"verified": 1', result.stdout)
 
     def test_example_manifest_is_parseable(self):
         # The example intentionally uses invalid hostnames, so only validate

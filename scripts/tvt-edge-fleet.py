@@ -511,8 +511,16 @@ class FleetController:
             return False
 
         self.update_edge(edge_id, status="installing")
+        install_arguments = [
+            "sudo", "-n", remote_bundle + "/install-tvt-edge-host.sh",
+            "--bundle", remote_bundle,
+            "--site-config", remote_site,
+            "--prepare-mode", "offline",
+        ]
+        if self.resume:
+            install_arguments.append("--resume")
         install = run_logged(
-            ssh_command(edge["ssh_target"], f"sudo -n {shlex.quote(remote_bundle + '/install-tvt-edge-host.sh')} --bundle {shlex.quote(remote_bundle)} --site-config {shlex.quote(remote_site)} --prepare-mode offline"),
+            ssh_command(edge["ssh_target"], shlex.join(install_arguments)),
             self.edge_log(edge_id, "install"), timeout=7200)
         if install.returncode != 0:
             self.fail_edge(edge_id, "install", f"remote installation exited {install.returncode}")
@@ -523,7 +531,31 @@ class FleetController:
         if verify.returncode != 0:
             self.fail_edge(edge_id, "verify", f"remote verification exited {verify.returncode}")
             return False
-        self.update_edge(edge_id, status="verified", last_error=None)
+        evidence = capture_logged(
+            ssh_command(
+                edge["ssh_target"],
+                "sudo -n cat /var/lib/tvt/install/installation-report.json",
+            ),
+            self.edge_log(edge_id, "evidence"), timeout=60)
+        if evidence.returncode != 0:
+            self.fail_edge(edge_id, "evidence", f"installation evidence retrieval exited {evidence.returncode}")
+            return False
+        try:
+            installation_report = json.loads(evidence.stdout)
+        except json.JSONDecodeError as exc:
+            self.fail_edge(edge_id, "evidence", f"installation evidence is invalid JSON: {exc}")
+            return False
+        if not isinstance(installation_report, dict):
+            self.fail_edge(edge_id, "evidence", "installation evidence is not a JSON object")
+            return False
+        evidence_path = self.edge_dir(edge_id) / "installation-report.json"
+        atomic_write_json(evidence_path, installation_report)
+        self.update_edge(
+            edge_id,
+            status="verified",
+            installation_report=str(evidence_path),
+            last_error=None,
+        )
         return True
 
     def deploy_all(self) -> None:

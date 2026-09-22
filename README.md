@@ -50,6 +50,33 @@ installer writes non-secret evidence to
 `/var/lib/tvt/install/installation-report.json` and never creates a Traffic
 deployment; camera onboarding and deployment remain explicit UI actions.
 
+For a new edge reachable over SSH, the workstation-side single-edge front door
+performs the entire probe, release build, checksum-verified transfer,
+preparation, reboot, installation, and verification workflow:
+
+```bash
+scripts/tvt-edge-single.sh install \
+  --ssh-target admin1@zmd-exp \
+  --site-key plant-1 \
+  --edge-id edge-2c9-al007 \
+  --display-name 'Plant 1 Edge' \
+  --timezone Asia/Kolkata
+```
+
+It derives the application version and source commit from the clean checkout,
+keeps its identifier-only site file under the gitignored `.tvt/` operator
+state, and delegates host changes to the two supported bundle entry points.
+After correcting a failed stage, resume the saved run with:
+
+```bash
+scripts/tvt-edge-single.sh resume --edge-id edge-2c9-al007
+```
+
+Use `scripts/tvt-edge-single.sh status --edge-id edge-2c9-al007` to print the
+saved report. The verified host installation report is copied into that run's
+per-edge state directory. Override `--output-directory` when
+`/srv/tvt-release/output` is not the desired release workspace.
+
 Create a release with the single `scripts/make-tvt-edge-release.sh` command.
 For a new input path it automatically builds or downloads the pinned K3s files,
 the complete offline APT/driver and Python-wheel closures, and the amd64

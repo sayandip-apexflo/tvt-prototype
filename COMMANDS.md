@@ -1,5 +1,38 @@
 # TVT edge operational commands
 
+## One-command installation from a workstation
+
+For one new edge, run the workstation-side orchestrator from a clean,
+approved repository checkout:
+
+```bash
+scripts/tvt-edge-single.sh install \
+  --ssh-target admin1@zmd-exp \
+  --site-key plant-1 \
+  --edge-id edge-2c9-al007 \
+  --display-name 'Plant 1 Edge' \
+  --timezone Asia/Kolkata
+```
+
+The command validates the identifiers, creates a private identifier-only site
+file, probes the edge, builds its profile-specific offline release, transfers
+and verifies it, runs preparation, reboots the edge, waits for SSH, installs
+the application, and performs final verification. SSH key access and
+non-interactive `sudo -n` are required on the target.
+
+Resume or inspect that run with:
+
+```bash
+scripts/tvt-edge-single.sh resume --edge-id edge-2c9-al007
+scripts/tvt-edge-single.sh status --edge-id edge-2c9-al007
+```
+
+The implementation delegates to `scripts/tvt-edge-fleet.sh` with one edge, so
+single-box and fleet installs share the same state, retry, logging, and report
+behavior. Successful verification also copies the host's non-secret
+installation report into the per-edge workstation state. The orchestrator does
+not replace the release-bundle host entry points below.
+
 ## Supported production host workflow
 
 Use only the release-bundle entry points for a production host:
