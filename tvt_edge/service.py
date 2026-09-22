@@ -1010,6 +1010,14 @@ class ManagementService:
             key_meta = session.get(CredentialKeyVersion, encrypted.key_version)
             if key_meta is None:
                 session.add(CredentialKeyVersion(version=encrypted.key_version))
+                # CredentialKeyVersion <-> CameraCredentialVersion is a bare
+                # column-level ForeignKey with no declared relationship(), so
+                # the unit-of-work flush has no dependency edge between them
+                # and isn't guaranteed to insert this row before the
+                # camera_credential_versions insert below (observed in
+                # production as a ForeignKeyViolation on first use of a new
+                # key version). Force it in now.
+                session.flush()
             now = utc_now()
             if old is not None:
                 old.state = "superseded"
