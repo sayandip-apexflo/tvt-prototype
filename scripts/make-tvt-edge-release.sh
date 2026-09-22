@@ -187,8 +187,6 @@ if ! ${SKIP_TESTS}; then
   test_python=python3
   if [[ -x .venv/bin/python ]]; then test_python=.venv/bin/python; fi
   "${test_python}" -m pytest -q
-  npm --prefix ui ci
-  npm --prefix ui test -- --run
   tests_status=passed
 fi
 

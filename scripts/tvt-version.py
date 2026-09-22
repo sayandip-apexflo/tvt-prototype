@@ -40,15 +40,6 @@ def validate(expected: str | None = None) -> str:
     dynamic = project.get("tool", {}).get("setuptools", {}).get("dynamic", {}).get("version", {})
     if dynamic.get("attr") != "tvt_edge.__version__":
         raise ValueError("Python package version is not derived from tvt_edge.__version__")
-    ui_package = json.loads((ROOT / "ui/package.json").read_text(encoding="utf-8"))
-    ui_lock = json.loads((ROOT / "ui/package-lock.json").read_text(encoding="utf-8"))
-    ui_versions = {
-        ui_package.get("version"),
-        ui_lock.get("version"),
-        ui_lock.get("packages", {}).get("", {}).get("version"),
-    }
-    if ui_versions != {version}:
-        raise ValueError(f"UI package versions do not all equal {version}: {sorted(map(str, ui_versions))}")
     manifest = json.loads((ROOT / "release/manifest.template.json").read_text(encoding="utf-8"))
     if manifest.get("release_version") != version:
         raise ValueError("release manifest template version does not equal the canonical version")
@@ -66,15 +57,6 @@ def set_version(version: str) -> None:
     if count != 1:
         raise ValueError("could not update exactly one tvt_edge.__version__ assignment")
     init_path.write_text(updated, encoding="utf-8")
-    ui_path = ROOT / "ui/package.json"
-    ui = json.loads(ui_path.read_text(encoding="utf-8"))
-    ui["version"] = version
-    ui_path.write_text(json.dumps(ui, indent=2) + "\n", encoding="utf-8")
-    lock_path = ROOT / "ui/package-lock.json"
-    lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    lock["version"] = version
-    lock["packages"][""]["version"] = version
-    lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
     manifest_path = ROOT / "release/manifest.template.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["release_version"] = version

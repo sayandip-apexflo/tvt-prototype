@@ -87,9 +87,10 @@ Create a release with the single `scripts/make-tvt-edge-release.sh` command.
 For a new input path it automatically builds or downloads the pinned K3s files,
 the complete offline APT/driver and Python-wheel closures, and the amd64
 archives for Distribution, both node-management images, and Traffic v4. It
-then locks those generated inputs, runs the source gates, compiles the React
-UI, builds the application and dependency wheels, constructs and independently
-verifies the immutable release directory, and writes a reproducible transport
+then locks those generated inputs (including the `deploy/ui/web` build and
+`apexfabric/ui` image), runs the source gates, builds the application and
+dependency wheels, constructs and independently verifies the immutable
+release directory, and writes a reproducible transport
 archive, checksum, and release report. Downloads are retained in a sibling
 cache so later builds do not fetch large immutable payloads again. The complete
 build, verification, publication, and new-commit rebuild procedure is in
@@ -363,27 +364,28 @@ If rollout fails after mutation, it restores the previous complete bundle,
 camera Secret snapshot, and image digest while leaving the failed revision
 pending for operator action or explicit rollback.
 
-The same edge service hosts the React management console at
-`http://127.0.0.1:8089/`. It includes site health, camera onboarding and
-validation, bounded network discovery, Solution Pack assignments and lifecycle,
-alerts and notification history, audit activity, and the K3s node/workload view
-that previously lived in the prototype port-8088 console. Workload telemetry is
-read-only and restricted to ApexFabric-managed Deployments.
+The TVT console is `/dashboard`, served by the `apexfabric-ui` image (nginx +
+React) on port 18081, which proxies `/dashboard/api/v1/*` to the edge API at
+`127.0.0.1:8089` (never call that port directly from a browser). It includes
+site health, camera onboarding and validation, bounded network discovery,
+Solution Pack assignments and lifecycle, enrollment, alerts and notification
+history, audit activity, and the K3s node/workload view. Workload telemetry
+is read-only and restricted to ApexFabric-managed Deployments. `/dashboard`
+is deliberately unauthenticated — see `AGENTS.md`'s TVT frontend policy.
 
-The console is a TypeScript/Vite project in `ui/`. For local development, run
-the API on port 8089 and start Vite's loopback development server:
-
-```bash
-npm --prefix ui install
-npm --prefix ui run dev
-```
-
-Create the self-contained assets packaged with `tvt_edge` before building a
-wheel or installing the service:
+The console is a plain JS/Vite project in `deploy/ui/web`. For local
+development:
 
 ```bash
-npm --prefix ui run build
+npm --prefix deploy/ui/web install
+npm --prefix deploy/ui/web run build
 ```
+
+`npm run dev` in that directory only starts the Vite dev server with no
+backend proxy configured — to exercise the real API-backed flows, build the
+`apexfabric/ui` image (`deploy/ui/Dockerfile`) and run it against a live
+`tvt_edge` + apexfabric-control, or use `deploy/ui/nginx.conf`'s routing as
+the reference and point requests at a running edge box directly.
 
 Camera onboarding, credential rotation, assignment commit, start, stop, and
 rollback are API operations. Assignment and lifecycle changes create immutable
@@ -444,6 +446,6 @@ and the database never stores rendered Kubernetes Secret bodies.
 
 ```bash
 .venv/bin/python -m pytest -q
-npm --prefix ui test
-npm --prefix ui run build
+npm --prefix deploy/ui/web run build
+npm --prefix deploy/ui/web test    # playwright; needs a real browser + sudo to install deps
 ```

@@ -12,6 +12,9 @@ export function useSite(){
  return {data,error,refresh};
 }
 export function useTheme(){const [theme,setTheme]=useState(document.documentElement.dataset.theme||'light');useEffect(()=>{document.documentElement.dataset.theme=theme;try{localStorage.setItem('apexfabric-theme',theme)}catch{}},[theme]);return[theme,()=>setTheme(t=>t==='dark'?'light':'dark')]}
+export function Pill({value,label}){const v=(value??'').toString().toLowerCase();return <span className={`cu-pill cu-pill-${v}`}>{label??value}</span>}
+export function relativeTime(value){if(!value)return 'Never';const seconds=Math.round((Date.now()-new Date(value).getTime())/1000);if(seconds<60)return `${Math.max(0,seconds)}s ago`;if(seconds<3600)return `${Math.round(seconds/60)}m ago`;if(seconds<86400)return `${Math.round(seconds/3600)}h ago`;return `${Math.round(seconds/86400)}d ago`}
+export const titleCase=v=>(v||'').replaceAll('_',' ').replace(/\b\w/g,c=>c.toUpperCase());
 export function Feed({cameraId}){
  const [image,setImage]=useState(null),[error,setError]=useState(''),[time,setTime]=useState('');
  useEffect(()=>{let stopped=false,url=null,busy=false;const controller=new AbortController();

@@ -169,8 +169,7 @@ diff, and rerun the check:
 
 ```bash
 python3 scripts/tvt-version.py --set 0.1.1
-git diff -- tvt_edge/__init__.py ui/package.json ui/package-lock.json \
-  release/manifest.template.json
+git diff -- tvt_edge/__init__.py release/manifest.template.json
 python3 scripts/tvt-version.py --check --expected 0.1.1
 ```
 
@@ -184,8 +183,7 @@ changes, and commit them:
 ```bash
 git switch -c release/0.1.0 <approved-commit-sha>
 # Run scripts/tvt-version.py --set 0.1.0, then:
-git add release/manifest.template.json ui/package.json ui/package-lock.json \
-  tvt_edge/__init__.py
+git add release/manifest.template.json tvt_edge/__init__.py
 git commit -m 'chore: prepare TVT edge release 0.1.0'
 test -z "$(git status --porcelain)"
 git rev-parse HEAD
@@ -201,8 +199,6 @@ directory name must match.
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 .venv/bin/pytest -q
-npm --prefix ui ci
-npm --prefix ui test -- --run
 bash -n prepare-tvt-edge-host.sh install-tvt-edge-host.sh scripts/*.sh scripts/lib/*.sh
 git diff --check
 ```
@@ -412,9 +408,9 @@ Use this impact matrix:
 
 | Changed paths or pins | Required rebuild |
 |---|---|
-| Python, UI, installer scripts, templates, migrations, or Solution Pack schemas | Rebuild the release directory and application wheel. Cached immutable downloads may be reused. |
+| Python, installer scripts, templates, migrations, or Solution Pack schemas | Rebuild the release directory and application wheel. Cached immutable downloads may be reused. |
 | `pyproject.toml` dependencies | The release builder re-resolves the application wheel closure. |
-| `ui/` | Rebuild the UI before building the application wheel. |
+| `deploy/ui/web/` | The builder rebuilds `deploy/ui/web` and the `apexfabric/ui` image as part of `build-release-inputs`. |
 | `apexfabric/node_management/reporter/` | Bump the node-management image version; the builder rebuilds `node-reporter.tar`. |
 | `apexfabric/node_management/status_controller/` | Bump the node-management image version; the builder rebuilds `node-status-controller.tar`. |
 | Traffic revision, image contract, models, schemas, or `config/pipeline.env` | Update every Traffic pin; the builder fetches and verifies the matching archive. |

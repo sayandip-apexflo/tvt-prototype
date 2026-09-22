@@ -2,9 +2,27 @@
 
 This repo is a single-box video-analytics edge system: host Python management
 plane (`tvt_edge/`), reused K3s/Solution Pack runtime (`apexfabric/`,
-`solution-packs/`), React console (`ui/`), K3s/host installers (`scripts/`,
-`deploy/`, `config/`), and docs (`HLD.md`, `LLD_PLAN.md`, `MONITORING.md`,
-`METRICS.md`, `COMMANDS.md`, `README.md`).
+`solution-packs/`), the TVT frontend (`deploy/ui/web/src`, served at
+`/dashboard`), K3s/host installers (`scripts/`, `deploy/`, `config/`), and
+docs (`HLD.md`, `LLD_PLAN.md`, `MONITORING.md`, `METRICS.md`, `COMMANDS.md`,
+`README.md`).
+
+## TVT frontend policy (STRICT, applies everywhere below)
+
+`deploy/ui/web/src` (served at `/dashboard`, port 18081) is the **sole**
+home for TVT frontend logic — present and future. Camera CRUD/credentials,
+deployment lifecycle, zones/lines, enrollment, alerts, cluster/operations
+views, reports, settings: all of it goes there. Never create, resurrect, or
+add to a separate TVT-hosted console. The legacy `ui/` (TypeScript/Vite)
+console has been fully retired and deleted; `tvt_edge/api/app.py` is a
+headless JSON API with no static UI serving.
+
+`/dashboard` is deliberately unauthenticated (`deploy/ui/image-contract.yaml`
+`limitations`: "not a security boundary between users") — this stays true
+even as it grows to host camera RTSP credential entry and full deployment
+start/stop/rollback control. This was raised explicitly and decided on
+purpose. Do not add authentication to `/dashboard` unprompted, and do not
+treat the exposure as an oversight to silently "fix."
 
 ## 1. Repo map (where to change things)
 
@@ -15,17 +33,31 @@ plane (`tvt_edge/`), reused K3s/Solution Pack runtime (`apexfabric/`,
   (`security.py`), config (`settings.py`, `service.py`, `paths.py`).
 - `apexfabric/` + `solution-packs/schema`, `solution-packs/traffic/`,
   `solution-packs/catalog/`, `solution-packs/review/`, `deploy/k8s/`,
-  `deploy/single-box/`, `deploy/ui/` — **exact copy** of `k3s-prototype` commit
+  `deploy/single-box/` — **exact copy** of `k3s-prototype` commit
   `5ada504fbb3a5fc3c15e08428c6e996eeb6fbd44` (full `control_plane/`,
   validator, camera-locality, renderer, field-manager/apply/prune,
   reporter/controller, catalog/install_catalog, and their tests stay
   behavior-identical — never edit to fix a TVT problem, see §6).
+- `deploy/ui/` — **excluded from the exact-copy freeze above** (see the TVT
+  frontend policy at the top of this file). `deploy/ui/web/src` is TVT-owned
+  and actively developed: it drives the full TVT product (camera
+  CRUD/credentials, deployments, enrollment, alerts, etc.) directly against
+  the `tvt_edge` API on `:8089`, proxied through the matching blocks in
+  `deploy/ui/nginx.conf` + entries in `image-contract.yaml`. The one
+  exception *within* `deploy/ui/`: `deploy/ui/web/src/main.jsx`'s `Admin`
+  component (served at `/apexfabricdashboard`, `auth_basic`-protected) is
+  apexfabric-control's own raw admin UI — genuinely frozen, not TVT, calls
+  apexfabric-control's `:8088` API directly (`api('cameras'|'bundles/generate'|
+  'workload-action'|...)`). Never give it TVT logic or point it at
+  `tvt_edge`; this is the same raw path that produced disconnected fixture
+  deployments (`test1`/`test2`) with zero `tvt_edge` awareness — a
+  cautionary example of what happens when TVT data flows through it.
+  Do not assume any file under `deploy/ui/` is still pristine when diffing
+  against upstream `k3s-prototype` — check this note first.
   TVT-only extras kept alongside the copy: `tvt_edge/delivery_metadata.py`
   (Postgres catalog loader with `metrics.schema` + `analytics-event.*` +
   `provenance.json` checksums) and the 4 TVT-only files under
   `solution-packs/catalog/traffic-edge-runtime-2026.08.21-v4/`.
-- `ui/` — TypeScript/Vite React console, built into `tvt_edge/static/` and
-  served by the edge API. `ui/src/`.
 - `tests/` — pytest suite (`test_*.py` at top level plus `unit/`,
   `integration/`, `fixtures/`). `tests/test_observability.py`,
   `test_management_plane.py`, `test_alerting.py` encode the hardest invariants.
@@ -52,18 +84,15 @@ python3 -m venv .venv
 .venv/bin/python -m pytest -q
 ```
 
-UI (Node, loopback dev server only):
+TVT frontend, `deploy/ui/web` (Node, plain JS/Vite, no type-checking today —
+this is the canonical UI going forward):
 
 ```bash
-npm --prefix ui install
-npm --prefix ui test        # vitest run
-npm --prefix ui run build   # tsc --noEmit && vite build
+npm --prefix deploy/ui/web install
+npm --prefix deploy/ui/web run build   # vite build; must pass before shipping the apexfabric/ui image
+npm --prefix deploy/ui/web test        # playwright test; needs a real browser + sudo to install deps
+npm --prefix deploy/ui/web run dev     # Vite dev server only — no backend proxy configured, see nginx.conf for the real routing
 ```
-
-You **must** run `npm --prefix ui run build` before building a wheel,
-installing the service, or cutting a release — the Python package ships
-`static/index.html` + `static/assets/*` (see `pyproject.toml`
-`tool.setuptools.package-data`).
 
 Useful local API checks (loopback only, docs-only credentials):
 
@@ -75,7 +104,6 @@ Useful local API checks (loopback only, docs-only credentials):
   --registry 127.0.0.1:5000 \
   --secret-inputs examples/traffic.secret-inputs.example.json \
   --dry-run
-npm --prefix ui run dev   # API on :8089 + Vite on loopback
 ```
 
 Alembic: `alembic.ini` at root, migrations in
@@ -92,8 +120,11 @@ revision.
   design — see `LLD_PLAN.md` §1).
 - Python: type-annotate new public functions, use UTC `timestamptz` for new
   timestamps, keep `tvt_edge` imports absolute.
-- UI: TypeScript strict (`tsc --noEmit` must pass); no direct K8s access, no
-  secret material in state/logs; management API is `http://127.0.0.1:8089`.
+- UI: all new TVT frontend work goes in `deploy/ui/web/src` (see the TVT
+  frontend policy above). No direct K8s access, no secret material in
+  state/logs. It talks to the `tvt_edge` API only through the
+  `/dashboard/api/v1/` nginx proxy (`deploy/ui/nginx.conf`) to
+  `http://127.0.0.1:8089` — never call `:8089` directly from the browser.
 - Shell: new host operations go in `scripts/tvt-edge-operations.sh` as
   subcommands plus `lib/` helpers — never add standalone component installers
   to the release bundle. Scripts must be idempotent and fail without mutating
@@ -173,9 +204,7 @@ touch:
   (Namespace/Deployments/Services/ConfigMaps/Secrets/PVCs/policies/probes),
   deterministic revision hashing, server-side apply field manager, ownership
   labels, prune rules, PVC retention, `ApexNodeStatus` contract, or
-  reporter/controller label ownership to fix a TVT problem. Add TVT behavior
-  in `tvt_edge/` adapters (catalog adapter, allowlisted Apply, camera sync)
-  instead.
+  reporter/controller label ownership to fix a TVT problem.
 - `solution-packs/` structure and the Traffic pack stay reference-format;
   per-deployment desired-state + camera-source Secrets keep bundle-derived
   names; camera URLs mount read-only at
@@ -185,12 +214,21 @@ touch:
 - Reference tests (`test_camera_locality.py`, `test_tvt_runtime.py`,
   reporter/controller tests) must keep passing unmodified. Add TVT coverage
   without altering reference assertions.
+- This freeze does **not** cover `deploy/ui/web/src` or the TVT-facing
+  blocks of `deploy/ui/nginx.conf`/`image-contract.yaml` — see the carve-out
+  in §1 and the TVT frontend policy at the top of this file. It does still
+  cover `main.jsx`'s `Admin` component (`/apexfabricdashboard`).
 
 ## 7. API / DB / sync rules
 
-- API binds loopback (`127.0.0.1:8089`); UI binds the on-site management
-  interface only. All responses carry `X-Request-ID`; mutations append an
-  audit event. Passwords are write-only; camera list/detail responses are
+- API binds loopback (`127.0.0.1:8089`), reached only via the `tvt_edge`
+  process itself or the `/dashboard/api/v1/` nginx proxy — never call it
+  directly from a browser. `/dashboard` (port 18081, see the TVT frontend
+  policy above) is the on-site management interface; it is deliberately
+  unauthenticated. All responses carry `X-Request-ID`; mutations append an
+  audit event (note: with no auth on `/dashboard`, audit records can't
+  attribute a mutation to a real actor — a known, accepted limitation of
+  that decision). Passwords are write-only; camera list/detail responses are
   non-secret.
 - DB: host PostgreSQL on Unix socket/loopback, SQLAlchemy + Alembic, separate
   migration/app roles (`tvt-alert` role for the dispatcher). Never store
@@ -234,8 +272,9 @@ against your dev machine; the repo-local equivalents are the
 
 ## 9. Before you finish
 
-- Run: `.venv/bin/python -m pytest -q` and (if `ui/` touched)
-  `npm --prefix ui test` + `npm --prefix ui run build`.
+- Run: `.venv/bin/python -m pytest -q` and, if `deploy/ui/web` touched,
+  `npm --prefix deploy/ui/web run build` (+ `test` where a browser is
+  available).
 - For metrics/log/alerting changes, also run the focused suites
   (`tests/test_observability.py`, `test_alerting.py`,
   `test_management_plane.py`) and verify no secret/URL/IP/face/plate appears

@@ -36,9 +36,6 @@ tvt-traffic-qualify = "tvt_edge.qualification:main"
 [tool.setuptools.packages.find]
 include = ["apexfabric*", "tvt_edge*", "tvt_runtime*"]
 
-[tool.setuptools.package-data]
-tvt_edge = ["static/index.html", "static/assets/*"]
-
 [tool.setuptools.dynamic]
 version = {attr = "tvt_edge.__version__"}
 

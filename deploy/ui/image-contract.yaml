@@ -14,12 +14,19 @@ pages:
   customer: /dashboard
 backend:
   origin: http://127.0.0.1:8088
+  tvtEdgeOrigin: http://127.0.0.1:8089
   hostNetworkRequired: true
   managementPrefix: /apexfabricdashboard/api
   customerPrefix: /dashboard/api
   customerMethods: [GET, POST]
   customerWrites: [alert-rules, alerts/acknowledge]
   customerResources: [alert-templates, customer, cameras/snapshot, telemetry/events, telemetry/snapshots, alert-rules, alerts]
+  # All of /dashboard/api/v1/* proxies to tvtEdgeOrigin (GET/POST/PUT/PATCH/DELETE) --
+  # tvt_edge's own JSON API (cameras CRUD/credentials/stream/geometry, deployments,
+  # enrollment, alerts, cluster, audit, reports). /metrics and /internal/v1/* are never
+  # reachable through this proxy. See deploy/ui/nginx.conf and AGENTS.md's TVT frontend
+  # policy for the full route surface.
+  customerV1Methods: [GET, POST, PUT, PATCH, DELETE]
 storage:
   persistent: false
   writablePaths: [/tmp, /var/cache/nginx]
@@ -30,7 +37,7 @@ process:
   kubernetesCredentialsRequired: false
 features:
   management: [camera-inventory, catalog-selection, deployment, start-stop, health, configuration, events, snapshots]
-  customer: [camera-assignments, deployment-status, refreshed-camera-snapshots, emitted-events, numeric-threshold-rules, event-rules, plate-matching, alert-popups, alert-acknowledgement]
+  customer: [camera-assignments, deployment-status, refreshed-camera-snapshots, emitted-events, numeric-threshold-rules, event-rules, plate-matching, alert-popups, alert-acknowledgement, face-enrollment, camera-inventory-management, camera-credentials, camera-stream-configuration, camera-zones-and-lines]
 limitations:
   - No continuous browser video transport.
   - Alert rules match detections, plates and individual numeric event values; no time-window aggregation or external actions.

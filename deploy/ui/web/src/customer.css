@@ -95,6 +95,56 @@
 .cu-site-form{display:flex;align-items:flex-end;gap:12px;max-width:680px}.cu-site-form label{flex:1}.cu-site-message{margin:12px 0 0!important}
 [data-theme='dark'] .customer-app .cu-brand>img{filter:invert(1)}
 [data-theme='dark'] .customer-app .cu-event-modal-head>button{color:var(--cu-muted)}
+
+/* Camera geometry editor (Zones & Lines tab). */
+.geometry-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.geometry-toolbar-actions{display:flex;gap:8px}
+.geometry-canvas{position:relative;width:100%;aspect-ratio:16/9;border:1px solid var(--cu-border);border-radius:9px;overflow:hidden;background:#1d211f;cursor:crosshair}
+.geometry-canvas>img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none;user-select:none}
+.geometry-overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.geometry-shape{fill:#7852ce33;stroke:#7852ce;stroke-width:2}
+.geometry-line{stroke-width:3}
+.geometry-line-entry{stroke:#28a078}
+.geometry-line-exit{stroke:#c15b3b}
+.geometry-draft{fill:none;stroke:#fff;stroke-dasharray:4 3;stroke-width:2}
+.geometry-vertex{fill:#fff;stroke:#7852ce;stroke-width:1}
+.geometry-point-label{position:absolute;transform:translate(-50%,-140%);background:#1d211fcc;color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;white-space:nowrap;pointer-events:none}
+.geometry-shape-list,.geometry-editor .cu-device-row{margin-top:8px}
+[data-theme='dark'] .customer-app .geometry-canvas{border-color:var(--cu-border)}
+
+/* Generic status pill (severity, lifecycle, sync state, etc). */
+.cu-pill{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:20px;font-size:9px;font-weight:600;white-space:nowrap;text-transform:capitalize}
+.cu-pill-healthy,.cu-pill-active,.cu-pill-ready,.cu-pill-running,.cu-pill-entry,.cu-pill-applied,.cu-pill-true,.cu-pill-succeeded{background:#e6f4ec;color:#1f8a53}
+.cu-pill-degraded,.cu-pill-warning,.cu-pill-progressing,.cu-pill-pending{background:#fdf1de;color:#b07a1f}
+.cu-pill-unavailable,.cu-pill-critical,.cu-pill-failed,.cu-pill-exit,.cu-pill-false{background:#fbe7e6;color:#c1493f}
+.cu-pill-unconfigured,.cu-pill-resolved,.cu-pill-acknowledged{background:#eee8f6;color:#7a6a94}
+[data-theme='dark'] .customer-app :is(.cu-pill-healthy,.cu-pill-active,.cu-pill-ready,.cu-pill-running,.cu-pill-applied,.cu-pill-true,.cu-pill-succeeded){background:#1c302b;color:#80d1ad}
+[data-theme='dark'] .customer-app :is(.cu-pill-degraded,.cu-pill-warning,.cu-pill-progressing,.cu-pill-pending){background:#332a1c;color:#e5bf78}
+[data-theme='dark'] .customer-app :is(.cu-pill-unavailable,.cu-pill-critical,.cu-pill-failed,.cu-pill-false){background:#301c1c;color:#e59a8f}
+[data-theme='dark'] .customer-app :is(.cu-pill-unconfigured,.cu-pill-resolved,.cu-pill-acknowledged){background:#30243f;color:#c6a2f6}
+
+/* Generic data table used by Solutions, Cluster, Operations, Reports. */
+.cu-table-wrap{overflow:auto}
+.cu-table{width:100%;border-collapse:collapse;font-size:11px}
+.cu-table th{text-align:left;padding:10px 12px;color:var(--cu-muted);font-weight:600;border-bottom:1px solid var(--cu-border);font-size:9px;letter-spacing:.3px;text-transform:uppercase;white-space:nowrap}
+.cu-table td{padding:10px 12px;border-bottom:1px solid var(--cu-border);vertical-align:top}
+.cu-table tr:last-child td{border-bottom:0}
+.cu-table small{display:block;color:var(--cu-muted);font-size:9px;margin-top:4px}
+.cu-table .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px;overflow-wrap:anywhere}
+.cu-table-actions{display:flex;gap:6px;flex-wrap:wrap}
+
+/* Solution/deployment modal. */
+.deployment-camera-list{display:flex;flex-direction:column;gap:10px;margin:14px 0}
+.deployment-camera-row{flex-direction:column;align-items:stretch}
+.deployment-camera-choice{display:flex;gap:10px;align-items:center;cursor:pointer}
+.deployment-camera-choice input{width:auto;margin:0}
+.deployment-camera-detail{margin-top:10px;padding-left:26px;display:flex;flex-direction:column;gap:10px}
+.deployment-app-choices{display:flex;flex-wrap:wrap;gap:10px;font-size:10px;color:var(--cu-muted)}
+.deployment-app-choices label{display:flex;gap:6px;align-items:center}
+.deployment-app-choices input{width:auto;margin:0}
+.deployment-geometry-field{display:flex;flex-direction:column;gap:6px;font-size:10px;color:var(--cu-muted)}
+.deployment-geometry-field textarea{min-height:80px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px;padding:8px;border:1px solid var(--cu-border);border-radius:6px;width:100%;background:#fff;color:var(--cu-ink)}
+[data-theme='dark'] .customer-app .deployment-geometry-field textarea{background:var(--cu-soft);border-color:#414052}
 [data-theme='dark'] .customer-app .cu-event-facts>div{background:var(--cu-soft);border:1px solid var(--cu-border);color:var(--cu-ink)}
 [data-theme='dark'] .customer-app .cu-event-facts :is(dt,dd){color:inherit}
 @media(max-width:600px){.cu-brand{align-items:center}.cu-brand>img{width:140px}.cu-site-form{align-items:stretch;flex-direction:column}}

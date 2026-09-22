@@ -5,6 +5,19 @@ export async function api(path, body) {
   if (!response.ok) throw Error(data.error || data.detail || `HTTP ${response.status}`);
   return data;
 }
+export async function edgeApi(path, body, method) {
+  const verb = method || (body === undefined ? 'GET' : 'POST');
+  const response = await fetch(`${base}/api/v1/${path}`, {
+    method: verb,
+    headers: body === undefined ? {} : {'Content-Type':'application/json'},
+    ...(body === undefined ? {} : {body: JSON.stringify(body)}),
+  });
+  if (response.status === 204) return null;
+  const contentType = response.headers.get('content-type') || '';
+  const data = contentType.includes('application/json') ? await response.json().catch(()=>({error:`HTTP ${response.status}`})) : null;
+  if (!response.ok) throw Error(data?.error || data?.detail || `HTTP ${response.status}`);
+  return data;
+}
 export async function job(path, body, report=()=>{}) {
   const result=await api(path,body); if(!result.job_id)return result;
   for(let n=0;n<240;n++) {

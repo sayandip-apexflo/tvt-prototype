@@ -456,12 +456,6 @@ PY
   exit 1
 }
 
-npm --prefix ui ci
-npm --prefix ui run build
-if ! ${ALLOW_DIRTY_SOURCE} && [[ -n $(git status --porcelain) ]]; then
-  echo "UI build changed the source tree; review and commit generated UI assets" >&2
-  exit 1
-fi
 mkdir -p "${OUTPUT}"/{wheels,images,k3s,hardware,packages/apt}
 mkdir -p "${OUTPUT}/tvt_edge/db"
 python3 -m pip wheel --wheel-dir "${OUTPUT}/wheels" .
