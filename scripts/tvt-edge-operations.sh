@@ -470,7 +470,7 @@ cp -a "${INPUT_LOCK}" "${OUTPUT}/release-inputs.lock.json"
 cp -a "${REGISTRY_IMAGE}" "${OUTPUT}/images/registry.tar"
 cp -a "${NODE_REPORTER_IMAGE}" "${OUTPUT}/images/node-reporter.tar"
 cp -a "${NODE_STATUS_CONTROLLER_IMAGE}" "${OUTPUT}/images/node-status-controller.tar"
-cp -a "${TRAFFIC_IMAGE}" "${OUTPUT}/images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar"
+cp -a "${TRAFFIC_IMAGE}" "${OUTPUT}/images/$(basename "${TRAFFIC_IMAGE}")"
 cp -a "${UI_IMAGE}" "${OUTPUT}/images/ui.tar"
 cp -a "${K3S_INSTALLER}" "${OUTPUT}/k3s/install.sh"
 cp -a "${K3S_BINARY}" "${OUTPUT}/k3s/k3s"
@@ -485,7 +485,7 @@ application_wheel="$(find "${OUTPUT}/wheels" -maxdepth 1 -type f -name 'tvt_runt
   exit 1
 }
 python3 - "${OUTPUT}/manifest.json" "wheels/${application_wheel}" \
-  "${RELEASE_VERSION}" "${SOURCE_COMMIT}" "${INPUT_LOCK}" <<'PY'
+  "${RELEASE_VERSION}" "${SOURCE_COMMIT}" "${INPUT_LOCK}" "images/$(basename "${TRAFFIC_IMAGE}")" <<'PY'
 import json, pathlib, sys
 path = pathlib.Path(sys.argv[1])
 lock = json.loads(pathlib.Path(sys.argv[5]).read_text(encoding="utf-8"))
@@ -499,6 +499,7 @@ manifest["hardware_profile"] = "intel-285h"
 manifest["axelera_variant"] = "metis" if lock["edge_inventory"]["axelera_present"] else "intel-only"
 manifest["kernel_target"] = lock["edge_inventory"]["kernel_target"]
 manifest["edge_inventory_sha256"] = lock["edge_inventory"]["sha256"]
+manifest["artifacts"]["traffic_image"] = sys.argv[6]
 path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 (cd "${OUTPUT}" && find . -type f ! -name checksums.sha256 -printf '%P\0' \
@@ -787,7 +788,7 @@ acquire_traffic() {
   "${REPO_ROOT}/scripts/tvt-edge-operations.sh" verify-docker-archive-tag \
     --archive "${source_archive}" --expected "${PIPELINE_TRAFFIC_ARCHIVE_IMAGE}"
   cp --reflink=auto --sparse=always "${source_archive}" \
-    "${staging}/images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar"
+    "${staging}/images/${PIPELINE_TRAFFIC_ARCHIVE}"
 }
 
 log_edge_profile() {

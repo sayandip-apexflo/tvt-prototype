@@ -580,6 +580,7 @@ tvt_run_stage {state} 0.1.0 sample worker
                 "PIPELINE_REVISION=" + "2" * 40 + "\n"
                 "PIPELINE_TRAFFIC_VERSION=v4\n"
                 "PIPELINE_TRAFFIC_CATALOG_ID=traffic:v4\n"
+                "PIPELINE_TRAFFIC_ARCHIVE=tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar\n"
                 "PIPELINE_TRAFFIC_ARCHIVE_URL=https://example.invalid/traffic.tar\n"
                 f"PIPELINE_TRAFFIC_ARCHIVE_SHA256={hashlib.sha256(traffic).hexdigest()}\n"
                 f"PIPELINE_TRAFFIC_ARCHIVE_SIZE={len(traffic)}\n"

@@ -177,10 +177,20 @@ python3 scripts/tvt-release-inputs.py verify \
 
 validation_python=python3
 if [[ -x .venv/bin/python ]]; then validation_python=.venv/bin/python; fi
+# Derived from config/pipeline.env itself (not hardcoded to one pack version)
+# so this never again drifts from PIPELINE_TRAFFIC_VERSION/_ARCHIVE after a
+# pack bump -- see PIPELINE_TRAFFIC_CATALOG_ID's own tvt-mills-pilot-<version>
+# directory naming convention under solution-packs/catalog/.
+pipeline_version="$(sed -n 's/^PIPELINE_TRAFFIC_VERSION=//p' config/pipeline.env | head -1)"
+pipeline_archive="$(sed -n 's/^PIPELINE_TRAFFIC_ARCHIVE=//p' config/pipeline.env | head -1)"
+[[ -n ${pipeline_version} && -n ${pipeline_archive} ]] || {
+  echo "config/pipeline.env is missing PIPELINE_TRAFFIC_VERSION or PIPELINE_TRAFFIC_ARCHIVE" >&2
+  exit 1
+}
 "${validation_python}" scripts/validate-solution-delivery.py \
-  --catalog solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1 \
+  --catalog "solution-packs/catalog/tvt-mills-pilot-${pipeline_version}" \
   --config config/pipeline.env \
-  --archive "${INPUT_DIRECTORY}/images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar"
+  --archive "${INPUT_DIRECTORY}/images/${pipeline_archive}"
 
 tests_status=skipped
 if ! ${SKIP_TESTS}; then
@@ -199,7 +209,7 @@ if ${ALLOW_DIRTY_SOURCE}; then dirty_argument=(--allow-dirty-source); fi
   --registry-image "${INPUT_DIRECTORY}/images/registry.tar" \
   --node-reporter-image "${INPUT_DIRECTORY}/images/node-reporter.tar" \
   --node-status-controller-image "${INPUT_DIRECTORY}/images/node-status-controller.tar" \
-  --traffic-image "${INPUT_DIRECTORY}/images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar" \
+  --traffic-image "${INPUT_DIRECTORY}/images/${pipeline_archive}" \
   --ui-image "${INPUT_DIRECTORY}/images/ui.tar" \
   --k3s-installer "${INPUT_DIRECTORY}/k3s/install.sh" \
   --k3s-binary "${INPUT_DIRECTORY}/k3s/k3s" \

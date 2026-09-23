@@ -19,11 +19,15 @@ from typing import Any
 DIGEST = re.compile(r"[0-9a-f]{64}")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?")
 COMMIT = re.compile(r"[0-9a-f]{40}")
+# Matched structurally, not by a hardcoded version, so a pack version bump
+# (PIPELINE_TRAFFIC_VERSION/_ARCHIVE in config/pipeline.env) never needs a
+# matching literal here -- see create_lock's cross-check against that config.
+TRAFFIC_IMAGE_PATTERN = re.compile(r"^images/tvt-edge-runtime-intel-285h-.+\.oci\.tar$")
+
 REQUIRED_FILES = {
     "images/registry.tar",
     "images/node-reporter.tar",
     "images/node-status-controller.tar",
-    "images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar",
     "images/ui.tar",
     "k3s/install.sh",
     "k3s/k3s",
@@ -101,6 +105,12 @@ def input_files(root: pathlib.Path, lock_path: pathlib.Path | None = None) -> di
     missing = sorted(REQUIRED_FILES - result.keys())
     if missing:
         raise InputError("required release inputs are missing: " + ", ".join(missing))
+    traffic_matches = sorted(name for name in result if TRAFFIC_IMAGE_PATTERN.fullmatch(name))
+    if len(traffic_matches) != 1:
+        raise InputError(
+            "input directory must contain exactly one images/tvt-edge-runtime-intel-285h-*.oci.tar "
+            f"file, found {len(traffic_matches)}"
+        )
     if not any(name.startswith("hardware/wheels/") and name.endswith(".whl") for name in result):
         raise InputError("hardware/wheels contains no wheel files")
     if not any(name.startswith("apt/") and name.endswith(".deb") for name in result):
@@ -109,6 +119,7 @@ def input_files(root: pathlib.Path, lock_path: pathlib.Path | None = None) -> di
         name
         for name in result
         if name not in REQUIRED_FILES
+        and not TRAFFIC_IMAGE_PATTERN.fullmatch(name)
         and not (name.startswith("hardware/wheels/") and name.endswith(".whl"))
         and not (name.startswith("hardware/voyager-wheels/") and name.endswith(".whl"))
         and not (name.startswith("apt/") and name.endswith(".deb"))
@@ -259,7 +270,13 @@ def create_lock(args: argparse.Namespace) -> dict[str, Any]:
     missing_pins = [key for key, value in pins.items() if not value]
     if missing_pins:
         raise InputError("release configuration pins are missing: " + ", ".join(missing_pins))
-    traffic = root / "images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar"
+    traffic_relative = next(name for name in files if TRAFFIC_IMAGE_PATTERN.fullmatch(name))
+    if traffic_relative != f"images/{pipeline.get('PIPELINE_TRAFFIC_ARCHIVE')}":
+        raise InputError(
+            f"traffic archive filename {traffic_relative!r} does not match "
+            f"PIPELINE_TRAFFIC_ARCHIVE in config/pipeline.env"
+        )
+    traffic = root / traffic_relative
     if sha256(traffic) != pins["PIPELINE_TRAFFIC_ARCHIVE_SHA256"]:
         raise InputError("Traffic archive checksum does not match config/pipeline.env")
     if traffic.stat().st_size != int(pins["PIPELINE_TRAFFIC_ARCHIVE_SIZE"]):
