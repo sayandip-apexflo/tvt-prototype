@@ -1,0 +1,84 @@
+{
+  "format_version": 1,
+  "catalog_id": "tvt-mills-pilot:2026.09.18-v2-ungated-enroll",
+  "pipeline": {
+    "repository": "https://github.com/BhashyamDayasagar587/TVT_images",
+    "commit": "5ad64416002dde6bad3ff4577a31372c0d5fad0d"
+  },
+  "delivery": {
+    "branch": "tvt-edge-intel-285h-2026.09.18-v2-ungated-enroll",
+    "directory": ".",
+    "version": "2026.09.18-v2-ungated-enroll"
+  },
+  "archive": {
+    "filename": "tvt-edge-runtime-intel-285h-2026.09.18-v2-ungated-enroll.oci.tar",
+    "size": 967510016,
+    "sha256": "65b6351dead4dd2bc4aa72f13b3ca028f4cd6d76679540eeedbe5ab4b9123c91",
+    "loaded_image": "localhost/tvt-edge-runtime:intel-285h-2026.09.18-v2-ungated-enroll"
+  },
+  "local_image": {
+    "repository": "apexfabric/tvt-mills-pilot",
+    "tag": "intel-285h-2026.09.18-v2-ungated-enroll"
+  },
+  "platform_compatibility": {
+    "plan_compiler": {
+      "id": "tvt-direct-desired-state-v1",
+      "module": "edge_runtime.agent.edge_agent",
+      "sha256": "8f431f567e0474b7f5a84725cb09f47d7cd3c50e5c153173044f60ea46e39f65"
+    }
+  },
+  "files": {
+    "image-contract.yaml": {
+      "sha256": "3fabd734dfd1b0a18d6dda1e64f0a26f3125f1801bf784e7f423eeb2d4fa93b9"
+    },
+    "desired-state.schema.json": {
+      "sha256": "ad814ea4c29bed685758301b02579cbb6340272397a166a3e5ed73707cf76e64"
+    },
+    "desired-state.example.json": {
+      "sha256": "6b2b5c924dd5b88da462a41e6fe65c50c1d1682c5dc3e1aa46e083f0b433d99c"
+    },
+    "metrics.schema.json": {
+      "sha256": "d2be647575d7db4c43b17556ead25fb9103681eb6c946034e1329435f11b40fc"
+    },
+    "analytics-event.schema.json": {
+      "sha256": "14250d446b377bf79c6ecf5ae40f168c9071edf2df5d4ac18ff6e8402c6ffde4"
+    },
+    "analytics-event.example.json": {
+      "sha256": "681d42d8757adda5a23169029461a4503cf600bcc1236d256f38482992e573e8"
+    }
+  },
+  "note": "v2-ungated-enroll delivery, superseding both v1 (tvt-mills-pilot-2026.09.18-v1) and the earlier, now-retracted v2 export at commit 6356b7c (1.9GB, accidental double-pack -- re-COPYing vendor/models already present in the parent image). This provenance pins the corrected rebuild published at commit 5ad64416002dde6bad3ff4577a31372c0d5fad0d, tag tvt-edge-intel-285h-2026.09.18-v2-ungated-enroll, released with an attached GitHub Release asset (verified: downloaded via PIPELINE_TRAFFIC_ARCHIVE_URL, sha256 and size match both this record and the GitHub Releases API asset digest). Upstream's only functional change vs v1 is application behavior: face_enrollment now emits on any usable face instead of requiring a line-crossing event first; face_recognition and anpr remain crossing-gated (source: TVT_images CHANGELOG-v2-ungated-enroll.md at this commit -- only edge/person_app.py's EnrollmentApp changed, +31 lines). desired-state.schema.json, desired-state.example.json, metrics.schema.json, analytics-event.schema.json, and analytics-event.example.json in this directory are byte-identical copies of the v1 catalog's files -- confirmed unchanged because the corresponding vendor source files have identical checksums in TVT_images' SHA256SUMS at this commit vs v1's, so the v1 TVT-authored deviations documented in docs/contracts/tvt-mills-v1/README.md still apply unmodified. image-contract.yaml is NOT byte-identical to v1's: see known_deviation_from_vendor_schema.version. manifests/tvt-edge.yaml and image-contract.yaml changed upstream too (vendor's own SolutionImageContract spec.image.reference/archive bumped to the v2 names, and the k8s manifest sample's image line bumped to match) -- vendor documentation only, not consumed by this platform's ingestion path, not vendored here; see vendor_files_as_delivered. Regarding the manifest.json-vs-index.json tag split flagged against the earlier export: CHANGELOG-v2-ungated-enroll.md explains this is expected docker-save output on their build box (no skopeo/podman available) -- both manifest formats resolve to the same image content, and verify-docker-archive-tag (which reads manifest.json first when present) still passes against PIPELINE_TRAFFIC_ARCHIVE_IMAGE above; re-verified against this rebuilt archive, not assumed carried over from the retracted export.",
+  "known_deviation_from_vendor_schema": {
+    "desired-state.schema.json": "vendor's cameras array used {\"items\": {\"$ref\": \"#/$defs/camera\"}}; this repo's copy inlines the camera object under cameras.items so SolutionCatalog._validate_ui_annotations (apexfabric/solution_management/catalog.py) can read the apps enum without resolving refs, and tightens line.id's pattern to require an _entry/_exit suffix. Both are additive/structural-only: they reject a strict subset of what the vendor's original pattern accepted and do not change how the running image interprets desired_state.json.",
+    "version": "this directory's TVT-authored image-contract.yaml uses a different schema shape than the vendor's own image-contract.yaml (this repo's is the SolutionCatalog-facing contract with a flat `name`/`version` pair; the vendor's is apiVersion/kind SolutionImageContract with `spec.image.reference`/`archive`). Both are correctly bumped to 2026.09.18-v2-ungated-enroll as of this commit -- the vendor bumped their own spec.image.reference/archive fields in this rebuild (they had not in the retracted 6356b7c export), and this directory's version field was bumped to match, keeping tvt_edge/delivery_metadata.py's cross-check (catalog_id / archive.loaded_image / local_image.tag must all agree with image-contract.yaml's version) satisfied."
+  },
+  "vendor_files_as_delivered": {
+    "README.md": {
+      "sha256": "ad31b8fd61f3a5d65fe4908ca8dbf9e4d556d67d0a938481b8cd1e2fdbca48a4"
+    },
+    "MANAGER-UI-HANDOFF.md": {
+      "sha256": "bac614857bd21d185f02f031aea2a2bdb72b88c209ac6456249ea106815218b4"
+    },
+    "analytics-event.schema.json": {
+      "sha256": "1cf5d1416b9f8a4ceca7e8d0b1e3a3fa95966386ac6d4ea9cbbe6d99fe9295f8"
+    },
+    "desired-state.example.json": {
+      "sha256": "f5e7d52baad36efb7316f19dfa75a594cbd17fe47f884aeb4368c0f4c0b351e1"
+    },
+    "desired-state.schema.json": {
+      "sha256": "ae1c6015cf24bc7b6540663db069831ab6e6d1b0609ff9203c547f46ad4c5db4"
+    },
+    "image-contract.yaml": {
+      "sha256": "a10abe273038f09b3a7707abc25c4001fe77aeb81a4f1f3d8f54a985ecfe8ebf"
+    },
+    "management-api.openapi.yaml": {
+      "sha256": "2bf9021419338c1335f1ba945f29de10b6cc72126ffd85e57b780eee1a222cd8"
+    },
+    "manifests/tvt-edge.yaml": {
+      "sha256": "2c251f0d7f1e288838ed4edc02e63b4ebb4496773494cc318eec7234e5a298d4"
+    },
+    "CHANGELOG-v2-ungated-enroll.md": {
+      "sha256": "b9859d4886fa5dac0a1d844b40be565d228e12c1abf95368ce5f2059d67c5320"
+    }
+  }
+}

@@ -126,29 +126,29 @@ class PipelineImportTests(unittest.TestCase):
         values = self.pipeline_values()
         self.assertEqual(
             values["PIPELINE_REVISION"],
-            "ab85058ab961bb7aeb4ed9c96f1a35ec5c37f934",
+            "5ad64416002dde6bad3ff4577a31372c0d5fad0d",
         )
         self.assertEqual(values["PIPELINE_TRAFFIC_DELIVERY_DIR"], ".")
         self.assertEqual(
             values["PIPELINE_TRAFFIC_CATALOG_ID"],
-            "tvt-mills-pilot:2026.09.18-v1",
+            "tvt-mills-pilot:2026.09.18-v2-ungated-enroll",
         )
         self.assertEqual(
             values["PIPELINE_TRAFFIC_ARCHIVE"],
-            "tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar",
+            "tvt-edge-runtime-intel-285h-2026.09.18-v2-ungated-enroll.oci.tar",
         )
         self.assertEqual(
             values["PIPELINE_TRAFFIC_ARCHIVE_SHA256"],
-            "a236a4c1c3053e6a78270d98426b72c5fcbe681273b6f5f35d5631d25a88f4a8",
+            "65b6351dead4dd2bc4aa72f13b3ca028f4cd6d76679540eeedbe5ab4b9123c91",
         )
-        self.assertEqual(values["PIPELINE_TRAFFIC_ARCHIVE_SIZE"], "967496192")
+        self.assertEqual(values["PIPELINE_TRAFFIC_ARCHIVE_SIZE"], "967510016")
         self.assertEqual(
             values["PIPELINE_TRAFFIC_ARCHIVE_IMAGE"],
-            "localhost/tvt-edge-runtime:intel-285h-2026.09.18-v1",
+            "localhost/tvt-edge-runtime:intel-285h-2026.09.18-v2-ungated-enroll",
         )
         self.assertEqual(
             values["PIPELINE_TRAFFIC_LOCAL_TAG"],
-            "intel-285h-2026.09.18-v1",
+            "intel-285h-2026.09.18-v2-ungated-enroll",
         )
         self.assertEqual(
             values["PIPELINE_TRAFFIC_PLAN_COMPILER_COMPATIBILITY_ID"],

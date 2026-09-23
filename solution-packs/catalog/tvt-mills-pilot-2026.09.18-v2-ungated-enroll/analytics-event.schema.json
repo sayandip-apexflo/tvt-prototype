@@ -1,0 +1,315 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:apexfabric:tvt-mills-pilot:analytics-event:1",
+  "title": "TVT Mills pilot analytics events v1",
+  "description": "Unmodified from the vendored tvt-edge-runtime-intel-285h-2026.09.18-v1 delivery (see provenance.json) -- this is what the real image actually emits, so it is not rewritten to match the legacy surveillance/traffic packs' shape. Notably: payload.embeddings only ever carries `face` (no `body` -- see docs/contracts/tvt-mills-v1/README.md on why apexfabric/control_plane/identity.py already tolerates this), `subject.bbox` is a 4-number array (not an {x1,y1,x2,y2} object), and every face/plate event carries the richer snapshot_assets/evidence object the vendor image produces. Never let embeddings reach a metric label, log line, or alert email -- LLD_PLAN.md sections 14/17.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "event_id", "timestamp", "camera_id",
+    "solution_pack", "application", "event_type", "payload"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "event_id": {"type": "string", "minLength": 1},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "camera_id": {"type": "string", "minLength": 1},
+    "solution_pack": {"enum": ["surveillance", "traffic"]},
+    "application": {
+      "enum": ["face_recognition", "face_enrollment", "anpr", "camera_monitoring"]
+    },
+    "event_type": {
+      "enum": [
+        "face_detection_event", "enrollment_capture_event",
+        "plate_read_event", "camera_snapshot_event"
+      ]
+    },
+    "payload": {"type": "object"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"event_type": {"const": "face_detection_event"}}},
+      "then": {
+        "properties": {
+          "solution_pack": {"const": "surveillance"},
+          "application": {"const": "face_recognition"},
+          "payload": {"$ref": "#/$defs/face_payload"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "enrollment_capture_event"}}},
+      "then": {
+        "properties": {
+          "solution_pack": {"const": "surveillance"},
+          "application": {"const": "face_enrollment"},
+          "payload": {"$ref": "#/$defs/enrollment_payload"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "plate_read_event"}}},
+      "then": {
+        "properties": {
+          "solution_pack": {"const": "traffic"},
+          "application": {"const": "anpr"},
+          "payload": {"$ref": "#/$defs/plate_payload"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "camera_snapshot_event"}}},
+      "then": {
+        "properties": {
+          "solution_pack": {"const": "surveillance"},
+          "application": {"const": "camera_monitoring"},
+          "payload": {"$ref": "#/$defs/camera_snapshot_payload"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "bbox": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {"type": "number"}
+    },
+    "face_embedding": {
+      "type": "array",
+      "minItems": 512,
+      "maxItems": 512,
+      "items": {"type": "number"}
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "url", "content_type"],
+      "properties": {
+        "ref": {"type": "string", "pattern": "^snapshots/"},
+        "url": {"type": "string", "pattern": "^/snapshots/"},
+        "content_type": {"enum": ["image/jpeg", "image/png"]}
+      }
+    },
+    "snapshot_assets": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/asset"},
+      "required": ["event_frame"]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stream_session_id", "camera_id", "frame_id",
+        "captured_at", "sha256", "frame_wh"
+      ],
+      "properties": {
+        "stream_session_id": {"type": "string", "minLength": 1},
+        "camera_id": {"type": "string", "minLength": 1},
+        "frame_id": {"type": "integer", "minimum": 0},
+        "captured_at": {"type": "number"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "frame_wh": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    "line": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "type"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "type": {"const": "line"}
+      }
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "type"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "type": {"const": "zone"}
+      }
+    },
+    "snapshot_fields": {
+      "type": "object",
+      "required": [
+        "snapshot_ref", "snapshot_url", "snapshot_content_type",
+        "snapshot_assets", "evidence_status", "evidence"
+      ],
+      "properties": {
+        "snapshot_ref": {"type": "string", "pattern": "^snapshots/"},
+        "snapshot_url": {"type": "string", "pattern": "^/snapshots/"},
+        "snapshot_content_type": {"enum": ["image/jpeg", "image/png"]},
+        "snapshot_assets": {"$ref": "#/$defs/snapshot_assets"},
+        "evidence_status": {"const": "available"},
+        "evidence": {"$ref": "#/$defs/evidence"}
+      }
+    },
+    "face_payload": {
+      "allOf": [
+        {"$ref": "#/$defs/snapshot_fields"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "subject", "embeddings", "crossed", "line",
+            "snapshot_ref", "snapshot_url", "snapshot_content_type",
+            "snapshot_assets", "evidence_status", "evidence"
+          ],
+          "properties": {
+            "subject": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["bbox"],
+              "properties": {"bbox": {"$ref": "#/$defs/bbox"}}
+            },
+            "embeddings": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["face"],
+              "properties": {"face": {"$ref": "#/$defs/face_embedding"}}
+            },
+            "crossed": {"const": true},
+            "line": {"$ref": "#/$defs/line"},
+            "snapshot_ref": true,
+            "snapshot_url": true,
+            "snapshot_content_type": true,
+            "snapshot_assets": true,
+            "evidence_status": true,
+            "evidence": true
+          }
+        }
+      ]
+    },
+    "enrollment_payload": {
+      "allOf": [
+        {"$ref": "#/$defs/snapshot_fields"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "subject", "embeddings", "quality", "crossed", "line",
+            "snapshot_ref", "snapshot_url", "snapshot_content_type",
+            "snapshot_assets", "evidence_status", "evidence"
+          ],
+          "properties": {
+            "subject": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["bbox"],
+              "properties": {"bbox": {"$ref": "#/$defs/bbox"}}
+            },
+            "embeddings": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["face"],
+              "properties": {"face": {"$ref": "#/$defs/face_embedding"}}
+            },
+            "quality": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["sharpness", "pose_score", "liveness_score"],
+              "properties": {
+                "sharpness": {"type": "number"},
+                "pose_score": {"type": "number"},
+                "liveness_score": {"type": ["number", "null"]}
+              }
+            },
+            "crossed": {"const": true},
+            "line": {"$ref": "#/$defs/line"},
+            "snapshot_ref": true,
+            "snapshot_url": true,
+            "snapshot_content_type": true,
+            "snapshot_assets": true,
+            "evidence_status": true,
+            "evidence": true
+          }
+        }
+      ]
+    },
+    "plate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "confidence"],
+      "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "plate_payload": {
+      "allOf": [
+        {"$ref": "#/$defs/snapshot_fields"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "vehicle_ref", "vehicle_track_id", "vehicle", "plate",
+            "snapshot_ref", "snapshot_url", "snapshot_content_type",
+            "snapshot_assets", "evidence_status", "evidence"
+          ],
+          "properties": {
+            "vehicle_ref": {"type": "string", "minLength": 1},
+            "vehicle_track_id": {"type": ["integer", "string"]},
+            "vehicle": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["ref", "track_id", "camera_id", "plate"],
+              "properties": {
+                "ref": {"type": "string", "minLength": 1},
+                "track_id": {"type": ["integer", "string"]},
+                "camera_id": {"type": "string", "minLength": 1},
+                "plate": {"$ref": "#/$defs/plate"}
+              }
+            },
+            "plate": {"$ref": "#/$defs/plate"},
+            "in_zone": {"const": true},
+            "location": {"$ref": "#/$defs/location"},
+            "crossed": {"const": true},
+            "line": {"$ref": "#/$defs/line"},
+            "snapshot_ref": true,
+            "snapshot_url": true,
+            "snapshot_content_type": true,
+            "snapshot_assets": true,
+            "evidence_status": true,
+            "evidence": true
+          },
+          "anyOf": [
+            {"required": ["in_zone", "location"]},
+            {"required": ["crossed", "line"]}
+          ]
+        }
+      ]
+    },
+    "camera_snapshot_payload": {
+      "allOf": [
+        {"$ref": "#/$defs/snapshot_fields"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "geometry_revision", "snapshot_ref", "snapshot_url",
+            "snapshot_content_type", "snapshot_assets",
+            "evidence_status", "evidence"
+          ],
+          "properties": {
+            "geometry_revision": {"type": "integer", "minimum": 1},
+            "snapshot_ref": true,
+            "snapshot_url": true,
+            "snapshot_content_type": true,
+            "snapshot_assets": true,
+            "evidence_status": true,
+            "evidence": true
+          }
+        }
+      ]
+    }
+  }
+}

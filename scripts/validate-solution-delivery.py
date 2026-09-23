@@ -42,8 +42,23 @@ def sha256(path: Path) -> str:
 
 
 def archive_tags(path: Path) -> list[str]:
+    # Check manifest.json (Docker-save format) before index.json/oci-layout:
+    # an archive can legally carry both (e.g. `docker save` output on a box
+    # without skopeo/podman), and `docker load`/`podman load` -- the tools
+    # scripts/tvt-edge-operations.sh's import path actually uses -- prefer
+    # manifest.json when present. verify-docker-archive-tag (the gate that
+    # runs at real import time) already checks manifest.json first for the
+    # same reason; this must not disagree with it on a hybrid archive.
     with tarfile.open(path, mode="r:*") as archive:
         names = {member.name for member in archive.getmembers()}
+        if "manifest.json" in names:
+            stream = archive.extractfile("manifest.json")
+            if stream is None:
+                raise DeliveryValidationError("Docker manifest.json cannot be read")
+            manifest = json.load(stream)
+            if not isinstance(manifest, list):
+                raise DeliveryValidationError("Docker manifest.json must be a list")
+            return [tag for item in manifest for tag in item.get("RepoTags", [])]
         if "index.json" in names and "oci-layout" in names:
             stream = archive.extractfile("index.json")
             if stream is None:
@@ -58,14 +73,6 @@ def archive_tags(path: Path) -> list[str]:
             if not isinstance(tag, str) or not tag:
                 raise DeliveryValidationError("OCI image has no reference-name annotation")
             return [tag]
-        if "manifest.json" in names:
-            stream = archive.extractfile("manifest.json")
-            if stream is None:
-                raise DeliveryValidationError("Docker manifest.json cannot be read")
-            manifest = json.load(stream)
-            if not isinstance(manifest, list):
-                raise DeliveryValidationError("Docker manifest.json must be a list")
-            return [tag for item in manifest for tag in item.get("RepoTags", [])]
     raise DeliveryValidationError("image archive is neither OCI-layout nor Docker-save format")
 
 

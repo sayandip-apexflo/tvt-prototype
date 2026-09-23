@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apexfabric.local/schemas/v1/tvt-mills-pilot-desired-state.json",
+  "title": "ApexFabric TVT Mills Pilot Desired State V1",
+  "description": "Camera config shape must stay byte-for-byte faithful to what the vendored tvt-edge-runtime image (see provenance.json) actually parses: a flat, camera-level `lines` array and `zones.anpr` array, unchanged from the vendor's own desired-state.schema.json. The only structural change from the vendor's file is inlining `cameras.items` (was `$ref: '#/$defs/camera'`) so apexfabric/solution_management/catalog.py's SolutionCatalog._validate_ui_annotations can read the app-id enum -- that loader is a pinned copy of k3s-prototype and must not be edited (see tvt_edge/delivery_metadata.py). The only semantic tightening is requiring every line id to end in '_entry'/'_exit', per the two-zones-per-gate direction convention (docs/contracts/tvt-mills-v1/README.md) applied to lines instead of zones -- this is a strict subset of the vendor's original '^[A-Za-z0-9._-]+$' pattern, so it does not reject anything the real image would otherwise accept.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["edge_id", "revision", "cameras"],
+  "properties": {
+    "edge_id": {"type": "string", "minLength": 1},
+    "revision": {"type": "integer", "minimum": 1},
+    "cameras": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["camera_id", "source", "solution_pack", "fps", "apps", "config"],
+        "properties": {
+          "camera_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+          "source": {
+            "type": "string",
+            "pattern": "^file:/run/secrets/apexfabric/[A-Za-z0-9._-]+\\.rtsp$"
+          },
+          "solution_pack": {"const": "tvt-mills-pilot"},
+          "fps": {"type": "number", "exclusiveMinimum": 0},
+          "apps": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {"enum": ["face_recognition", "face_enrollment", "anpr"]}
+          },
+          "config": {"$ref": "#/$defs/camera_config"}
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {"apps": {"contains": {"const": "face_enrollment"}}},
+              "required": ["apps"]
+            },
+            "then": {
+              "properties": {
+                "apps": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 1,
+                  "items": {"const": "face_enrollment"}
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "point": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": false,
+      "prefixItems": [
+        {"type": "number", "minimum": 0, "maximum": 1},
+        {"type": "number", "minimum": 0, "maximum": 1}
+      ]
+    },
+    "zone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "poly"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "name": {"type": "string", "minLength": 1},
+        "poly": {
+          "type": "array",
+          "minItems": 3,
+          "items": {"$ref": "#/$defs/point"}
+        }
+      }
+    },
+    "line": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "points", "accepted"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+_(entry|exit)$",
+          "description": "Suffix carries direction per the two-zones-per-gate convention applied to lines: the control plane derives gate + entry/exit role from this suffix (apexfabric/control_plane/reporting.py:_gate_and_role); there is no separate direction field on the event."
+        },
+        "name": {"type": "string", "minLength": 1},
+        "type": {"const": "line"},
+        "points": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"$ref": "#/$defs/point"}
+        },
+        "accepted": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["A->B", "B->A"]}
+        }
+      }
+    },
+    "camera_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "zones": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "anpr": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/zone"}
+            }
+          }
+        },
+        "lines": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/line"},
+          "description": "Flat per-camera list, unchanged from the vendor's shape -- a line drives direction for whichever of face_recognition/anpr is active on that camera, not scoped to one app."
+        }
+      }
+    }
+  }
+}

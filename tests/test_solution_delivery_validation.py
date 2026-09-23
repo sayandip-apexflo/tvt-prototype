@@ -10,9 +10,9 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR = ROOT / "scripts/validate-solution-delivery.py"
-CATALOG = ROOT / "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
+CATALOG = ROOT / "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v2-ungated-enroll"
 CONFIG = ROOT / "config/pipeline.env"
-EXPECTED_TAG = "localhost/tvt-edge-runtime:intel-285h-2026.09.18-v1"
+EXPECTED_TAG = "localhost/tvt-edge-runtime:intel-285h-2026.09.18-v2-ungated-enroll"
 
 
 def write_oci_archive(path: Path, tag: str) -> None:
@@ -60,7 +60,7 @@ def test_oci_archive_tag_verifier_accepts_the_pinned_tag() -> None:
 
 def test_delivery_validator_rejects_an_archive_not_bound_by_provenance() -> None:
     with tempfile.TemporaryDirectory() as directory:
-        archive = Path(directory) / "tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar"
+        archive = Path(directory) / "tvt-edge-runtime-intel-285h-2026.09.18-v2-ungated-enroll.oci.tar"
         write_oci_archive(archive, EXPECTED_TAG)
         result = subprocess.run(
             [
