@@ -19,13 +19,36 @@ export function useSolutions(){
   return {solutions,deployments,solutionsError:error,reloadSolutions:load};
 }
 
+// crypto.randomUUID() requires a secure context (HTTPS or localhost); this
+// dashboard is served over plain HTTP on a LAN hostname by design, so use
+// getRandomValues (unrestricted) instead.
+function randomId(){
+  const bytes=crypto.getRandomValues(new Uint8Array(16));
+  bytes[6]=(bytes[6]&0x0f)|0x40;bytes[8]=(bytes[8]&0x3f)|0x80;
+  const hex=[...bytes].map(b=>b.toString(16).padStart(2,'0'));
+  return `${hex.slice(0,4).join('')}-${hex.slice(4,6).join('')}-${hex.slice(6,8).join('')}-${hex.slice(8,10).join('')}-${hex.slice(10,16).join('')}`;
+}
+
 function DeploymentModal({deployment,solutions,cameras,close,onDeployed}){
   const [catalogId,setCatalogId]=useState(deployment?.catalog_id||solutions[0]?.catalog_id||'');
   const [deploymentId,setDeploymentId]=useState(deployment?.deployment_id||'traffic-v4');
   const [inferenceMode,setInferenceMode]=useState('cpu-compatible');
   const [resources,setResources]=useState({cpu_request:'8',cpu_limit:'16',memory_request:'16Gi',memory_limit:'32Gi',state_size:'50Gi'});
-  const [selected,setSelected]=useState({});
-  const [apps,setApps]=useState({});
+  const [selected,setSelected]=useState(()=>{
+    const initial={};
+    if(deployment)cameras.forEach(c=>{if(c.assignments?.some(a=>a.deployment_id===deployment.deployment_id))initial[c.camera_id]=true});
+    return initial;
+  });
+  const [apps,setApps]=useState(()=>{
+    const initial={};
+    if(deployment)cameras.forEach(c=>{const a=c.assignments?.find(a=>a.deployment_id===deployment.deployment_id);if(a)initial[c.camera_id]=a.apps});
+    return initial;
+  });
+  const [fps,setFps]=useState(()=>{
+    const initial={};
+    if(deployment)cameras.forEach(c=>{const a=c.assignments?.find(a=>a.deployment_id===deployment.deployment_id);if(a)initial[c.camera_id]=a.fps});
+    return initial;
+  });
   const [geometry,setGeometry]=useState({});
   const [preview,setPreview]=useState(null);
   const [previewPayload,setPreviewPayload]=useState(null);
@@ -49,7 +72,7 @@ function DeploymentModal({deployment,solutions,cameras,close,onDeployed}){
         let config={};
         const value=geometry[c.camera_id]?.trim();
         if(value)config=JSON.parse(value);
-        return {camera_id:c.camera_id,apps:apps[c.camera_id]?.length?apps[c.camera_id]:[defaultApp],fps:8,bundle_application:'runtime',config};
+        return {camera_id:c.camera_id,apps:apps[c.camera_id]?.length?apps[c.camera_id]:[defaultApp],fps:fps[c.camera_id]||8,bundle_application:'runtime',config};
       }),
     };
   }
@@ -64,10 +87,20 @@ function DeploymentModal({deployment,solutions,cameras,close,onDeployed}){
     if(!preview||!previewPayload)return;
     setBusy(true);
     try{
-      await edgeApi('deployments',{...previewPayload,preview_bundle_sha256:preview.bundle_sha256,idempotency_key:crypto.randomUUID()});
+      await edgeApi('deployments',{...previewPayload,preview_bundle_sha256:preview.bundle_sha256,idempotency_key:randomId()});
       await onDeployed();close();
     }catch(e){setError(e.message)}finally{setBusy(false)}
   }
+  useEffect(()=>{
+    Object.keys(selected).filter(id=>selected[id]).forEach(id=>{
+      edgeApi(`cameras/${encodeURIComponent(id)}/geometry`).then(result=>{
+        if(Object.keys(result.compiled_config||{}).length)setGeometry(prev=>prev[id]?prev:{...prev,[id]:JSON.stringify(result.compiled_config,null,2)});
+      }).catch(()=>{});
+    });
+    // Pre-selected (edit-mode) cameras never fire toggleCamera's onChange, so their
+    // geometry must be fetched once here or a commit would silently zero out their config.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
   function toggleCamera(camera,checked){
     setSelected(prev=>({...prev,[camera.camera_id]:checked}));
     if(checked&&!apps[camera.camera_id]?.length)setApps(prev=>({...prev,[camera.camera_id]:[defaultApp]}));
