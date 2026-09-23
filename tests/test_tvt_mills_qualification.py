@@ -16,7 +16,7 @@ from tvt_edge.qualification import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DELIVERY = ROOT / "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
+DELIVERY = ROOT / "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v2-ungated-enroll"
 DIGEST = "sha256:" + "1" * 64
 BUNDLE_SHA = "2" * 64
 IMAGE = f"127.0.0.1:5000/apexfabric/tvt-mills-pilot@{DIGEST}"

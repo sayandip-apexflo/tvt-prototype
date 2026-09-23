@@ -77,8 +77,10 @@ readonly RELEASE_VERSION="$(tvt_manifest_value "${BUNDLE}" release_version)"
 readonly RELEASE_DIRECTORY="${OPT_TVT}/releases/${RELEASE_VERSION}"
 readonly RESOURCE_DIRECTORY="${RELEASE_DIRECTORY}/resources"
 readonly VENV_DIRECTORY="${RELEASE_DIRECTORY}/venv"
-readonly SOLUTION_CATALOG_DIRECTORY="${RESOURCE_DIRECTORY}/solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
-readonly SOLUTION_IMAGE_ARCHIVE="${RESOURCE_DIRECTORY}/images/tvt-edge-runtime-intel-285h-2026.09.18-v1.oci.tar"
+readonly PIPELINE_TRAFFIC_VERSION="$(sed -n 's/^PIPELINE_TRAFFIC_VERSION=//p' "${RESOURCE_DIRECTORY}/config/pipeline.env" | head -1)"
+readonly PIPELINE_TRAFFIC_ARCHIVE="$(sed -n 's/^PIPELINE_TRAFFIC_ARCHIVE=//p' "${RESOURCE_DIRECTORY}/config/pipeline.env" | head -1)"
+readonly SOLUTION_CATALOG_DIRECTORY="${RESOURCE_DIRECTORY}/solution-packs/catalog/tvt-mills-pilot-${PIPELINE_TRAFFIC_VERSION}"
+readonly SOLUTION_IMAGE_ARCHIVE="${RESOURCE_DIRECTORY}/images/${PIPELINE_TRAFFIC_ARCHIVE}"
 
 complete_post_reboot_preparation() {
   local preparation_status

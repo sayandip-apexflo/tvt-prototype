@@ -801,7 +801,7 @@ class CameraGeometryShape(Base, IdMixin, TimeMixin):
 
     Compiled into the vendor pack's `config.zones.anpr[]`/`config.lines[]`
     shape by tvt_edge/geometry.py -- see
-    solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1/desired-state.schema.json
+    solution-packs/catalog/tvt-mills-pilot-2026.09.18-v2-ungated-enroll/desired-state.schema.json
     and docs/contracts/tvt-mills-v1/README.md. Per that pack's two-lines-per-gate
     direction convention, a line belongs to exactly one camera and carries a
     single role (entry or exit); `inside_side` records which endpoint ('a' or

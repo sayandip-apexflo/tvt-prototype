@@ -1,7 +1,7 @@
 {
   "deliveries": [
     {
-      "directory": "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1",
+      "directory": "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v2-ungated-enroll",
       "repository": "apexfabric/tvt-mills-pilot"
     }
   ]

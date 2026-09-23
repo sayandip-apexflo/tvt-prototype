@@ -93,7 +93,7 @@ def parser() -> argparse.ArgumentParser:
         type=Path,
         default=(
             ROOT
-            / "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
+            / "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v2-ungated-enroll"
         ),
     )
     seed_solutions.add_argument("--registry", default="127.0.0.1:5000")

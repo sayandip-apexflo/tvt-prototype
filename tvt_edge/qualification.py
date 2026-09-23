@@ -37,11 +37,11 @@ from tvt_edge.paths import RESOURCE_ROOT
 
 ROOT = RESOURCE_ROOT
 DEFAULT_CATALOG_DIRECTORY = (
-    ROOT / "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
+    ROOT / "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v2-ungated-enroll"
 )
 DEFAULT_REPORT_DIRECTORY = Path("/var/lib/tvt/qualification")
 DEFAULT_IMAGE_LOCK = Path("/var/lib/tvt/pipeline/traffic-image.lock.json")
-CATALOG_ID = "tvt-mills-pilot:2026.09.18-v1"
+CATALOG_ID = "tvt-mills-pilot:2026.09.18-v2-ungated-enroll"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 MAX_HTTP_BYTES = 2 * 1024 * 1024
 MAX_COMMAND_BYTES = 4 * 1024 * 1024

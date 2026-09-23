@@ -159,7 +159,7 @@ class SolutionCatalogTests(unittest.TestCase):
                 controller.catalog.refresh()
             generated = controller.generate_bundle({
                 "solution_type": "tvt-mills-pilot",
-                "catalog_id": "tvt-mills-pilot:2026.09.18-v1",
+                "catalog_id": "tvt-mills-pilot:2026.09.18-v2-ungated-enroll",
                 "deployment_id": "tvt-mills-demo",
                 "edge_id": "intel-box-01",
                 "camera_configuration": [{"camera_id": "cam-1", "apps": ["anpr"]}],

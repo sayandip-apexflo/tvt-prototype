@@ -17,7 +17,7 @@ class InstallCatalogTests(unittest.TestCase):
     def setUp(self):
         self.selection = json.loads((ROOT / 'deploy/single-box/solution-packs.json').read_text())
         self.inventory = {'images': [
-            {'repository': 'apexfabric/tvt-mills-pilot', 'tag': 'intel-285h-2026.09.18-v1', 'digest': DIGEST},
+            {'repository': 'apexfabric/tvt-mills-pilot', 'tag': 'intel-285h-2026.09.18-v2-ungated-enroll', 'digest': DIGEST},
         ]}
         self.manifest = build_manifest(ROOT, self.selection, self.inventory)
 

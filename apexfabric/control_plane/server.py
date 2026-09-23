@@ -60,9 +60,9 @@ PACK_PROFILES = {
         "allowed_apps": TVT_MILLS_APPS,
         "max_streams": 12,
         "default_deployment": "tvt-mills-edge-intel-285h",
-        "default_tag": "intel-285h-2026.09.18-v1",
-        "default_version": "2026.09.18-v1",
-        "schema_directory": "tvt-mills-pilot-2026.09.18-v1",
+        "default_tag": "intel-285h-2026.09.18-v2-ungated-enroll",
+        "default_version": "2026.09.18-v2-ungated-enroll",
+        "schema_directory": "tvt-mills-pilot-2026.09.18-v2-ungated-enroll",
         "models_root": "/models/tvt-mills",
         "needs_persistent_volume": True,
         "restrict_inference_modes": False,
@@ -129,7 +129,7 @@ class Controller:
             seed_manifest(self.catalog, ROOT, json.loads(Path(catalog_manifest).read_text()), registry)
         else:
             deliveries = (
-                ("tvt-mills-pilot-2026.09.18-v1", "tvt-mills-pilot"),
+                ("tvt-mills-pilot-2026.09.18-v2-ungated-enroll", "tvt-mills-pilot"),
             )
             for directory_name, solution_name in deliveries:
                 delivery = ROOT / "solution-packs" / "catalog" / directory_name
@@ -1022,7 +1022,7 @@ class Controller:
         old_state = current["desired_state"]
         packs = {camera.get("solution_pack") for camera in old_state.get("cameras", [])}
         schema_directories = {
-            "tvt-mills-pilot": "tvt-mills-pilot-2026.09.18-v1",
+            "tvt-mills-pilot": "tvt-mills-pilot-2026.09.18-v2-ungated-enroll",
         }
         if len(packs) != 1 or next(iter(packs), None) not in schema_directories:
             raise ValueError("the deployed solution has an unsupported or mixed solution_pack")

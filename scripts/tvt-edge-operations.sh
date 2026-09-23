@@ -10,8 +10,9 @@ tvt_op_bootstrap_postgresql() (
 set -Eeuo pipefail
 
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly SOURCE_CATALOG="${REPO_ROOT}/solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
-readonly TARGET_CATALOG="/opt/tvt/solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
+readonly PIPELINE_VERSION="$(sed -n 's/^PIPELINE_TRAFFIC_VERSION=//p' "${REPO_ROOT}/config/pipeline.env" | head -1)"
+readonly SOURCE_CATALOG="${REPO_ROOT}/solution-packs/catalog/tvt-mills-pilot-${PIPELINE_VERSION}"
+readonly TARGET_CATALOG="/opt/tvt/solution-packs/catalog/tvt-mills-pilot-${PIPELINE_VERSION}"
 VENV=/opt/tvt/venv
 
 usage() {
@@ -2311,8 +2312,9 @@ set -Eeuo pipefail
 umask 077
 
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly SOURCE_CONTRACTS="${REPO_ROOT}/solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
-readonly TARGET_CONTRACTS="/opt/tvt/solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
+readonly PIPELINE_VERSION="$(sed -n 's/^PIPELINE_TRAFFIC_VERSION=//p' "${REPO_ROOT}/config/pipeline.env" | head -1)"
+readonly SOURCE_CONTRACTS="${REPO_ROOT}/solution-packs/catalog/tvt-mills-pilot-${PIPELINE_VERSION}"
+readonly TARGET_CONTRACTS="/opt/tvt/solution-packs/catalog/tvt-mills-pilot-${PIPELINE_VERSION}"
 
 [[ ${EUID} -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 [[ -x /opt/tvt/venv/bin/tvt-traffic-qualify ]] || {
@@ -3196,12 +3198,14 @@ set -Eeuo pipefail
 umask 077
 
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CATALOG_DIRECTORY=/opt/tvt/solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1
+INSTALLED_PIPELINE_VERSION="$(sed -n 's/^PIPELINE_TRAFFIC_VERSION=//p' /opt/tvt/config/pipeline.env 2>/dev/null | head -1)"
+CATALOG_DIRECTORY="/opt/tvt/solution-packs/catalog/tvt-mills-pilot-${INSTALLED_PIPELINE_VERSION}"
 QUALIFIER=(/opt/tvt/venv/bin/tvt-traffic-qualify)
 
 if [[ ! -x ${QUALIFIER[0]} ]]; then
   QUALIFIER=("${REPO_ROOT}/.venv/bin/python" -m tvt_edge.qualification)
-  CATALOG_DIRECTORY="${REPO_ROOT}/solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
+  REPO_PIPELINE_VERSION="$(sed -n 's/^PIPELINE_TRAFFIC_VERSION=//p' "${REPO_ROOT}/config/pipeline.env" | head -1)"
+  CATALOG_DIRECTORY="${REPO_ROOT}/solution-packs/catalog/tvt-mills-pilot-${REPO_PIPELINE_VERSION}"
 fi
 
 [[ ${EUID} -eq 0 ]] || {
@@ -3907,7 +3911,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("qualification report is missing its rollback request")
     invariants = report.get("invariants", {})
     if (
-        invariants.get("catalog_id") != "tvt-mills-pilot:2026.09.18-v1"
+        invariants.get("catalog_id") != "tvt-mills-pilot:2026.09.18-v2-ungated-enroll"
         or not invariants.get("deployment_id")
         or invariants.get("namespace") != "apexfabric"
         or not isinstance(invariants.get("applied_revision"), int)
