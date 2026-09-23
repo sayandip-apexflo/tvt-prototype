@@ -3536,14 +3536,11 @@ with zipfile.ZipFile(wheel) as archive:
     match = re.search(r"^Version: (.+)$", metadata, flags=re.MULTILINE)
     if not match or match.group(1).strip() != version:
         raise SystemExit("application wheel version does not match the manifest")
-    ui_assets = [name for name in archive.namelist() if "tvt_edge/static/" in name]
-    ui_contents = [archive.read(name) for name in ui_assets]
-    if (
-        not ui_contents
-        or not any(b"TVT Runtime" in content for content in ui_contents)
-        or not any(version.encode() in content for content in ui_contents)
-    ):
-        raise SystemExit("built UI does not report the manifest version")
+    # No tvt_edge/static/ check here: the legacy ui/ console (whose build this
+    # once verified) was retired -- tvt_edge/api/app.py is headless, and the
+    # TVT dashboard ships as its own Docker image (manifest artifacts.ui_image
+    # / images/ui.tar), not embedded in the application wheel. See the TVT
+    # frontend policy in AGENTS.md.
 
 def sha256(path):
     digest = hashlib.sha256()
