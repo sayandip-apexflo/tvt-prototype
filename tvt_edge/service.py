@@ -693,6 +693,44 @@ class ManagementService:
             return names
 
     @staticmethod
+    def _runtime_workload_name(
+        session: Session, deployment: SolutionDeployment
+    ) -> str:
+        """Return the rendered workload name that owns analytics events.
+
+        Apex telemetry is partitioned by the Kubernetes workload name, not by
+        the logical TVT deployment key. Keep this derivation coupled to the
+        committed bundle instead of assuming every Solution Pack calls its
+        event-producing application ``runtime``.
+        """
+
+        assignment_set = session.scalar(
+            select(DeploymentAssignmentSet)
+            .where(DeploymentAssignmentSet.deployment_id == deployment.id)
+            .order_by(DeploymentAssignmentSet.desired_revision.desc())
+            .limit(1)
+        )
+        if assignment_set is None:
+            raise ValueError("deployment has no committed assignments")
+        revision = session.get(SolutionBundleRevision, assignment_set.bundle_revision_id)
+        if revision is None:
+            raise ValueError("deployment bundle revision is unavailable")
+        applications = revision.canonical_bundle.get("applications", [])
+        event_apps = [
+            item
+            for item in applications
+            if isinstance(item, dict)
+            and isinstance(item.get("telemetry"), dict)
+            and isinstance(item["telemetry"].get("events"), dict)
+        ]
+        candidates = event_apps or [
+            item for item in applications if isinstance(item, dict) and item.get("name")
+        ]
+        if len(candidates) != 1:
+            raise ValueError("deployment must have exactly one event-producing workload")
+        return f"{deployment.deployment_key}-{candidates[0]['name']}"
+
+    @staticmethod
     def _camera(session: Session, camera_key: str) -> Camera:
         camera = session.scalar(
             select(Camera).where(Camera.camera_key == camera_key, Camera.deleted_at.is_(None))
@@ -884,6 +922,8 @@ class ManagementService:
             )
             session.add(endpoint)
             session.flush()
+        elif endpoint.scheme != scheme:
+            endpoint.scheme = scheme
         profile = session.scalar(
             select(CameraStreamProfile).where(
                 CameraStreamProfile.camera_id == camera.id,
@@ -2034,11 +2074,97 @@ class ManagementService:
             }
             if row is not None:
                 result["session"] = self._enrollment_session_view(session, row)
+                result["observer"] = self._enrollment_observer_view(
+                    session, deployment, row
+                )
                 if row.status in ("activating", "restoring"):
                     sync = session.get(DeploymentSyncState, deployment.id)
                     if sync is not None and sync.state == "failed":
                         result["degraded"] = True
             return result
+
+    def _enrollment_observer_view(
+        self,
+        session: Session,
+        deployment: SolutionDeployment,
+        row: EnrollmentSession,
+    ) -> dict[str, Any]:
+        """Build a safe, durable enrollment progress projection.
+
+        All inputs are management metadata already stored in PostgreSQL. The
+        projection intentionally excludes raw analytics payloads, snapshots,
+        embeddings, camera endpoints, credentials, and person names.
+        """
+
+        runtime_workload = self._runtime_workload_name(session, deployment)
+        sync = session.get(DeploymentSyncState, deployment.id)
+        target_revision = (
+            row.restoration_revision
+            if row.restoration_revision is not None
+            and row.status in ENROLLMENT_TERMINAL_STATUSES | {"restoring"}
+            else row.activation_revision
+        )
+        attempt = None
+        if target_revision is not None:
+            attempt = session.scalar(
+                select(DeploymentSyncAttempt)
+                .where(
+                    DeploymentSyncAttempt.deployment_id == deployment.id,
+                    DeploymentSyncAttempt.desired_revision == target_revision,
+                )
+                .order_by(DeploymentSyncAttempt.attempt_number.desc())
+                .limit(1)
+            )
+
+        applied_revision = None
+        if sync is not None and sync.applied_assignment_set_id is not None:
+            applied = session.get(
+                DeploymentAssignmentSet, sync.applied_assignment_set_id
+            )
+            applied_revision = applied.desired_revision if applied is not None else None
+
+        if row.status == "activating":
+            stage = attempt.phase if attempt is not None else "sync_queued"
+        elif row.status == "capturing":
+            stage = (
+                "capture_rejected"
+                if row.error_code == "ENROLLMENT_CAPTURE_REJECTED"
+                else "waiting_for_face"
+            )
+        elif row.status == "restoring":
+            stage = attempt.phase if attempt is not None else "restore_queued"
+        else:
+            stage = row.status
+
+        timeline: list[dict[str, str]] = []
+
+        def add(stage_name: str, occurred_at: datetime | None) -> None:
+            if occurred_at is not None:
+                timeline.append(
+                    {"stage": stage_name, "occurred_at": occurred_at.isoformat()}
+                )
+
+        add("requested", row.started_at)
+        if attempt is not None:
+            add("sync_claimed", attempt.started_at)
+            add("sync_finished", attempt.finished_at)
+        add("runtime_ready", row.activated_at)
+        add("capture_accepted", row.captured_at)
+        add("restore_queued", row.restoration_started_at)
+        add("runtime_restored", row.restored_at)
+        add(row.status, row.completed_at)
+        timeline.sort(key=lambda item: item["occurred_at"])
+
+        return {
+            "stage": stage,
+            "runtime_workload": runtime_workload,
+            "target_revision": target_revision,
+            "applied_revision": applied_revision,
+            "sync_state": sync.state if sync is not None else "unavailable",
+            "sync_attempt_status": attempt.status if attempt is not None else None,
+            "safe_reason": row.error_code or (sync.last_error_code if sync else None),
+            "timeline": timeline,
+        }
 
     def list_enrollment_sessions(self, deployment_key: str, limit: int = 20) -> list[dict[str, Any]]:
         limit = max(1, min(limit, 200))
@@ -2204,6 +2330,7 @@ class ManagementService:
             deployment = session.get(SolutionDeployment, row.deployment_id)
             camera = session.get(Camera, row.camera_id)
             deployment_key = deployment.deployment_key
+            runtime_workload = self._runtime_workload_name(session, deployment)
             camera_key = camera.camera_key
             status = row.status
             transition: str | None = None
@@ -2305,7 +2432,15 @@ class ManagementService:
             elif kind == "poll":
                 activated_at, deadline, actor, request_id = payload
                 capture_outcome = self._poll_enrollment_capture(
-                    session_id, apex, deployment_key, camera_key, activated_at, deadline, actor, request_id
+                    session_id,
+                    apex,
+                    deployment_key,
+                    runtime_workload,
+                    camera_key,
+                    activated_at,
+                    deadline,
+                    actor,
+                    request_id,
                 )
                 if capture_outcome is not None:
                     return capture_outcome
@@ -2319,6 +2454,7 @@ class ManagementService:
         session_id: uuid.UUID,
         apex: Any,
         deployment_key: str,
+        runtime_workload: str,
         camera_key: str,
         activated_at: datetime,
         deadline: datetime,
@@ -2326,19 +2462,25 @@ class ManagementService:
         request_id: str,
     ) -> dict[str, Any] | None:
         try:
-            events = apex.recent_events(deployment_key)
+            events = apex.recent_events(runtime_workload)
         except Exception:
             return None  # apex unreachable this tick; the session stays 'capturing'
         candidate = select_first_capture(
             events,
-            deployment_key=deployment_key,
+            deployment_key=runtime_workload,
             camera_key=camera_key,
             window_start=activated_at,
             window_end=deadline,
             minimum_sharpness=self.enrollment_minimum_sharpness,
         )
         if candidate is None:
-            if has_rejected_capture_attempt(events, deployment_key=deployment_key, camera_key=camera_key):
+            if has_rejected_capture_attempt(
+                events, deployment_key=runtime_workload, camera_key=camera_key
+            ):
+                with self.sessions.begin() as session:
+                    row = session.get(EnrollmentSession, session_id)
+                    if row is not None and row.status == "capturing":
+                        row.error_code = "ENROLLMENT_CAPTURE_REJECTED"
                 return {
                     "session_id": str(session_id),
                     "transition": None,
@@ -2361,6 +2503,7 @@ class ManagementService:
             if row is None or row.status != "capturing":
                 return None
             row.accepted_event_id = candidate.event_id
+            row.error_code = None
             row.capture_result = capture_result
             row.person_id = person_id
             row.naming_status = "pending_name" if capture_result == "created" else "not_applicable"

@@ -521,6 +521,17 @@ change is followed by a controlled Deployment rollout restart. If the Secret
 update or rollout fails, the database retains the pending desired revision and
 the UI shows the deployment out of sync.
 
+An assignment change that leaves the bundle resources and camera-source
+signature unchanged (for example, the temporary
+`face_recognition -> face_enrollment` switch) uses a bounded live-reload path.
+The sync worker applies the validated desired-state ConfigMap, updates a
+TVT-owned annotation on the existing Pod to request an immediate kubelet
+projected-volume refresh, and waits for `/readyz` to acknowledge the exact
+desired revision. It does not change the Pod template or Pod UID. If the
+runtime does not acknowledge within `TVT_RUNTIME_RELOAD_TIMEOUT`, the worker
+falls back to the normal bundle rollout. Camera endpoint or credential changes
+never use live reload because their `subPath` Secret mounts require a restart.
+
 Synchronization is idempotent:
 
 ```mermaid
@@ -535,14 +546,20 @@ sequenceDiagram
     Edge->>Edge: Build reference secret_inputs from encrypted inventory
     Edge->>API: Apply desired-state and camera-source Secrets
     API-->>Secret: Persist revision N inputs
-    Edge->>API: Reconcile unchanged DeploymentBundle
-    Edge->>API: Restart Deployment when an existing Secret changed
-    API-->>Pod: Mount assigned source files and start
+    alt Desired-state-only change
+        Edge->>API: Nudge existing Pod metadata for ConfigMap refresh
+        Pod-->>Edge: /readyz acknowledges revision N
+    else Bundle or camera-source change, or live reload timeout
+        Edge->>API: Reconcile DeploymentBundle
+        Edge->>API: Restart once when only a subPath Secret changed
+        API-->>Pod: Mount assigned source files and start
+    end
     Pod-->>Edge: Report readiness and per-camera source telemetry
-    Edge->>DB: Record applied revision and rollout result
+    Edge->>DB: Record applied revision and acknowledgement/rollout result
 ```
 
-`applied_revision` means the Secrets and bundle were accepted and the required
+`applied_revision` means the Secrets and bundle were accepted and either the
+runtime acknowledged the exact live configuration revision or the required
 rollout completed. It does not mean inference succeeded; readiness and
 per-camera workload telemetry report runtime source and inference state.
 

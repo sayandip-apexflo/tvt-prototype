@@ -99,6 +99,18 @@ class BootstrapScriptTests(unittest.TestCase):
         self.assertIn("auth can-i patch nodes", installer)
         self.assertIn("TVT_KUBECONFIG=/etc/tvt/kubeconfig", environment)
 
+    def test_apexfabric_control_loads_complete_identity_policy(self):
+        service = (ROOT / "deploy/systemd/apexfabric-control.service").read_text()
+        environment = (ROOT / "deploy/host/tvt-edge.env.example").read_text()
+        self.assertIn("EnvironmentFile=-/etc/tvt/edge.env", service)
+        self.assertIn("APEXFABRIC_FACE_EMBEDDING_DIM=512", environment)
+        self.assertIn("APEXFABRIC_BODY_EMBEDDING_DIM=1", environment)
+        self.assertIn("APEXFABRIC_FACE_MATCH_THRESHOLD=0.6", environment)
+
+    def test_camera_sync_uses_interactive_poll_interval(self):
+        service = (ROOT / "deploy/systemd/tvt-camera-sync.service").read_text()
+        self.assertIn("tvt-edge sync --interval 1", service)
+
     def test_bounded_k3s_watchdog_is_installed_as_a_hardened_timer(self):
         bootstrap = self.text("bootstrap-postgresql.sh")
         service = (ROOT / "deploy/systemd/tvt-k3s-watchdog.service").read_text()

@@ -8,7 +8,11 @@ Type=simple
 User=tvt-edge
 Group=tvt-edge
 EnvironmentFile=-/etc/tvt/edge.env
-ExecStart=/opt/tvt/venv/bin/tvt-edge sync
+# Enrollment mode changes are interactive. A one-second bounded poll keeps
+# their queueing delay below the UI refresh interval; camera inventory keeps
+# its separate 15-second cadence. PostgreSQL row leases still fence work and
+# the worker remains single-process in V1.
+ExecStart=/opt/tvt/venv/bin/tvt-edge sync --interval 1
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true

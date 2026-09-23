@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 User=tvt-edge
 Group=tvt-edge
+EnvironmentFile=-/etc/tvt/edge.env
 Environment=PATH=/opt/tvt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=PYTHONPATH=/opt/tvt/current/resources
 Environment=KUBECONFIG=/etc/tvt/kubeconfig

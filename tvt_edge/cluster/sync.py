@@ -7,6 +7,7 @@ import copy
 import json
 import re
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import timedelta
@@ -16,7 +17,7 @@ from urllib.parse import quote, urlencode
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from apexfabric.solution_management.renderer import Kubectl, reconcile, render
+from apexfabric.solution_management.renderer import Kubectl, reconcile, render, revision
 from tvt_edge.db.models import (
     Camera,
     CameraApplicationAssignment,
@@ -152,6 +153,7 @@ class SyncWorker:
         *,
         worker_id: str,
         rollout_timeout: int = 180,
+        live_reload_timeout: int = 0,
         lease_seconds: int = 600,
         image_puller: Any | None = None,
     ) -> None:
@@ -160,10 +162,208 @@ class SyncWorker:
         self.kubectl = kubectl
         self.worker_id = worker_id
         self.rollout_timeout = rollout_timeout
+        self.live_reload_timeout = max(0, min(live_reload_timeout, 60))
         self.image_puller = image_puller
         # A rollout is a blocking kubectl call, so the claim must remain fenced
         # for the entire rollout plus enough time to persist its result.
         self.lease_seconds = max(lease_seconds, rollout_timeout + 120)
+
+    @staticmethod
+    def _camera_source_signature(cameras: tuple[WorkCamera, ...]) -> tuple[Any, ...]:
+        """Non-secret identity of every mounted camera source.
+
+        A changed profile or credential version requires a Pod restart because
+        camera URLs use Kubernetes Secret ``subPath`` mounts. App selection,
+        geometry and FPS deliberately do not participate: the runtime can
+        reload those fields from its projected desired-state ConfigMap.
+        """
+
+        return tuple(
+            (
+                camera.camera_key,
+                camera.profile_id,
+                camera.endpoint_scheme,
+                camera.endpoint_host,
+                camera.endpoint_port,
+                camera.path,
+                camera.credential[0] if camera.credential is not None else None,
+            )
+            for camera in cameras
+        )
+
+    def _is_live_reload_candidate(self, work: SyncWorkItem) -> bool:
+        def live_signature(bundle: dict[str, Any]) -> str:
+            normalized = copy.deepcopy(bundle)
+            normalized.get("configuration", {}).pop("desired_state_sha256", None)
+            return revision(normalized)
+
+        return bool(
+            self.live_reload_timeout
+            and work.previous is not None
+            and len(work.bundle.get("applications", [])) == 1
+            and live_signature(work.bundle) == live_signature(work.previous.bundle)
+            and self._camera_source_signature(work.cameras)
+            == self._camera_source_signature(work.previous.cameras)
+        )
+
+    @staticmethod
+    def _live_reload_report(work: SyncWorkItem) -> dict[str, Any]:
+        """Report the resource-stable subset used by ConfigMap live reload.
+
+        The only bundle difference allowed by `_is_live_reload_candidate` is
+        `configuration.desired_state_sha256`, whose historical purpose was to
+        force the renderer's Pod-template digest to change. Applying that
+        template would race the live reload with a rollout, so this path
+        deliberately leaves bundle-owned Kubernetes objects unchanged after
+        the separately validated desired-state ConfigMap has been applied.
+        """
+
+        observed = []
+        for application in work.bundle.get("applications", []):
+            desired_state = application.get("lifecycle", {}).get(
+                "desired_state", "Running"
+            )
+            observed.append(
+                {
+                    "name": f"{work.deployment_key}-{application['name']}",
+                    "desired_replicas": (
+                        application.get("replicas", 1)
+                        if desired_state == "Running"
+                        else 0
+                    ),
+                }
+            )
+        return {
+            "revision": revision(work.bundle),
+            "applied": [],
+            "removed": [],
+            "observed": observed,
+        }
+
+    @staticmethod
+    def _runtime_readiness_contract(
+        work: SyncWorkItem, deployment_name: str
+    ) -> tuple[str, int, str, str] | None:
+        prefix = f"{work.deployment_key}-"
+        if not deployment_name.startswith(prefix):
+            return None
+        app_name = deployment_name[len(prefix) :]
+        app = next(
+            (
+                item
+                for item in work.bundle.get("applications", [])
+                if item.get("name") == app_name
+            ),
+            None,
+        )
+        if app is None:
+            return None
+        readiness = app.get("health", {}).get("readiness", {})
+        port_name = readiness.get("port")
+        port = next(
+            (
+                item.get("container_port")
+                for item in app.get("ports", [])
+                if item.get("name") == port_name
+            ),
+            None,
+        )
+        path = readiness.get("path")
+        if not isinstance(port, int) or not isinstance(path, str) or not path.startswith("/"):
+            return None
+        selector = (
+            f"apexfabric.com/deployment-id={work.deployment_key},"
+            f"apexfabric.com/application={app_name}"
+        )
+        return app_name, port, path, selector
+
+    def _wait_for_runtime_revision(
+        self, work: SyncWorkItem, deployment_name: str
+    ) -> bool:
+        """Wait for the running Pod to acknowledge the desired-state revision.
+
+        The readiness response is bounded metadata (status + revision). Raw
+        analytics events and camera sources never cross this path. Any proxy,
+        schema or timeout failure returns False so the caller falls back to
+        the established controlled rollout.
+        """
+
+        contract = self._runtime_readiness_contract(work, deployment_name)
+        if contract is None:
+            return False
+        _app_name, port, path, selector = contract
+        deadline = time.monotonic() + self.live_reload_timeout
+        nudged_pods: set[str] = set()
+        while time.monotonic() < deadline:
+            try:
+                pods_result = self.kubectl.run(
+                    "get",
+                    "pods",
+                    "-n",
+                    work.namespace,
+                    "-l",
+                    selector,
+                    "-o",
+                    "json",
+                )
+                pods = json.loads(pods_result.stdout).get("items", [])
+                pods.sort(
+                    key=lambda item: item.get("metadata", {}).get(
+                        "creationTimestamp", ""
+                    ),
+                    reverse=True,
+                )
+                pod = next(
+                    (
+                        item
+                        for item in pods
+                        if item.get("status", {}).get("phase") == "Running"
+                    ),
+                    None,
+                )
+                if pod is not None:
+                    pod_name = pod["metadata"]["name"]
+                    if pod_name not in nudged_pods:
+                        # Updating Pod metadata schedules an immediate kubelet
+                        # sync, avoiding the normal projected-ConfigMap cache
+                        # delay without changing the Pod template or UID.
+                        self.kubectl.run(
+                            "patch",
+                            "pod",
+                            pod_name,
+                            "-n",
+                            work.namespace,
+                            "--type=merge",
+                            "-p",
+                            json.dumps(
+                                {
+                                    "metadata": {
+                                        "annotations": {
+                                            "tvt.apexfabric.com/desired-revision": str(
+                                                work.desired_revision
+                                            )
+                                        }
+                                    }
+                                },
+                                separators=(",", ":"),
+                            ),
+                        )
+                        nudged_pods.add(pod_name)
+                    proxy_path = (
+                        f"/api/v1/namespaces/{work.namespace}/pods/"
+                        f"http:{pod_name}:{port}/proxy{path}"
+                    )
+                    response = self.kubectl.run("get", "--raw", proxy_path)
+                    payload = json.loads(response.stdout)
+                    if (
+                        payload.get("status") == "ready"
+                        and payload.get("revision") == work.desired_revision
+                    ):
+                        return True
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError, subprocess.CalledProcessError):
+                pass
+            time.sleep(0.5)
+        return False
 
     def claim(self) -> SyncWorkItem | None:
         now = utc_now()
@@ -545,13 +745,47 @@ class SyncWorker:
             del inputs
             configured_secrets = secret_names(secret_list)
             del secret_list
+            live_reload = self._is_live_reload_candidate(work)
             self._phase(work, "applying_bundle")
-            report = reconcile(work.bundle, work.namespace, self.kubectl)
-            self._phase(work, "restarting_deployments")
+            report = (
+                self._live_reload_report(work)
+                if live_reload
+                else reconcile(work.bundle, work.namespace, self.kubectl)
+            )
+            bundle_changed = bool(
+                work.previous is None
+                or revision(work.bundle) != revision(work.previous.bundle)
+            )
             for deployment in report["observed"]:
                 if deployment.get("desired_replicas", 0) <= 0:
                     continue
                 name = deployment["name"]
+                if live_reload:
+                    self._phase(work, "waiting_runtime_configuration")
+                    if self._wait_for_runtime_revision(work, name):
+                        continue
+                    # The runtime did not acknowledge the ConfigMap update.
+                    # Apply the full bundle now so its Pod-template digest
+                    # drives the established rollout fallback.
+                    report = reconcile(work.bundle, work.namespace, self.kubectl)
+                if bundle_changed:
+                    # Server-side apply already changed the Pod template (or
+                    # created it for the first time). Wait for that rollout;
+                    # issuing `rollout restart` here would create a second
+                    # ReplicaSet for the same desired bundle.
+                    self._phase(work, "waiting_deployment_rollout")
+                    self.kubectl.run(
+                        "rollout",
+                        "status",
+                        f"deployment/{name}",
+                        "-n",
+                        work.namespace,
+                        f"--timeout={self.rollout_timeout}s",
+                    )
+                    continue
+                # Camera-source Secrets use subPath mounts and cannot refresh
+                # in-place. This is also the safe fallback when a runtime does
+                # not acknowledge live desired-state reload in time.
                 self._phase(work, "restarting_deployments")
                 self.kubectl.run(
                     "rollout",
@@ -568,7 +802,6 @@ class SyncWorker:
                     work.namespace,
                     f"--timeout={self.rollout_timeout}s",
                 )
-                self._phase(work, "restarting_deployments")
             self._record_success(work, report, configured_secrets)
             return {
                 "deployment_id": work.deployment_key,

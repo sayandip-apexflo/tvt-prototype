@@ -38,6 +38,8 @@ ROOT = Path(__file__).resolve().parents[1]
 CATALOG_DELIVERY = ROOT / "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
 CATALOG_ID = "tvt-mills-pilot:2026.09.18-v1"
 CATALOG_DIGEST = "sha256:" + "1" * 64
+LOGICAL_DEPLOYMENT = "tvt-mills-v1"
+RUNTIME_WORKLOAD = "tvt-mills-v1-runtime"
 
 
 class FakeKubectl:
@@ -80,6 +82,43 @@ class FakeKubectl:
         return result
 
 
+class LiveReloadKubectl(FakeKubectl):
+    def __init__(self, acknowledged_revision: int):
+        super().__init__()
+        self.acknowledged_revision = acknowledged_revision
+
+    def run(self, *arguments, input_text=None, check=True):
+        if arguments[:2] == ("get", "pods"):
+            self.calls.append((arguments, input_text))
+
+            class Result:
+                stdout = json.dumps(
+                    {
+                        "items": [
+                            {
+                                "metadata": {
+                                    "name": "tvt-mills-v1-runtime-pod",
+                                    "creationTimestamp": "2026-09-23T00:00:00Z",
+                                },
+                                "status": {"phase": "Running"},
+                            }
+                        ]
+                    }
+                )
+
+            return Result()
+        if arguments[:2] == ("get", "--raw"):
+            self.calls.append((arguments, input_text))
+
+            class Result:
+                stdout = json.dumps(
+                    {"status": "ready", "revision": self.acknowledged_revision}
+                )
+
+            return Result()
+        return super().run(*arguments, input_text=input_text, check=check)
+
+
 class FakeApex:
     """Stand-in for ApexClient with the same method surface enrollment.py
     calls (recent_events/list_persons/rename_person), so tests never need a
@@ -87,11 +126,21 @@ class FakeApex:
 
     def __init__(self, events=None, persons=None, unavailable=False):
         self.events = events or []
-        self.persons = persons or []
+        self.persons = []
+        for person in persons or []:
+            normalized = dict(person)
+            source = normalized.get("enrollment_source_event_id")
+            if isinstance(source, str) and source.startswith(f"{LOGICAL_DEPLOYMENT}:"):
+                normalized["enrollment_source_event_id"] = source.replace(
+                    f"{LOGICAL_DEPLOYMENT}:", f"{RUNTIME_WORKLOAD}:", 1
+                )
+            self.persons.append(normalized)
         self.unavailable = unavailable
         self.renamed = []
+        self.event_queries = []
 
     def recent_events(self, deployment_id):
+        self.event_queries.append(deployment_id)
         if self.unavailable:
             raise ApexUnavailableError("apex unreachable")
         return [event for event in self.events if event["deployment_id"] == deployment_id]
@@ -106,6 +155,8 @@ class FakeApex:
 
 
 def capture_event(deployment_id, camera_id, event_id, occurred_at_iso, quality=None):
+    if deployment_id == LOGICAL_DEPLOYMENT:
+        deployment_id = RUNTIME_WORKLOAD
     return {
         "event_id": f"{deployment_id}:{event_id}",
         "deployment_id": deployment_id,
@@ -297,6 +348,52 @@ class EnrollmentSessionTests(unittest.TestCase):
         self.assertEqual(camera["apps"], ["face_enrollment"])
         self.assertEqual(camera["config"], {})
 
+    def test_start_live_reloads_acknowledged_revision_without_pod_restart(self):
+        self.deploy_with_face_recognition()
+        self.apply_desired()
+        started = self.start_session()
+        with self.sessions() as session:
+            row = session.get(EnrollmentSession, uuid.UUID(started["session_id"]))
+            revision = row.activation_revision
+        client = LiveReloadKubectl(revision)
+        SyncWorker(
+            self.sessions,
+            self.keyring,
+            client,
+            worker_id="live-reload-worker",
+            live_reload_timeout=2,
+            image_puller=lambda _reference: None,
+        ).run_once()
+        calls = [call[0] for call in client.calls]
+        self.assertTrue(any(call[:2] == ("get", "--raw") for call in calls))
+        self.assertEqual(
+            sum(call[:2] == ("patch", "pod") for call in calls),
+            1,
+        )
+        self.assertFalse(any(call[:2] == ("rollout", "restart") for call in calls))
+        self.service.reconcile_enrollment_sessions(FakeApex())
+        observer = self.service.get_enrollment_status(LOGICAL_DEPLOYMENT)["observer"]
+        self.assertEqual(observer["stage"], "waiting_for_face")
+        self.assertEqual(observer["target_revision"], revision)
+        self.assertEqual(observer["applied_revision"], revision)
+
+    def test_live_reload_timeout_falls_back_to_single_bundle_rollout(self):
+        self.deploy_with_face_recognition()
+        self.apply_desired()
+        self.start_session()
+        client = LiveReloadKubectl(acknowledged_revision=1)
+        SyncWorker(
+            self.sessions,
+            self.keyring,
+            client,
+            worker_id="live-reload-fallback-worker",
+            live_reload_timeout=1,
+            image_puller=lambda _reference: None,
+        ).run_once()
+        calls = [call[0] for call in client.calls]
+        self.assertFalse(any(call[:2] == ("rollout", "restart") for call in calls))
+        self.assertTrue(any(call[:2] == ("rollout", "status") for call in calls))
+
     # 4. Session remains 'activating' until the desired revision is applied.
     def test_session_stays_activating_until_applied(self):
         self.deploy_with_face_recognition()
@@ -332,6 +429,23 @@ class EnrollmentSessionTests(unittest.TestCase):
         pending = self.service.list_people_awaiting_names()
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["person_id"], "person-1")
+        self.assertEqual(apex.event_queries, [RUNTIME_WORKLOAD])
+
+        observer = status["observer"]
+        self.assertEqual(observer["runtime_workload"], RUNTIME_WORKLOAD)
+        self.assertEqual(observer["stage"], "restore_queued")
+        self.assertNotIn("embedding", json.dumps(observer))
+
+    def test_status_observer_exposes_safe_sync_progress(self):
+        self.deploy_with_face_recognition()
+        self.start_session()
+        status = self.service.get_enrollment_status(LOGICAL_DEPLOYMENT)
+        observer = status["observer"]
+        self.assertEqual(observer["runtime_workload"], RUNTIME_WORKLOAD)
+        self.assertEqual(observer["stage"], "sync_queued")
+        self.assertEqual(observer["sync_state"], "pending")
+        self.assertEqual(observer["timeline"][0]["stage"], "requested")
+        self.assertNotIn("rtsp", json.dumps(observer).lower())
 
     def test_out_of_window_capture_is_rejected_but_session_keeps_capturing(self):
         self.deploy_with_face_recognition()
@@ -498,6 +612,10 @@ class EnrollmentSessionTests(unittest.TestCase):
         status = self.service.get_enrollment_status("tvt-mills-v1")
         self.assertEqual(status["session"]["status"], "cancelled")
         self.assertEqual(status["session"]["result_code"], "cancelled")
+        self.assertEqual(
+            status["observer"]["target_revision"],
+            status["observer"]["applied_revision"],
+        )
         camera = self.current_assignment()
         self.assertEqual(camera["apps"], ["face_recognition", "anpr"])
 

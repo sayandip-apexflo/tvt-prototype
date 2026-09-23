@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from tvt_edge.api import create_app
-from tvt_edge.cli import parser as edge_parser
+from tvt_edge.cli import parser as edge_parser, scheduled_sync_workers
 from tvt_edge.observability.metrics import DEFAULT_ROUTES
 from tvt_edge.cluster import ClusterStatusReader
 from tvt_edge.cluster.sync import NodeImagePreflight, SyncWorker
@@ -870,6 +870,40 @@ class ManagementPlaneTests(unittest.TestCase):
             self.assertEqual(desired.desired_revision, 2)
             self.assertEqual(sync.state, "pending")
 
+    def test_credential_rotation_restarts_once_instead_of_live_reloading(self):
+        service, _request, _preview, _committed = self.prepare_catalog_deployment()
+        SyncWorker(
+            self.sessions,
+            self.keyring,
+            FakeKubectl(),
+            worker_id="credential-initial-worker",
+            image_puller=lambda _reference: None,
+        ).run_once()
+        service.rotate_credentials(
+            "camera-01",
+            {"username": "camera-user", "password": "replacement"},
+            "test",
+            "credential-live-reload-guard",
+        )
+        client = FakeKubectl()
+        SyncWorker(
+            self.sessions,
+            self.keyring,
+            client,
+            worker_id="credential-update-worker",
+            live_reload_timeout=2,
+            image_puller=lambda _reference: None,
+        ).run_once()
+        restarts = [
+            call for call in client.calls if call[0][:2] == ("rollout", "restart")
+        ]
+        self.assertEqual(len(restarts), 1)
+        statuses = [
+            call for call in client.calls if call[0][:2] == ("rollout", "status")
+        ]
+        self.assertEqual(len(statuses), 1)
+        self.assertFalse(any(call[0][:2] == ("get", "--raw") for call in client.calls))
+
     def test_sync_materializes_secret_only_in_kubectl_input(self):
         self.commit()
         client = FakeKubectl()
@@ -885,6 +919,12 @@ class ManagementPlaneTests(unittest.TestCase):
         )
         self.assertIn("camera-secret", base64_decode_manifest(secret_call[1]))
         self.assertNotIn("last-applied-configuration", secret_call[1])
+        self.assertFalse(
+            any(call[0][:2] == ("rollout", "restart") for call in client.calls)
+        )
+        self.assertTrue(
+            any(call[0][:2] == ("rollout", "status") for call in client.calls)
+        )
         with self.sessions() as session:
             sync = session.scalar(select(DeploymentSyncState))
             desired = session.get(
@@ -1015,6 +1055,29 @@ class ManagementPlaneTests(unittest.TestCase):
         self.assertEqual(edge_parser().parse_args(["status"]).command, "status")
         self.assertEqual(edge_parser().parse_args(["cluster"]).command, "cluster")
         self.assertEqual(edge_parser().parse_args(["cameras"]).command, "cameras")
+
+    def test_fast_deployment_sync_keeps_camera_inventory_on_bounded_cadence(self):
+        sync_worker = object()
+        camera_worker = object()
+        first, next_inventory = scheduled_sync_workers(
+            sync_worker,
+            camera_worker,
+            now=100.0,
+            next_camera_inventory=0.0,
+            camera_inventory_interval=15,
+            once=False,
+        )
+        self.assertEqual([name for name, _worker in first], ["sync", "camera-inventory-sync"])
+        second, unchanged = scheduled_sync_workers(
+            sync_worker,
+            camera_worker,
+            now=101.0,
+            next_camera_inventory=next_inventory,
+            camera_inventory_interval=15,
+            once=False,
+        )
+        self.assertEqual([name for name, _worker in second], ["sync"])
+        self.assertEqual(unchanged, next_inventory)
 
     def test_retention_keeps_applied_credential_until_replacement_is_applied(self):
         self.commit()

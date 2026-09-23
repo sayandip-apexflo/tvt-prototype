@@ -8,6 +8,7 @@ import logging
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 from alembic import command
 from alembic.config import Config
@@ -34,6 +35,24 @@ from tvt_runtime.cli import kubectl_client
 ROOT = RESOURCE_ROOT
 
 
+def scheduled_sync_workers(
+    sync_worker: Any,
+    camera_inventory_worker: Any,
+    *,
+    now: float,
+    next_camera_inventory: float,
+    camera_inventory_interval: int,
+    once: bool,
+) -> tuple[list[tuple[str, Any]], float]:
+    """Schedule deployment sync independently from camera inventory refresh."""
+
+    workers = [("sync", sync_worker)]
+    if once or now >= next_camera_inventory:
+        workers.append(("camera-inventory-sync", camera_inventory_worker))
+        next_camera_inventory = now + max(1, camera_inventory_interval)
+    return workers, next_camera_inventory
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description="TVT durable edge management plane")
     commands = root.add_subparsers(dest="command", required=True)
@@ -56,6 +75,7 @@ def parser() -> argparse.ArgumentParser:
     sync = commands.add_parser("sync", help="reconcile committed revisions into K3s")
     sync.add_argument("--once", action="store_true")
     sync.add_argument("--interval", type=int, default=15)
+    sync.add_argument("--camera-inventory-interval", type=int, default=15)
     site = commands.add_parser("init-site", help="create the single V1 site record")
     site.add_argument("site_key")
     site.add_argument("edge_id")
@@ -222,15 +242,23 @@ def main(argv: list[str] | None = None) -> int:
         sync_kubectl,
         worker_id=settings.sync_worker_id,
         rollout_timeout=settings.rollout_timeout,
+        live_reload_timeout=settings.runtime_reload_timeout,
         image_puller=NodeImagePreflight(sync_kubectl),
     )
     camera_inventory_worker = CameraInventorySyncWorker(sessions, keyring, sync_kubectl)
+    next_camera_inventory = 0.0
     while True:
         had_error = False
-        for name, worker in (
-            ("sync", sync_worker),
-            ("camera-inventory-sync", camera_inventory_worker),
-        ):
+        now = time.monotonic()
+        workers, next_camera_inventory = scheduled_sync_workers(
+            sync_worker,
+            camera_inventory_worker,
+            now=now,
+            next_camera_inventory=next_camera_inventory,
+            camera_inventory_interval=args.camera_inventory_interval,
+            once=args.once,
+        )
+        for name, worker in workers:
             try:
                 result = worker.run_once()
                 if result is not None:

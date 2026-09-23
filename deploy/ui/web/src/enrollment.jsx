@@ -12,6 +12,23 @@ const RESULT_TEXT={
   cancelled:'Enrollment was cancelled.',
   activation_failed:'The camera could not be switched into enrollment mode.',
 };
+const OBSERVER_TEXT={
+  sync_queued:'Enrollment change queued',
+  claimed:'Synchronizer accepted the change',
+  pulling_images:'Checking the vision runtime image',
+  applying_secrets:'Updating the runtime configuration',
+  applying_bundle:'Reconciling the vision workload',
+  waiting_runtime_configuration:'Waiting for the runtime to load the new revision',
+  waiting_deployment_rollout:'Waiting for the vision workload to become ready',
+  restarting_deployments:'Restarting the vision runtime',
+  completed:'Configuration applied',
+  waiting_for_face:'Runtime ready — waiting for a face event',
+  capture_rejected:'A face event arrived but did not pass enrollment checks',
+  restore_queued:'Restoration queued',
+  timed_out:'Enrollment timed out and the camera was restored',
+  cancelled:'Enrollment cancelled and the camera was restored',
+  failed:'Enrollment failed',
+};
 
 export function EnrollmentDesignationControl({deployment,tvtCameras}){
   const deploymentId=deployment.deployment_id;
@@ -110,6 +127,7 @@ export function EnrollmentPanel({camera}){
 
 export function EnrollmentDeploymentPanel({deploymentId}){
   const [session,setSession]=useState(null);
+  const [observer,setObserver]=useState(null);
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState('');
   const [name,setName]=useState('');
@@ -122,7 +140,7 @@ export function EnrollmentDeploymentPanel({deploymentId}){
       try{
         const x=await edgeApi(`deployments/${encodeURIComponent(deploymentId)}/enrollment/status`);
         if(!live)return;
-        setSession(x.session);setError('');
+        setSession(x.session);setObserver(x.observer||null);setError('');
         if(x.session&&ACTIVE_STATUSES.includes(x.session.status))timer.current=setTimeout(poll,2000);
       }catch(e){if(live){setError(e.message);timer.current=setTimeout(poll,5000)}}
     }
@@ -133,14 +151,14 @@ export function EnrollmentDeploymentPanel({deploymentId}){
   async function pollAgain(){
     try{
       const x=await edgeApi(`deployments/${encodeURIComponent(deploymentId)}/enrollment/status`);
-      setSession(x.session);
+      setSession(x.session);setObserver(x.observer||null);
       if(x.session&&ACTIVE_STATUSES.includes(x.session.status))timer.current=setTimeout(pollAgain,2000);
     }catch(e){setError(e.message);timer.current=setTimeout(pollAgain,5000)}
   }
   async function start(){
     setBusy(true);setError('');
     try{
-      setSession(await edgeApi(`deployments/${encodeURIComponent(deploymentId)}/enrollment/sessions`,{}));
+      setSession(await edgeApi(`deployments/${encodeURIComponent(deploymentId)}/enrollment/sessions`,{}));setObserver(null);
       if(timer.current)clearTimeout(timer.current);
       timer.current=setTimeout(pollAgain,2000);
     }catch(e){setError(e.message)}finally{setBusy(false)}
@@ -155,7 +173,7 @@ export function EnrollmentDeploymentPanel({deploymentId}){
     try{
       await edgeApi(`enrollment/people/${session.person_id}/name`,{display_name:name});
       const x=await edgeApi(`deployments/${encodeURIComponent(deploymentId)}/enrollment/status`);
-      setSession(x.session);setName('');
+      setSession(x.session);setObserver(x.observer||null);setName('');
     }catch(e){setError(e.message)}finally{setBusy(false)}
   }
 
@@ -167,6 +185,13 @@ export function EnrollmentDeploymentPanel({deploymentId}){
     {error&&<p className="cu-notice" role="alert">{error}</p>}
     {!active&&<button className="cu-btn cu-primary" disabled={busy} onClick={start}>{busy?'Starting…':'Start enrollment'}</button>}
     {active&&<p>{STATUS_TEXT[status]}</p>}
+    {observer&&<div className="enrollment-observer" role="status">
+      <strong>{OBSERVER_TEXT[observer.stage]||observer.stage.replaceAll('_',' ')}</strong>
+      <small>Runtime: {observer.runtime_workload}</small>
+      {observer.target_revision!=null&&<small>Revision {observer.applied_revision??'—'} / {observer.target_revision}</small>}
+      {observer.safe_reason&&<small>Diagnostic: {observer.safe_reason.replaceAll('_',' ')}</small>}
+      {!!observer.timeline?.length&&<ol>{observer.timeline.map((item,index)=><li key={`${item.stage}-${index}`}><span>{OBSERVER_TEXT[item.stage]||item.stage.replaceAll('_',' ')}</span><time>{new Date(item.occurred_at).toLocaleTimeString()}</time></li>)}</ol>}
+    </div>}
     {active&&status==='capturing'&&<button className="cu-btn" disabled={busy} onClick={cancel}>Cancel</button>}
     {session?.capture_result&&<p className="cu-notice" role="status">{session.capture_result==='created'?'Face captured — new person.':'Face captured — matched an existing person.'}</p>}
     {!active&&session?.result_code&&session.result_code!=='ok'&&<p className="cu-notice">{RESULT_TEXT[session.result_code]||`Enrollment ${session.result_code.replaceAll('_',' ')}.`}</p>}
