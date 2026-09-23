@@ -192,6 +192,28 @@ def attendance_report(connection, person_id: str | None = None, date: str | None
     return {"sessions": rows, "total_duration_seconds": total_duration}
 
 
+def attendance_log(connection, limit: int = 10) -> list[dict[str, Any]]:
+    """Last `limit` individual entry/exit crossings, newest first -- unlike
+    attendance_report (closed sessions only, for duration accounting), this
+    includes still-open sessions' entry crossings so a live activity feed
+    doesn't wait for a paired exit to show anything."""
+    limit = max(1, min(limit, 100))
+    query = (
+        "SELECT e.id AS session_id, e.person_id AS person_id, persons.display_name AS display_name, "
+        "e.gate AS gate, e.action AS action, e.ts AS time "
+        "FROM ("
+        "  SELECT id, person_id, gate, entry_time AS ts, 'entry' AS action "
+        "  FROM attendance_sessions WHERE entry_time IS NOT NULL"
+        "  UNION ALL "
+        "  SELECT id, person_id, gate, exit_time AS ts, 'exit' AS action "
+        "  FROM attendance_sessions WHERE exit_time IS NOT NULL"
+        ") AS e "
+        "JOIN persons ON persons.person_id = e.person_id "
+        "ORDER BY e.ts DESC LIMIT ?"
+    )
+    return [dict(row) for row in connection.execute(query, [limit]).fetchall()]
+
+
 def vehicle_traffic_report(connection, date: str | None = None, gate: str | None = None) -> dict[str, Any]:
     query = "SELECT * FROM vehicle_sessions WHERE 1=1"
     values: list[Any] = []

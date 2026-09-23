@@ -912,6 +912,10 @@ def create_app(
             "/api/reports/attendance", {"person_id": person_id, "date": date}
         )
 
+    @app.get("/api/v1/reports/attendance-log")
+    def attendance_log_report(limit: int = 10) -> Response:
+        return _proxy_report("/api/reports/attendance-log", {"limit": str(limit)})
+
     @app.get("/api/v1/reports/vehicle-traffic")
     def vehicle_traffic_report(date: str | None = None, gate: str | None = None) -> Response:
         return _proxy_report(

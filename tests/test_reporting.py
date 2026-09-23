@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from apexfabric.control_plane.identity import IdentityPolicy
-from apexfabric.control_plane.reporting import attendance_report, sweep_stale_sessions, vehicle_traffic_report
+from apexfabric.control_plane.reporting import attendance_log, attendance_report, sweep_stale_sessions, vehicle_traffic_report
 from apexfabric.control_plane.telemetry import RetentionPolicy, TelemetryStore
 
 
@@ -115,6 +115,35 @@ class AttendanceAggregationTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["status"], "closed")
         self.assertGreater(rows[0]["duration_seconds"], 0)
+
+    def test_log_includes_open_sessions_unlike_the_duration_report(self):
+        self.store.ingest("dep1", face_event("e1", "main-1", FACE, line_id="gate-1-face_entry"))
+        with self.store._connect() as connection:
+            self.assertEqual(attendance_report(connection)["sessions"], [])
+            events = attendance_log(connection)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["action"], "entry")
+
+    def test_log_emits_one_row_per_crossing_not_per_session(self):
+        self.store.ingest("dep1", face_event("e1", "main-1", FACE, line_id="gate-1-face_entry"))
+        time.sleep(0.02)
+        self.store.ingest("dep1", face_event("e2", "main-1", FACE_NEAR, line_id="gate-1-face_exit"))
+        with self.store._connect() as connection:
+            events = attendance_log(connection)
+        self.assertEqual(len(events), 2, "a closed session is one entry crossing plus one exit crossing")
+        self.assertEqual([e["action"] for e in events], ["exit", "entry"], "newest crossing first")
+
+    def test_log_respects_limit(self):
+        self.store.ingest("dep1", face_event("e1", "main-1", FACE, line_id="gate-1-face_entry"))
+        time.sleep(0.01)
+        self.store.ingest("dep1", face_event("e2", "main-1", FACE_NEAR, line_id="gate-1-face_exit"))
+        time.sleep(0.01)
+        self.store.ingest("dep1", face_event("e3", "main-1", FACE, line_id="gate-1-face_entry"))
+        time.sleep(0.01)
+        self.store.ingest("dep1", face_event("e4", "main-1", FACE_NEAR, line_id="gate-1-face_exit"))
+        with self.store._connect() as connection:
+            events = attendance_log(connection, limit=2)
+        self.assertEqual(len(events), 2, "4 crossings recorded across 2 sessions, but limit caps the log at 2")
 
 
 class VehicleTrafficAggregationTests(unittest.TestCase):

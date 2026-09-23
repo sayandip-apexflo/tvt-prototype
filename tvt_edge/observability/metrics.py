@@ -100,6 +100,7 @@ DEFAULT_ROUTES = frozenset(
         "/api/v1/cameras/{camera_id}/role",
         "/api/v1/cameras/{camera_id}/snapshot",
         "/api/v1/reports/attendance",
+        "/api/v1/reports/attendance-log",
         "/api/v1/reports/vehicle-traffic",
         "/api/v1/alerts",
         "/api/v1/alerts/{alert_id}/acknowledge",

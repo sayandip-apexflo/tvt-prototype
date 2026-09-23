@@ -1586,6 +1586,15 @@ class Handler(BaseHTTPRequestHandler):
             date = query.get("date", [None])[0]
             with self.controller.telemetry._connect() as connection:
                 self.json_response(HTTPStatus.OK, attendance_report(connection, person_id, date))
+        elif path == "/api/reports/attendance-log":
+            from .reporting import attendance_log
+            query = parse_qs(parsed.query)
+            try:
+                limit = int(query.get("limit", ["10"])[0])
+            except ValueError:
+                limit = 10
+            with self.controller.telemetry._connect() as connection:
+                self.json_response(HTTPStatus.OK, {"events": attendance_log(connection, limit)})
         elif path == "/api/reports/vehicle-traffic":
             from .reporting import vehicle_traffic_report
             query = parse_qs(parsed.query)
