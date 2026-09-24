@@ -842,16 +842,24 @@ configured line's `_entry`/`_exit` ID suffix as `plate_read_event`/
    (`GET /api/v1/reports/vehicle-traffic`, `GET /api/v1/reports/attendance`)
    when called from the console; the systemd units call apexfabric-control
    directly. Apex's own aggregation is the sessions' source of truth --
-   TVT does not re-derive or store per-event state.
-2. `tvt_edge/reporting/email_report.py` filters that day's sessions to ones
-   starting in the half-open interval `[09:00, 18:00)` `Asia/Kolkata`, then
-   computes `entered_count`/`exited_count` (vehicle traffic) or the sum of
-   `duration_seconds` across closed sessions (attendance).
+   TVT does not re-derive or store per-event state. Apex persists plant-wide
+   attendance visits plus compact daily first/last plate aggregates.
+2. Face-event timestamps open and close one plant-wide visit per resolved
+   identity, even when entry and exit occur at different gates. The API returns
+   one total row for every named/registered person, including zero-visit people;
+   only complete intervals contribute duration and incomplete intervals remain
+   explicit. Accepted ANPR events whose camera timestamps fall in `[09:00, 18:00)`
+   `Asia/Kolkata` update a `(local_date, normalized_plate)` row containing the
+   earliest/latest in-window detection and detection count. One detection has an
+   unknown duration. `tvt_edge/reporting/email_report.py` clips attendance
+   intervals to the same window; the apexfabric-control systemd unit pins matching
+   timezone and window values so out-of-window plate reads cannot extend a duration.
 3. The vehicle-traffic CSV never carries plate text: a `vehicle_ref` token is
    assigned per distinct plate within that render only (not persisted, not
-   stable across days). The attendance CSV never carries a person's display
-   name: it uses the internal `person_id` only. This mirrors the discipline
-   the (retired) collector-era store applied to plate text.
+   stable across days) and reports first detection, last detection, duration,
+   detection count, and completeness. The attendance CSV never carries a
+   person's display name: it uses the internal `person_id` and reports first
+   entry, last exit, visit count, total duration, and incomplete-session count.
 4. `/var/lib/tvt-reporting/reporting.sqlite3` holds only per-`(report_date,
    report_kind)` delivery state (`pending`/`sending`/`sent`/`failed`), an
    immutable CSV snapshot, and a deterministic `Message-ID` -- no

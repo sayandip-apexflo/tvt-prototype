@@ -169,16 +169,21 @@ from apexfabric-control's already-aggregated reporting endpoints (`GET
 `apexfabric/control_plane/reporting.py`), which derive gate + entry/exit role
 from the `_entry`/`_exit` suffix on each configured line's ID (see §3.8) as
 `plate_read_event`/`face_detection_event` records arrive, maintaining
-`vehicle_sessions`/`attendance_sessions` continuously. This is a
-direction-aware entry/exit session model, not a raw observation span: a gate
-only contributes sessions once a camera has a saved Entry line and a paired
-camera (or the same camera) has a saved Exit line for that gate (a camera's
-Zones & Lines tab in the console — see §3.8).
+`vehicle_daily_spans`/`vehicle_sessions`/`attendance_sessions` continuously.
+Attendance is a plant-wide, direction-aware entry/exit model: an Entry line
+opens a person's visit and an Exit line at any plant gate closes it. Vehicle
+duration is deliberately an observation span instead: accepted ANPR events
+for the same normalized plate update that local day's earliest and latest
+detection. A single plate detection is reported as incomplete, not as a
+zero-duration stay.
 
 For the half-open daily window `[09:00, 18:00)` in `Asia/Kolkata`, each
-report's generator (`tvt_edge/reporting/email_report.py`) filters that day's
-sessions to ones starting in the window, then computes entered/exited counts
-(vehicle traffic) or total duration inside (attendance).
+report's generator (`tvt_edge/reporting/email_report.py`) clips completed
+attendance visits to the window and sums them per named/registered person.
+Open, forced-closed, and orphan attendance sessions remain explicit incomplete
+visits and never contribute a synthetic zero duration. Vehicle rows contain
+the first accepted in-window detection, last accepted in-window detection, detection count, and
+their difference when at least two detections exist.
 
 `tvt-anpr-report.timer` invokes a oneshot at exactly 18:30 Asia/Kolkata;
 `tvt-anpr-report-attendance.timer` at 18:35. Both timers are non-persistent,
@@ -188,8 +193,9 @@ logical send after success, tracked independently per report kind. There is
 one delivery attempt per kind per day; failure is recorded locally and is not
 retried later that day. SendGrid is reached through certificate-verified
 SMTP/STARTTLS using a protected key file. The vehicle-traffic email contains
-summary counts and a CSV keyed by opaque vehicle references; the attendance
-email contains the total duration and a CSV keyed by internal person ID. Raw
+duration counts and a first/last/duration CSV keyed by opaque vehicle
+references; the attendance email contains the site total and one
+first/last/visit-count/total-duration row per registered internal person ID. Raw
 number plates and person display names remain in apexfabric's local business
 store and the loopback management API/UI, and never enter email, logs,
 metrics, or operational alerts.
@@ -763,12 +769,17 @@ The first implementation of this design is accepted when it demonstrates that:
     monitoring is introduced.
 13. Reads for the same normalized plate from either configured ANPR camera
     produce one daily row whose duration is the difference between the earliest
-    and latest in-window occurrence, and duplicate event IDs do not alter it.
+    and latest in-window occurrence; one detection is explicitly incomplete,
+    and duplicate event IDs do not alter the aggregate.
 14. At 18:30 Asia/Kolkata the report is attempted once; a second invocation for
     the date cannot send a second logical email, and a missed timer has no late
     catch-up delivery.
-15. The email contains total duration and an opaque-reference CSV but contains
-    no raw plate text, image, RTSP URL, credential, or SendGrid key.
+15. Attendance produces one row per named person and sums all complete visits;
+    entry and exit may occur at different plant gates, and incomplete visits do
+    not contribute duration.
+16. Email CSVs contain internal person IDs or opaque vehicle references, never
+    display names, raw plate text, images, RTSP URLs, credentials, or SendGrid
+    keys; the loopback API/UI may display names and plates.
 
 ## 16. References
 

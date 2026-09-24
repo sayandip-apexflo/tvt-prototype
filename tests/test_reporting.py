@@ -1,11 +1,19 @@
 import math
+import sqlite3
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
-from apexfabric.control_plane.identity import IdentityPolicy
-from apexfabric.control_plane.reporting import attendance_log, attendance_report, sweep_stale_sessions, vehicle_traffic_report
+from apexfabric.control_plane.identity import IdentityPolicy, PersonStore
+from apexfabric.control_plane.reporting import (
+    attendance_log,
+    attendance_report,
+    ensure_schema,
+    sweep_stale_sessions,
+    vehicle_traffic_report,
+)
 from apexfabric.control_plane.telemetry import RetentionPolicy, TelemetryStore
 
 
@@ -16,10 +24,11 @@ def normalized(vector):
 
 FACE = normalized([1.0, 0.0, 0.0, 0.0])
 FACE_NEAR = normalized([0.999, 0.02, 0.0, 0.0])
+FACE_OTHER = normalized([0.0, 0.0, 1.0, 0.0])
 BODY = normalized([0.2, 0.3, 0.4, 0.5])
 
 
-def face_event(event_id, camera_id, face, zone_id=None, line_id=None):
+def face_event(event_id, camera_id, face, zone_id=None, line_id=None, timestamp=None):
     payload = {
         "embeddings": {"face": face, "body": BODY},
         "subject": {"type": "face", "bbox": {"x1": 1, "y1": 1, "x2": 2, "y2": 2}},
@@ -30,13 +39,14 @@ def face_event(event_id, camera_id, face, zone_id=None, line_id=None):
     if line_id:
         payload["line"] = {"id": line_id, "type": "line"}
     return {
-        "schema_version": "1.0", "event_id": event_id, "timestamp": "2026-09-17T09:00:00Z",
+        "schema_version": "1.0", "event_id": event_id,
+        "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
         "camera_id": camera_id, "solution_pack": "surveillance", "application": "face_recognition",
         "event_type": "face_detection_event", "payload": payload,
     }
 
 
-def plate_event(event_id, camera_id, plate_text, zone_id=None, line_id=None, confidence=0.95):
+def plate_event(event_id, camera_id, plate_text, zone_id=None, line_id=None, confidence=0.95, timestamp=None):
     payload = {
         "vehicle_ref": f"{camera_id}:1", "vehicle_track_id": 1,
         "plate": {"text": plate_text, "confidence": confidence},
@@ -47,10 +57,48 @@ def plate_event(event_id, camera_id, plate_text, zone_id=None, line_id=None, con
     if line_id:
         payload["line"] = {"id": line_id, "type": "line"}
     return {
-        "schema_version": "1.0", "event_id": event_id, "timestamp": "2026-09-17T09:00:00Z",
+        "schema_version": "1.0", "event_id": event_id,
+        "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
         "camera_id": camera_id, "solution_pack": "traffic", "application": "anpr",
         "event_type": "plate_read_event", "payload": payload,
     }
+
+
+class ReportingSchemaUpgradeTests(unittest.TestCase):
+    def test_existing_attendance_table_gets_directional_gate_columns(self):
+        connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
+        connection.executescript(
+            """
+            CREATE TABLE events (event_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL);
+            CREATE TABLE attendance_sessions (
+              id TEXT PRIMARY KEY, person_id TEXT NOT NULL, gate TEXT NOT NULL,
+              entry_event_id TEXT, entry_time REAL, entry_zone_id TEXT, entry_camera_id TEXT,
+              exit_event_id TEXT, exit_time REAL, exit_zone_id TEXT, exit_camera_id TEXT,
+              status TEXT NOT NULL, duration_seconds REAL
+            );
+            INSERT INTO attendance_sessions(
+              id, person_id, gate, entry_time, status
+            ) VALUES ("session-1", "person-1", "main", 100.0, "open");
+            """
+        )
+
+        ensure_schema(connection)
+
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(attendance_sessions)")
+        }
+        upgraded = connection.execute(
+            "SELECT entry_gate, exit_gate FROM attendance_sessions WHERE id = ?", ("session-1",)
+        ).fetchone()
+        self.assertTrue({"entry_gate", "exit_gate"}.issubset(columns))
+        self.assertEqual(upgraded, ("main", None))
+        self.assertIsNotNone(
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = ? AND name = ?",
+                ("table", "vehicle_daily_spans"),
+            ).fetchone()
+        )
 
 
 class AttendanceAggregationTests(unittest.TestCase):
@@ -116,11 +164,65 @@ class AttendanceAggregationTests(unittest.TestCase):
         self.assertEqual(rows[0]["status"], "closed")
         self.assertGreater(rows[0]["duration_seconds"], 0)
 
-    def test_log_includes_open_sessions_unlike_the_duration_report(self):
-        self.store.ingest("dep1", face_event("e1", "main-1", FACE, line_id="gate-1-face_entry"))
+    def test_entry_and_exit_at_different_gates_close_one_plant_visit(self):
+        self.store.ingest(
+            "dep1",
+            face_event("e1", "main-entry", FACE, line_id="main_entry", timestamp="2026-09-18T09:00:00+05:30"),
+        )
+        self.store.ingest(
+            "dep1",
+            face_event("e2", "back-exit", FACE_NEAR, line_id="back_exit", timestamp="2026-09-18T10:30:00+05:30"),
+        )
+        row = self.sessions()[0]
+        self.assertEqual(row["entry_gate"], "main")
+        self.assertEqual(row["exit_gate"], "back")
+        self.assertEqual(row["duration_seconds"], 90 * 60)
+
+    def test_daily_report_totals_complete_visits_for_named_people_only(self):
+        self.store.ingest(
+            "dep1",
+            face_event("e1", "main-entry", FACE, line_id="main_entry", timestamp="2026-09-18T09:00:00+05:30"),
+        )
+        self.store.ingest(
+            "dep1",
+            face_event("e2", "back-exit", FACE_NEAR, line_id="back_exit", timestamp="2026-09-18T11:00:00+05:30"),
+        )
+        person_id = self.sessions()[0]["person_id"]
+        people = PersonStore(self.store)
+        people.rename(person_id, "Asha Rao")
+        self.store.ingest(
+            "dep1",
+            face_event(
+                "registered-no-visit", "enrollment-camera", FACE_OTHER,
+                timestamp="2026-09-18T10:00:00+05:30",
+            ),
+        )
+        second_person_id = next(
+            person["person_id"] for person in people.list() if person["person_id"] != person_id
+        )
+        people.rename(second_person_id, "Bina Shah")
+
         with self.store._connect() as connection:
-            self.assertEqual(attendance_report(connection)["sessions"], [])
+            report = attendance_report(connection, date="2026-09-18")
+
+        self.assertEqual(report["registered_person_count"], 2)
+        by_name = {person["display_name"]: person for person in report["people"]}
+        self.assertEqual(by_name["Asha Rao"]["visit_count"], 1)
+        self.assertEqual(by_name["Asha Rao"]["total_duration_seconds"], 2 * 3600)
+        self.assertEqual(by_name["Bina Shah"]["visit_count"], 0)
+        self.assertEqual(by_name["Bina Shah"]["total_duration_seconds"], 0)
+        self.assertEqual(report["incomplete_session_count"], 0)
+
+    def test_open_session_is_reported_as_incomplete_without_duration(self):
+        self.store.ingest("dep1", face_event("e1", "main-1", FACE, line_id="gate-1-face_entry"))
+        person_id = self.sessions()[0]["person_id"]
+        PersonStore(self.store).rename(person_id, "Asha Rao")
+        with self.store._connect() as connection:
+            report = attendance_report(connection)
             events = attendance_log(connection)
+        self.assertEqual(len(report["sessions"]), 1)
+        self.assertEqual(report["people"][0]["total_duration_seconds"], 0)
+        self.assertEqual(report["people"][0]["incomplete_session_count"], 1)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["action"], "entry")
         self.assertEqual(events[0]["camera_id"], "main-1")
@@ -202,6 +304,57 @@ class VehicleTrafficAggregationTests(unittest.TestCase):
             report = vehicle_traffic_report(connection)
         self.assertEqual(report["entered_count"], 2)
         self.assertEqual(report["exited_count"], 1)
+
+    def test_vehicle_duration_uses_first_and_last_normalized_plate_detection(self):
+        self.store.ingest(
+            "dep1",
+            plate_event(
+                "before-window", "yard-anpr", "KA05MN7788", zone_id="yard-zone",
+                timestamp="2026-09-18T08:00:00+05:30",
+            ),
+        )
+        self.store.ingest(
+            "dep1",
+            plate_event(
+                "e1", "yard-anpr", "KA-05 MN 7788", zone_id="yard-zone",
+                timestamp="2026-09-18T09:00:00+05:30",
+            ),
+        )
+        self.store.ingest(
+            "dep1",
+            plate_event(
+                "e2", "yard-anpr", "ka05mn7788", zone_id="yard-zone",
+                timestamp="2026-09-18T11:30:00+05:30",
+            ),
+        )
+        self.store.ingest(
+            "dep1",
+            plate_event(
+                "after-window", "yard-anpr", "KA05MN7788", zone_id="yard-zone",
+                timestamp="2026-09-18T19:00:00+05:30",
+            ),
+        )
+
+        with self.store._connect() as connection:
+            report = vehicle_traffic_report(connection, date="2026-09-18")
+
+        self.assertEqual(report["vehicle_count"], 1)
+        self.assertEqual(report["vehicles"][0]["detection_count"], 2)
+        self.assertEqual(report["vehicles"][0]["duration_seconds"], 2.5 * 3600)
+        self.assertEqual(report["vehicles"][0]["status"], "complete")
+
+    def test_one_plate_detection_has_unknown_duration(self):
+        self.store.ingest(
+            "dep1",
+            plate_event(
+                "e1", "yard-anpr", "KA05MN7788", zone_id="yard-zone",
+                timestamp="2026-09-18T09:00:00+05:30",
+            ),
+        )
+        with self.store._connect() as connection:
+            vehicle = vehicle_traffic_report(connection, date="2026-09-18")["vehicles"][0]
+        self.assertIsNone(vehicle["duration_seconds"])
+        self.assertEqual(vehicle["status"], "single_detection")
 
 
 class SweepTests(unittest.TestCase):

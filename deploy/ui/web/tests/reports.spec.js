@@ -13,7 +13,14 @@ async function mockDashboard(page){
     if(path==='/dashboard/api/v1/alerts')return route.fulfill({json:[]});
     if(path==='/dashboard/api/v1/cameras')return route.fulfill({json:[]});
     if(path==='/dashboard/api/v1/reports/attendance-log')return route.fulfill({json:{events}});
-    if(path==='/dashboard/api/v1/reports/attendance')return route.fulfill({json:{sessions:[],total_duration_seconds:0}});
+    if(path==='/dashboard/api/v1/reports/attendance')return route.fulfill({json:{
+      sessions:[],registered_person_count:1,incomplete_session_count:0,total_duration_seconds:7200,
+      people:[{person_id:'named-person',display_name:'Asha Rao',first_entry_time:1790202600,last_exit_time:1790209800,visit_count:1,total_duration_seconds:7200,incomplete_session_count:0}],
+    }});
+    if(path==='/dashboard/api/v1/reports/vehicle-traffic')return route.fulfill({json:{
+      sessions:[],vehicle_count:1,entered_count:1,exited_count:1,
+      vehicles:[{report_date:'2026-09-24',plate_key:'TEST123',plate_text:'TEST123',first_detection_time:1790202600,last_detection_time:1790209800,detection_count:2,duration_seconds:7200,status:'complete'}],
+    }});
     return route.fulfill({status:404,json:{detail:'Unhandled test route: '+request.method()+' '+path}});
   });
   return {rawPersonId};
@@ -31,6 +38,21 @@ test('Recent activity shows employee names without naming controls or person IDs
   const camera=page.getByText('Main entrance (cam-main)',{exact:true});
   await expect(camera).toHaveCSS('padding','4px');
   await expect(page.getByRole('button',{name:'Name employee'})).toHaveCount(0);
+});
+
+test('Reports aggregate registered-person and number-plate durations',async({page})=>{
+  await mockDashboard(page);
+  await page.goto('/dashboard');
+  await page.getByRole('button',{name:'Reports',exact:true}).click();
+
+  await expect(page.getByRole('cell',{name:'Asha Rao'})).toBeVisible();
+  await expect(page.getByRole('cell',{name:'2h 0m'})).toBeVisible();
+  await expect(page.getByText('Registered people').locator('..').getByText('1',{exact:true})).toBeVisible();
+
+  await page.getByRole('button',{name:'Vehicle traffic',exact:true}).click();
+  await expect(page.getByRole('cell',{name:'TEST123'})).toBeVisible();
+  await expect(page.getByRole('cell',{name:'2h 0m'})).toBeVisible();
+  await expect(page.getByRole('cell',{name:'2',exact:true})).toBeVisible();
 });
 
 test('Camera analytics shows face and plate events only for the selected camera',async({page})=>{

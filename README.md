@@ -414,8 +414,9 @@ The management API exposes `GET /api/v1/alerts`, acknowledgement at
 The bootstrap also installs, but does not enable, `tvt-anpr-report.timer`
 (daily vehicle entry/exit) and `tvt-anpr-report-attendance.timer` (daily
 attendance). Both read their content live from apexfabric-control at send
-time — a gate only appears in either report once a camera has saved Entry
-and Exit lines (a camera's Zones & Lines tab in the console). Edit
+time. Attendance needs saved Entry and Exit lines, which may be on different
+plant gates; vehicle duration needs at least two accepted ANPR detections from
+a configured capture zone or line (a camera's Zones & Lines tab). Edit
 `/etc/tvt/anpr-report.env` to set a SendGrid-verified sender and recipient.
 Install the restricted SendGrid key separately:
 
@@ -431,9 +432,9 @@ The report window is 09:00 inclusive to 18:00 exclusive. Each non-persistent
 timer fires once (18:30 Asia/Kolkata for vehicle traffic, 18:35 for
 attendance) — there is no late catch-up or same-day retry, tracked per
 report kind in `/var/lib/tvt-reporting/reporting.sqlite3`. The vehicle email
-reports entered/exited counts and attaches per-vehicle rows using opaque
-references; the attendance email reports total time inside and attaches
-per-person rows by internal person ID. Raw number plates and person display
+reports first/last detection duration and attaches per-vehicle rows using
+opaque references; the attendance email reports the sum of completed visits
+and attaches one total row per registered internal person ID. Raw number plates and person display
 names are never emailed or logged — they stay in apexfabric's local business
 store and the loopback management API/UI.
 

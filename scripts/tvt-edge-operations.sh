@@ -1926,11 +1926,19 @@ install -o root -g root -m 0644 \
   "${REPO_ROOT}/deploy/systemd/apexfabric-control.service" \
   /etc/systemd/system/apexfabric-control.service
 systemctl daemon-reload
-systemctl enable --now apexfabric-control.service
+systemctl enable apexfabric-control.service
+# The application release is selected through /opt/tvt/current and
+# /opt/tvt/venv symlinks. Merely enabling an already-running service leaves
+# its Python process on the previous release, so every install/upgrade must
+# start a fresh process after those links change.
+systemctl restart apexfabric-control.service
 
 ready=false
 for _attempt in {1..30}; do
-  if curl --fail --silent --show-error --max-time 2 http://127.0.0.1:8088/api/status >/dev/null 2>&1; then
+  # /api/status performs live cluster queries and can legitimately take more
+  # than two seconds on a busy edge. Use the lightweight customer endpoint
+  # as the process-readiness probe; cluster health is verified separately.
+  if curl --fail --silent --show-error --max-time 2 http://127.0.0.1:8088/api/customer >/dev/null 2>&1; then
     ready=true
     break
   fi
@@ -4129,8 +4137,14 @@ import json
 import sys
 
 health = json.loads(sys.argv[1])
-if health.get("status") != "healthy":
-    raise SystemExit("TVT API is not healthy after upgrade")
+if health.get("status") not in {"healthy", "degraded"}:
+    raise SystemExit("TVT API returned an invalid health state after upgrade")
+if health.get("service") != "healthy" or health.get("database") != "healthy":
+    raise SystemExit("TVT API or database is not healthy after upgrade")
+components = health.get("components", {})
+for component_name in ("host", "database", "k3s_api"):
+    if components.get(component_name, {}).get("status") != "healthy":
+        raise SystemExit(f"TVT core component {component_name} is not healthy after upgrade")
 PY
 curl --fail --silent --show-error --max-time 15 http://127.0.0.1:18081/dashboard/ >/dev/null
 
