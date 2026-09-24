@@ -8,6 +8,7 @@ by OCR plate text, not by embedding.
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -16,8 +17,8 @@ from typing import Any
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS attendance_sessions (
   id TEXT PRIMARY KEY, person_id TEXT NOT NULL, gate TEXT NOT NULL,
-  entry_event_id TEXT, entry_time REAL, entry_zone_id TEXT,
-  exit_event_id TEXT, exit_time REAL, exit_zone_id TEXT,
+  entry_event_id TEXT, entry_time REAL, entry_zone_id TEXT, entry_camera_id TEXT,
+  exit_event_id TEXT, exit_time REAL, exit_zone_id TEXT, exit_camera_id TEXT,
   status TEXT NOT NULL CHECK(status IN ('open','closed','forced_closed')),
   duration_seconds REAL
 );
@@ -32,6 +33,35 @@ CREATE TABLE IF NOT EXISTS vehicle_sessions (
 CREATE INDEX IF NOT EXISTS vehicle_open ON vehicle_sessions(plate_text, gate, status);
 CREATE INDEX IF NOT EXISTS vehicle_entry_time ON vehicle_sessions(entry_time);
 '''
+
+def ensure_schema(connection) -> None:
+    """Create or additively upgrade reporting tables and retain camera identity."""
+    connection.executescript(SCHEMA)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(attendance_sessions)")}
+    camera_columns = (
+        ("entry_event_id", "entry_camera_id"),
+        ("exit_event_id", "exit_camera_id"),
+    )
+    for _event_column, camera_column in camera_columns:
+        if camera_column not in columns:
+            connection.execute(f"ALTER TABLE attendance_sessions ADD COLUMN {camera_column} TEXT")
+    for event_column, camera_column in camera_columns:
+        rows = connection.execute(
+            f"SELECT id, {event_column} FROM attendance_sessions "
+            f"WHERE {camera_column} IS NULL AND {event_column} IS NOT NULL"
+        ).fetchall()
+        for session_id, event_id in rows:
+            retained = connection.execute(
+                "SELECT payload_json FROM events WHERE event_id = ?", (event_id,)
+            ).fetchone()
+            if retained is None:
+                continue
+            payload = json.loads(retained[0])
+            camera_id = payload.get("camera_id") if isinstance(payload, dict) else None
+            if isinstance(camera_id, str) and camera_id:
+                connection.execute(
+                    f"UPDATE attendance_sessions SET {camera_column} = ? WHERE id = ?", (camera_id, session_id)
+                )
 
 PLATE_CONFIDENCE_FLOOR = float(os.getenv("APEXFABRIC_PLATE_CONFIDENCE_FLOOR", "0.5"))
 
@@ -77,6 +107,8 @@ def evaluate_attendance(
         return
     gate, direction = role
     zone_id = location["id"]
+    camera_id_value = payload.get("camera_id")
+    camera_id = camera_id_value if isinstance(camera_id_value, str) and camera_id_value else None
     # entry_time/exit_time are the numeric ingest clock (received_at), not the
     # payload's RFC3339 occurred-at string -- duration_seconds arithmetic and
     # the report date-range filter both need a real number, and telemetry.py's
@@ -87,23 +119,23 @@ def evaluate_attendance(
         if _open_session(connection, "attendance_sessions", "person_id", resolved_person_id, gate):
             return
         connection.execute(
-            "INSERT INTO attendance_sessions(id, person_id, gate, entry_event_id, entry_time, entry_zone_id, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'open')",
-            (uuid.uuid4().hex, resolved_person_id, gate, event_id, received_at, zone_id),
+            "INSERT INTO attendance_sessions(id, person_id, gate, entry_event_id, entry_time, entry_zone_id, entry_camera_id, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'open')",
+            (uuid.uuid4().hex, resolved_person_id, gate, event_id, received_at, zone_id, camera_id),
         )
     else:
         open_row = _open_session(connection, "attendance_sessions", "person_id", resolved_person_id, gate)
         if open_row:
             connection.execute(
-                "UPDATE attendance_sessions SET exit_event_id=?, exit_time=?, exit_zone_id=?, status='closed', "
+                "UPDATE attendance_sessions SET exit_event_id=?, exit_time=?, exit_zone_id=?, exit_camera_id=?, status='closed', "
                 "duration_seconds = ? - entry_time WHERE id = ?",
-                (event_id, received_at, zone_id, received_at, open_row[0]),
+                (event_id, received_at, zone_id, camera_id, received_at, open_row[0]),
             )
         else:
             connection.execute(
-                "INSERT INTO attendance_sessions(id, person_id, gate, exit_event_id, exit_time, exit_zone_id, status) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'closed')",
-                (uuid.uuid4().hex, resolved_person_id, gate, event_id, received_at, zone_id),
+                "INSERT INTO attendance_sessions(id, person_id, gate, exit_event_id, exit_time, exit_zone_id, exit_camera_id, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'closed')",
+                (uuid.uuid4().hex, resolved_person_id, gate, event_id, received_at, zone_id, camera_id),
             )
 
 
@@ -200,12 +232,12 @@ def attendance_log(connection, limit: int = 10) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 100))
     query = (
         "SELECT e.id AS session_id, e.person_id AS person_id, persons.display_name AS display_name, "
-        "e.gate AS gate, e.action AS action, e.ts AS time "
+        "e.gate AS gate, e.action AS action, e.ts AS time, e.camera_id AS camera_id "
         "FROM ("
-        "  SELECT id, person_id, gate, entry_time AS ts, 'entry' AS action "
+        "  SELECT id, person_id, gate, entry_camera_id AS camera_id, entry_time AS ts, 'entry' AS action "
         "  FROM attendance_sessions WHERE entry_time IS NOT NULL"
         "  UNION ALL "
-        "  SELECT id, person_id, gate, exit_time AS ts, 'exit' AS action "
+        "  SELECT id, person_id, gate, exit_camera_id AS camera_id, exit_time AS ts, 'exit' AS action "
         "  FROM attendance_sessions WHERE exit_time IS NOT NULL"
         ") AS e "
         "JOIN persons ON persons.person_id = e.person_id "

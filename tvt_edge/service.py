@@ -513,6 +513,304 @@ class ManagementService:
             ]
             return compile_camera_config(inputs)
 
+    @staticmethod
+    def _compile_camera_geometry(
+        session: Session, camera_id: uuid.UUID
+    ) -> dict[str, Any]:
+        shapes = session.scalars(
+            select(CameraGeometryShape).where(
+                CameraGeometryShape.camera_id == camera_id,
+                CameraGeometryShape.deleted_at.is_(None),
+            )
+        ).all()
+        return compile_camera_config(
+            [
+                ShapeInput(
+                    kind=shape.kind,
+                    shape_key=shape.shape_key,
+                    name=shape.name,
+                    points=shape.points,
+                    role_key=shape.role_key,
+                    direction=shape.direction,
+                    inside_side=shape.inside_side,
+                    enabled=shape.enabled,
+                )
+                for shape in shapes
+            ]
+        )
+
+    @staticmethod
+    def _camera_for_geometry_update(session: Session, camera_key: str) -> Camera:
+        camera = session.scalar(
+            select(Camera)
+            .where(Camera.camera_key == camera_key, Camera.deleted_at.is_(None))
+            .with_for_update()
+        )
+        if camera is None:
+            raise ValueError(f"unknown camera {camera_key!r}")
+        return camera
+
+    @staticmethod
+    def _geometry_catalog_entry(
+        session: Session, bundle_revision: SolutionBundleRevision
+    ) -> SolutionCatalogEntry | None:
+        catalog_id = bundle_revision.canonical_bundle.get("configuration", {}).get(
+            "catalog_id"
+        )
+        if not catalog_id:
+            return None
+        entry = session.get(SolutionCatalogEntry, catalog_id)
+        if entry is None:
+            return None
+        solution_pack = PACK_NAME_TO_SOLUTION_PACK.get(
+            entry.contract_json.get("name"), entry.contract_json.get("name")
+        )
+        return entry if solution_pack == "tvt-mills-pilot" else None
+
+    @staticmethod
+    def _merge_camera_geometry(
+        configuration: dict[str, Any], geometry: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Replace geometry-owned keys without discarding unrelated config."""
+        merged = copy.deepcopy(configuration)
+        merged.pop("lines", None)
+        if "lines" in geometry:
+            merged["lines"] = copy.deepcopy(geometry["lines"])
+
+        current_zones = merged.get("zones")
+        zones = copy.deepcopy(current_zones) if isinstance(current_zones, dict) else {}
+        zones.pop("anpr", None)
+        geometry_zones = geometry.get("zones")
+        if isinstance(geometry_zones, dict) and "anpr" in geometry_zones:
+            zones["anpr"] = copy.deepcopy(geometry_zones["anpr"])
+        if zones:
+            merged["zones"] = zones
+        else:
+            merged.pop("zones", None)
+        return merged
+
+    @staticmethod
+    def _assignment_desired_state(
+        session: Session,
+        deployment: SolutionDeployment,
+        source: DeploymentAssignmentSet,
+        entry: SolutionCatalogEntry,
+        desired_revision: int,
+        configuration_overrides: dict[uuid.UUID, dict[str, Any]],
+    ) -> dict[str, Any]:
+        site = session.get(Site, deployment.site_id)
+        if site is None:
+            raise ValueError("deployment site is missing")
+        solution_pack = PACK_NAME_TO_SOLUTION_PACK.get(
+            entry.contract_json.get("name"), entry.contract_json.get("name")
+        )
+        desired_cameras: list[dict[str, Any]] = []
+        camera_assignments = session.scalars(
+            select(CameraDeploymentAssignment)
+            .where(CameraDeploymentAssignment.assignment_set_id == source.id)
+            .order_by(CameraDeploymentAssignment.ordinal)
+        ).all()
+        for camera_assignment in camera_assignments:
+            camera = session.get(Camera, camera_assignment.camera_id)
+            if camera is None:
+                raise ValueError("deployment camera is missing")
+            app_assignments = session.scalars(
+                select(CameraApplicationAssignment).where(
+                    CameraApplicationAssignment.camera_assignment_id
+                    == camera_assignment.id
+                )
+            ).all()
+            configurations = {
+                json.dumps(item.configuration, sort_keys=True, separators=(",", ":"))
+                for item in app_assignments
+            }
+            if len(configurations) > 1:
+                raise ValueError("camera applications have inconsistent geometry")
+            configuration = configuration_overrides.get(camera.id)
+            if configuration is None:
+                configuration = (
+                    json.loads(next(iter(configurations))) if configurations else {}
+                )
+            desired_cameras.append(
+                {
+                    "camera_id": camera.camera_key,
+                    "source": (
+                        f"file:/run/secrets/apexfabric/{camera.camera_key}.rtsp"
+                    ),
+                    "solution_pack": solution_pack,
+                    "fps": camera_assignment.requested_fps,
+                    "apps": [item.use_case_key for item in app_assignments],
+                    "config": copy.deepcopy(configuration),
+                }
+            )
+        return {
+            "edge_id": site.edge_id,
+            "revision": desired_revision,
+            "cameras": desired_cameras,
+        }
+
+    def _queue_camera_geometry_deployments(
+        self,
+        session: Session,
+        camera: Camera,
+        compiled_geometry: dict[str, Any],
+        actor: str,
+    ) -> None:
+        deployments = session.scalars(
+            select(SolutionDeployment)
+            .join(
+                DeploymentSyncState,
+                DeploymentSyncState.deployment_id == SolutionDeployment.id,
+            )
+            .join(
+                CameraDeploymentAssignment,
+                CameraDeploymentAssignment.assignment_set_id
+                == DeploymentSyncState.desired_assignment_set_id,
+            )
+            .where(
+                CameraDeploymentAssignment.camera_id == camera.id,
+                SolutionDeployment.deleted_at.is_(None),
+            )
+            .order_by(SolutionDeployment.deployment_key)
+            .with_for_update()
+        ).unique().all()
+        for deployment in deployments:
+            sync = session.get(DeploymentSyncState, deployment.id)
+            source = (
+                session.get(DeploymentAssignmentSet, sync.desired_assignment_set_id)
+                if sync is not None
+                else None
+            )
+            if source is None:
+                continue
+            bundle_revision = session.get(
+                SolutionBundleRevision, source.bundle_revision_id
+            )
+            if bundle_revision is None:
+                raise ValueError("deployment bundle revision is unavailable")
+            entry = self._geometry_catalog_entry(session, bundle_revision)
+            if entry is None:
+                continue
+
+            target = session.scalar(
+                select(CameraDeploymentAssignment).where(
+                    CameraDeploymentAssignment.assignment_set_id == source.id,
+                    CameraDeploymentAssignment.camera_id == camera.id,
+                )
+            )
+            if target is None:
+                continue
+            target_app_assignments = session.scalars(
+                select(CameraApplicationAssignment).where(
+                    CameraApplicationAssignment.camera_assignment_id == target.id
+                )
+            ).all()
+            configurations = {
+                json.dumps(item.configuration, sort_keys=True, separators=(",", ":"))
+                for item in target_app_assignments
+            }
+            if len(configurations) > 1:
+                raise ValueError("camera applications have inconsistent geometry")
+            target_configuration = (
+                json.loads(next(iter(configurations))) if configurations else {}
+            )
+
+            enrollment_sessions = session.scalars(
+                select(EnrollmentSession)
+                .where(
+                    EnrollmentSession.deployment_id == deployment.id,
+                    EnrollmentSession.camera_id == camera.id,
+                    EnrollmentSession.status.in_(ENROLLMENT_ACTIVE_STATUSES),
+                )
+                .with_for_update()
+            ).all()
+            enrollment_windows = session.scalars(
+                select(EnrollmentWindow)
+                .where(
+                    EnrollmentWindow.deployment_id == deployment.id,
+                    EnrollmentWindow.camera_id == camera.id,
+                    EnrollmentWindow.status == "active",
+                )
+                .with_for_update()
+            ).all()
+            for enrollment_session in enrollment_sessions:
+                enrollment_session.prior_config = self._merge_camera_geometry(
+                    enrollment_session.prior_config, compiled_geometry
+                )
+                enrollment_session.row_version += 1
+            for enrollment_window in enrollment_windows:
+                enrollment_window.prior_config = self._merge_camera_geometry(
+                    enrollment_window.prior_config, compiled_geometry
+                )
+            if (
+                any(item.status != "restoring" for item in enrollment_sessions)
+                or enrollment_windows
+            ):
+                continue
+
+            configuration = self._merge_camera_geometry(
+                target_configuration, compiled_geometry
+            )
+
+            desired_state = self._assignment_desired_state(
+                session,
+                deployment,
+                source,
+                entry,
+                deployment.next_desired_revision,
+                {camera.id: configuration},
+            )
+            errors = sorted(
+                Draft202012Validator(entry.desired_state_schema).iter_errors(
+                    desired_state
+                ),
+                key=lambda error: ".".join(
+                    str(value) for value in error.absolute_path
+                ),
+            )
+            if errors:
+                error = errors[0]
+                location = (
+                    ".".join(str(value) for value in error.absolute_path)
+                    or "desired_state"
+                )
+                raise ValueError(
+                    f"invalid tvt-mills-pilot geometry at {location}: {error.message}"
+                )
+
+            bundle = copy.deepcopy(bundle_revision.canonical_bundle)
+            bundle.setdefault("configuration", {})["desired_state_sha256"] = (
+                hashlib.sha256(
+                    json.dumps(
+                        desired_state, sort_keys=True, separators=(",", ":")
+                    ).encode()
+                ).hexdigest()
+            )
+            validate_tvt_bundle(bundle)
+            next_bundle = self._store_bundle_revision(
+                session, deployment, bundle, "geometry_update", actor
+            )
+            clone = self._clone_assignment_set(
+                session,
+                deployment,
+                source,
+                next_bundle.id,
+                actor,
+                (
+                    f"geometry:{camera.camera_key}:{camera.geometry_revision}:"
+                    f"{deployment.deployment_key}"
+                ),
+                configuration_overrides={camera.id: configuration},
+                geometry_revision_overrides={
+                    camera.id: camera.geometry_revision
+                },
+            )
+            for enrollment_session in enrollment_sessions:
+                if enrollment_session.status == "restoring":
+                    enrollment_session.restoration_assignment_set_id = clone.id
+                    enrollment_session.restoration_revision = clone.desired_revision
+
+
     def create_camera_zone(
         self,
         camera_key: str,
@@ -522,7 +820,7 @@ class ManagementService:
         request_id: str,
     ) -> dict[str, Any]:
         with self.sessions.begin() as session:
-            camera = self._camera(session, camera_key)
+            camera = self._camera_for_geometry_update(session, camera_key)
             existing_keys = set(
                 session.scalars(
                     select(CameraGeometryShape.shape_key).where(
@@ -550,6 +848,9 @@ class ManagementService:
             )
             session.add(row)
             session.flush()
+            camera.geometry_revision += 1
+            configuration = self._compile_camera_geometry(session, camera.id)
+            self._queue_camera_geometry_deployments(session, camera, configuration, actor)
             self._audit(
                 session,
                 actor=actor,
@@ -588,7 +889,7 @@ class ManagementService:
             )
         )
         with self.sessions.begin() as session:
-            camera = self._camera(session, camera_key)
+            camera = self._camera_for_geometry_update(session, camera_key)
             existing = session.scalar(
                 select(CameraGeometryShape).where(
                     CameraGeometryShape.camera_id == camera.id,
@@ -612,6 +913,9 @@ class ManagementService:
             )
             session.add(row)
             session.flush()
+            camera.geometry_revision += 1
+            configuration = self._compile_camera_geometry(session, camera.id)
+            self._queue_camera_geometry_deployments(session, camera, configuration, actor)
             self._audit(
                 session,
                 actor=actor,
@@ -623,6 +927,104 @@ class ManagementService:
             )
             return self._geometry_view(row)
 
+    def update_camera_geometry(
+        self,
+        camera_key: str,
+        shape_id: str,
+        *,
+        name: str,
+        points: list[list[float]],
+        role_key: str | None,
+        direction: str | None,
+        inside_side: str | None,
+        actor: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        try:
+            shape_uuid = uuid.UUID(shape_id)
+        except ValueError as error:
+            raise ValueError(f"unknown geometry shape {shape_id!r}") from error
+        normalized_points = [[float(x), float(y)] for x, y in points]
+        with self.sessions.begin() as session:
+            camera = self._camera_for_geometry_update(session, camera_key)
+            shape = session.scalar(
+                select(CameraGeometryShape)
+                .where(
+                    CameraGeometryShape.id == shape_uuid,
+                    CameraGeometryShape.camera_id == camera.id,
+                    CameraGeometryShape.deleted_at.is_(None),
+                )
+                .with_for_update()
+            )
+            if shape is None:
+                raise ValueError(f"unknown geometry shape {shape_id!r}")
+
+            if shape.kind == "zone":
+                if role_key is not None or direction is not None or inside_side is not None:
+                    raise ValueError(
+                        "a zone carries no role_key, direction, or inside_side"
+                    )
+                shape_key = shape.shape_key
+            else:
+                if role_key is None or direction is None or inside_side is None:
+                    raise ValueError(
+                        "a line requires role_key, direction, and inside_side"
+                    )
+                if not DNS_ID.fullmatch(role_key):
+                    raise ValueError("role_key must be a DNS-safe identifier")
+                shape_key = line_shape_key(role_key, direction)
+                duplicate = session.scalar(
+                    select(CameraGeometryShape.id).where(
+                        CameraGeometryShape.camera_id == camera.id,
+                        CameraGeometryShape.shape_key == shape_key,
+                        CameraGeometryShape.id != shape.id,
+                        CameraGeometryShape.deleted_at.is_(None),
+                    )
+                )
+                if duplicate is not None:
+                    raise ValueError(
+                        f"camera already has a {direction} line for gate {role_key!r}"
+                    )
+
+            validate_shape(
+                ShapeInput(
+                    kind=shape.kind,
+                    shape_key=shape_key,
+                    name=name,
+                    points=normalized_points,
+                    role_key=role_key,
+                    direction=direction,
+                    inside_side=inside_side,
+                    enabled=shape.enabled,
+                )
+            )
+            shape.shape_key = shape_key
+            shape.name = name
+            shape.points = normalized_points
+            shape.role_key = role_key
+            shape.direction = direction
+            shape.inside_side = inside_side
+            session.flush()
+            camera.geometry_revision += 1
+            configuration = self._compile_camera_geometry(session, camera.id)
+            self._queue_camera_geometry_deployments(
+                session, camera, configuration, actor
+            )
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action=f"camera.geometry.{shape.kind}.update",
+                target_type="camera",
+                target_id=camera_key,
+                details={
+                    "shape_key": shape.shape_key,
+                    "role_key": shape.role_key,
+                    "direction": shape.direction,
+                },
+            )
+            return self._geometry_view(shape)
+
     def delete_camera_geometry(
         self, camera_key: str, shape_id: str, actor: str, request_id: str
     ) -> None:
@@ -631,11 +1033,15 @@ class ManagementService:
         except ValueError as error:
             raise ValueError(f"unknown geometry shape {shape_id!r}") from error
         with self.sessions.begin() as session:
-            camera = self._camera(session, camera_key)
+            camera = self._camera_for_geometry_update(session, camera_key)
             shape = session.get(CameraGeometryShape, shape_uuid)
             if shape is None or shape.camera_id != camera.id or shape.deleted_at is not None:
                 raise ValueError(f"unknown geometry shape {shape_id!r}")
             shape.deleted_at = utc_now()
+            session.flush()
+            camera.geometry_revision += 1
+            configuration = self._compile_camera_geometry(session, camera.id)
+            self._queue_camera_geometry_deployments(session, camera, configuration, actor)
             self._audit(
                 session,
                 actor=actor,
@@ -657,6 +1063,161 @@ class ManagementService:
         with self.sessions() as session:
             camera = self._camera(session, camera_key)
             return self._camera_view(session, camera)
+
+    def get_camera_deployment_status(self, camera_key: str) -> dict[str, Any]:
+        with self.sessions() as session:
+            camera = self._camera(session, camera_key)
+            deployments = session.scalars(
+                select(SolutionDeployment)
+                .join(
+                    DeploymentSyncState,
+                    DeploymentSyncState.deployment_id == SolutionDeployment.id,
+                )
+                .join(
+                    CameraDeploymentAssignment,
+                    CameraDeploymentAssignment.assignment_set_id
+                    == DeploymentSyncState.desired_assignment_set_id,
+                )
+                .where(
+                    CameraDeploymentAssignment.camera_id == camera.id,
+                    SolutionDeployment.deleted_at.is_(None),
+                )
+                .order_by(SolutionDeployment.deployment_key)
+            ).unique().all()
+            items: list[dict[str, Any]] = []
+            for deployment in deployments:
+                sync = session.get(DeploymentSyncState, deployment.id)
+                desired = (
+                    session.get(
+                        DeploymentAssignmentSet, sync.desired_assignment_set_id
+                    )
+                    if sync is not None
+                    else None
+                )
+                if desired is None:
+                    continue
+                desired_assignment = session.scalar(
+                    select(CameraDeploymentAssignment).where(
+                        CameraDeploymentAssignment.assignment_set_id == desired.id,
+                        CameraDeploymentAssignment.camera_id == camera.id,
+                    )
+                )
+                if desired_assignment is None:
+                    continue
+                applied = (
+                    session.get(
+                        DeploymentAssignmentSet, sync.applied_assignment_set_id
+                    )
+                    if sync.applied_assignment_set_id is not None
+                    else None
+                )
+                applied_assignment = (
+                    session.scalar(
+                        select(CameraDeploymentAssignment).where(
+                            CameraDeploymentAssignment.assignment_set_id == applied.id,
+                            CameraDeploymentAssignment.camera_id == camera.id,
+                        )
+                    )
+                    if applied is not None
+                    else None
+                )
+                bundle_revision = session.get(
+                    SolutionBundleRevision, desired.bundle_revision_id
+                )
+                applicable = (
+                    bundle_revision is not None
+                    and self._geometry_catalog_entry(session, bundle_revision)
+                    is not None
+                )
+                enrollment_owned = (
+                    session.scalar(
+                        select(EnrollmentSession.id).where(
+                            EnrollmentSession.deployment_id == deployment.id,
+                            EnrollmentSession.camera_id == camera.id,
+                            EnrollmentSession.status.in_(
+                                ENROLLMENT_ACTIVE_STATUSES
+                            ),
+                        )
+                    )
+                    is not None
+                    or session.scalar(
+                        select(EnrollmentWindow.id).where(
+                            EnrollmentWindow.deployment_id == deployment.id,
+                            EnrollmentWindow.camera_id == camera.id,
+                            EnrollmentWindow.status == "active",
+                        )
+                    )
+                    is not None
+                )
+                if not applicable:
+                    state = "not_applicable"
+                elif enrollment_owned:
+                    state = "waiting_for_enrollment"
+                elif sync.state in {"pending", "applying", "applied", "failed"}:
+                    state = sync.state
+                else:
+                    state = "pending"
+                attempt = session.scalar(
+                    select(DeploymentSyncAttempt)
+                    .where(
+                        DeploymentSyncAttempt.deployment_id == deployment.id,
+                        DeploymentSyncAttempt.desired_revision
+                        == desired.desired_revision,
+                    )
+                    .order_by(DeploymentSyncAttempt.attempt_number.desc())
+                    .limit(1)
+                )
+                retry_at = (
+                    attempt.retry_at
+                    if attempt is not None and attempt.retry_at is not None
+                    else sync.next_attempt_at
+                )
+                items.append(
+                    {
+                        "deployment_id": deployment.deployment_key,
+                        "state": state,
+                        "phase": attempt.phase if attempt is not None else None,
+                        "desired_revision": desired.desired_revision,
+                        "applied_revision": (
+                            applied.desired_revision if applied is not None else None
+                        ),
+                        "desired_geometry_revision": (
+                            desired_assignment.geometry_revision
+                        ),
+                        "applied_geometry_revision": (
+                            applied_assignment.geometry_revision
+                            if applied_assignment is not None
+                            else None
+                        ),
+                        "last_error_code": (
+                            sync.last_error_code
+                            or (attempt.error_code if attempt is not None else None)
+                        ),
+                        "retry_at": retry_at.isoformat() if retry_at else None,
+                    }
+                )
+
+            if not items:
+                overall_state = "not_assigned"
+            else:
+                priority = {
+                    "failed": 6,
+                    "applying": 5,
+                    "pending": 4,
+                    "waiting_for_enrollment": 3,
+                    "applied": 2,
+                    "not_applicable": 1,
+                }
+                overall_state = max(
+                    (item["state"] for item in items),
+                    key=lambda state: priority[state],
+                )
+            return {
+                "camera_id": camera.camera_key,
+                "geometry_revision": camera.geometry_revision,
+                "overall_state": overall_state,
+                "deployments": items,
+            }
 
     def camera_workload_names(self, camera_key: str) -> list[str]:
         """K8s Deployment names (deployment_key-app_name) currently serving this camera."""
@@ -814,6 +1375,7 @@ class ManagementService:
             "friendly_name": camera.friendly_name,
             "manufacturer": camera.manufacturer,
             "model": camera.model,
+            "geometry_revision": camera.geometry_revision,
             "configured": profile is not None,
             "enabled": camera.enabled,
             "credentials_configured": credential is not None,
@@ -1499,6 +2061,7 @@ class ManagementService:
                     credential_version_id=credential.id if credential else None,
                     ordinal=item["ordinal"],
                     requested_fps=int(item.get("fps", 8)),
+                    geometry_revision=camera.geometry_revision,
                 )
                 session.add(camera_assignment)
                 session.flush()
@@ -2286,6 +2849,41 @@ class ManagementService:
                 )
         return {"person_id": person_id, "naming_status": "named"}
 
+    def set_report_person_display_name(
+        self, *, person_id: str, display_name: str, apex: Any, actor: str, request_id: str
+    ) -> dict[str, Any]:
+        """Name an unnamed identity surfaced by attendance reporting.
+
+        Ordinary face-recognition traffic can create auto-enrolled people that
+        are not associated with a TVT enrollment session. Reports must offer a
+        narrow naming path for those records without copying the display name
+        into the management database or its audit log.
+        """
+        name = display_name.strip()
+        if not name or len(name) > 160:
+            raise ValueError("display_name is required (maximum 160 characters)")
+        person = next(
+            (item for item in apex.list_persons() if item.get("person_id") == person_id),
+            None,
+        )
+        if person is None:
+            raise ValueError("unknown person_id")
+        if person.get("display_name"):
+            return {"person_id": person_id, "naming_status": "named"}
+
+        apex.rename_person(person_id, name)
+        with self.sessions.begin() as session:
+            self._audit(
+                session,
+                actor=actor,
+                request_id=request_id,
+                action="reports.person.name",
+                target_type="person",
+                target_id=person_id,
+                details={},
+            )
+        return {"person_id": person_id, "naming_status": "named"}
+
     def reconcile_enrollment_sessions(
         self, apex: Any, *, now: datetime | None = None
     ) -> list[dict[str, Any]]:
@@ -2641,6 +3239,7 @@ class ManagementService:
                     credential_version_id=credential.id if credential else None,
                     ordinal=item["ordinal"],
                     requested_fps=int(item.get("fps", 8)),
+                    geometry_revision=camera.geometry_revision,
                 )
                 session.add(camera_assignment)
                 session.flush()
@@ -2743,6 +3342,8 @@ class ManagementService:
         actor: str,
         idempotency_key: str,
         credential_overrides: dict[uuid.UUID, uuid.UUID | None] | None = None,
+        configuration_overrides: dict[uuid.UUID, dict[str, Any]] | None = None,
+        geometry_revision_overrides: dict[uuid.UUID, int] | None = None,
     ) -> DeploymentAssignmentSet:
         clone = DeploymentAssignmentSet(
             deployment_id=deployment.id,
@@ -2763,6 +3364,10 @@ class ManagementService:
             credential_id = (credential_overrides or {}).get(
                 original.camera_id, original.credential_version_id
             )
+            configuration = (configuration_overrides or {}).get(original.camera_id)
+            geometry_revision = (geometry_revision_overrides or {}).get(
+                original.camera_id, original.geometry_revision
+            )
             copied = CameraDeploymentAssignment(
                 assignment_set_id=clone.id,
                 camera_id=original.camera_id,
@@ -2770,6 +3375,7 @@ class ManagementService:
                 credential_version_id=credential_id,
                 ordinal=original.ordinal,
                 requested_fps=original.requested_fps,
+                geometry_revision=geometry_revision,
             )
             session.add(copied)
             session.flush()
@@ -2784,7 +3390,9 @@ class ManagementService:
                         camera_assignment_id=copied.id,
                         bundle_application=app.bundle_application,
                         use_case_key=app.use_case_key,
-                        configuration=copy.deepcopy(app.configuration),
+                        configuration=copy.deepcopy(
+                            configuration if configuration is not None else app.configuration
+                        ),
                     )
                 )
         self._set_desired(session, deployment.id, clone.id)

@@ -55,6 +55,12 @@
 .cu-plate-list li:last-child{border-bottom:0}
 .cu-plate-list strong{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:15px;letter-spacing:1px}
 .cu-plate-list time{margin-left:auto;color:var(--cu-muted);font-size:11px}
+.cu-attendance-list li{padding:13px 18px;flex-wrap:wrap}
+.cu-attendance-copy{flex:1;min-width:260px;line-height:1.6}
+.cu-attendance-list .cu-attendance-copy strong{font-family:inherit;font-size:13px;letter-spacing:0}
+.cu-attendance-list>.cu-attendance-name-form{flex-basis:100%;display:flex;align-items:flex-end;gap:10px;padding-top:10px}
+.cu-attendance-name-form label{flex:1;min-width:220px}
+.cu-attendance-name-form input{margin-top:6px}
 .cu-settings-panel .cu-camera-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;padding:18px 0 24px;align-items:start}
 .cu-camera-form label{min-width:0}
 .cu-camera-form .cu-stream-field,.cu-stream-help,.cu-camera-error{grid-column:1/-1}
@@ -66,6 +72,7 @@
 [data-theme='dark'] .customer-app :is(.cu-simple-icon,.cu-plate-icon){background:#30243f;color:#c6a2f6}
 [data-theme='dark'] .customer-app .cu-camera-error{color:#ed9e9e}
 @media(max-width:600px){.cu-camera-metrics{gap:10px}.cu-camera-metrics article{padding:14px;gap:10px;flex-direction:column}.cu-camera-metrics p{font-size:10px}.cu-settings-panel .cu-camera-form{grid-template-columns:minmax(0,1fr)}.cu-plate-list li{gap:10px;padding:12px}.cu-plate-list strong{font-size:13px;letter-spacing:.4px}.cu-plate-list time{font-size:10px}.cu-simple-camera .cu-camera-footer{font-size:9px}}
+@media(max-width:600px){.cu-attendance-copy{min-width:100%}.cu-attendance-list>.cu-attendance-name-form{align-items:stretch;flex-direction:column}.cu-attendance-name-form label{min-width:0}}
 
 .cu-brand-placeholder,.brand-placeholder{border:1px dashed var(--cu-border);border-radius:8px;padding:14px;text-align:center;color:var(--cu-muted);font-size:9px;letter-spacing:1px;margin-bottom:14px}
 .real-feed{position:relative;aspect-ratio:16/9;background:#1f2422;overflow:hidden;color:#d8e2dc;display:grid;place-items:center;border-radius:9px}.real-feed img{width:100%;height:100%;object-fit:cover}.real-feed>span{position:absolute;left:12px;bottom:10px;background:#18211dcc;padding:5px 8px;border-radius:4px;font-size:9px}.feed-empty{font-size:11px;color:#aeb9b2}.cu-camera-card>.real-feed{border-radius:8px 8px 0 0}.cu-camera-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.future-alerts{min-height:calc(100vh - 70px)}
@@ -110,18 +117,29 @@
 .geometry-vertex{fill:#fff;stroke:#7852ce;stroke-width:1}
 .geometry-point-label{position:absolute;transform:translate(-50%,-140%);background:#1d211fcc;color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;white-space:nowrap;pointer-events:none}
 .geometry-shape-list,.geometry-editor .cu-device-row{margin-top:8px}
+.geometry-shape-actions{display:flex;gap:8px}
+.camera-deployment-status{margin-top:24px;padding-top:20px;border-top:1px solid var(--cu-border)}
+.camera-deployment-status-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.camera-deployment-status-heading h3{margin:0}
+.camera-deployment-status-row{display:grid;grid-template-columns:minmax(160px,1fr) auto;gap:10px 16px;padding:14px 0;border-top:1px solid var(--cu-border)}
+.camera-deployment-status-row:first-of-type{margin-top:12px}
+.camera-deployment-status-row>div>small{display:block;margin-top:5px;color:var(--cu-muted);font-size:9px}
+.camera-deployment-status-row dl{grid-column:1/-1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}
+.camera-deployment-status-row dl>div{display:flex;justify-content:space-between;gap:10px;padding:8px;border-radius:6px;background:var(--cu-soft,#f8f7fb);font-size:9px}
+.camera-deployment-status-row :is(dt,dd){margin:0}.camera-deployment-status-row dt{color:var(--cu-muted)}.camera-deployment-status-row dd{text-align:right}.camera-deployment-status-row dd small{display:block;color:var(--cu-muted)}
 [data-theme='dark'] .customer-app .geometry-canvas{border-color:var(--cu-border)}
 
 /* Generic status pill (severity, lifecycle, sync state, etc). */
 .cu-pill{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:20px;font-size:9px;font-weight:600;white-space:nowrap;text-transform:capitalize}
 .cu-pill-healthy,.cu-pill-active,.cu-pill-ready,.cu-pill-running,.cu-pill-entry,.cu-pill-applied,.cu-pill-true,.cu-pill-succeeded{background:#e6f4ec;color:#1f8a53}
+.cu-pill-applying,.cu-pill-waiting_for_enrollment{background:#fdf1de;color:#b07a1f}
 .cu-pill-degraded,.cu-pill-warning,.cu-pill-progressing,.cu-pill-pending{background:#fdf1de;color:#b07a1f}
 .cu-pill-unavailable,.cu-pill-critical,.cu-pill-failed,.cu-pill-exit,.cu-pill-false{background:#fbe7e6;color:#c1493f}
-.cu-pill-unconfigured,.cu-pill-resolved,.cu-pill-acknowledged{background:#eee8f6;color:#7a6a94}
+.cu-pill-unconfigured,.cu-pill-resolved,.cu-pill-acknowledged,.cu-pill-not_assigned,.cu-pill-not_applicable{background:#eee8f6;color:#7a6a94}
 [data-theme='dark'] .customer-app :is(.cu-pill-healthy,.cu-pill-active,.cu-pill-ready,.cu-pill-running,.cu-pill-applied,.cu-pill-true,.cu-pill-succeeded){background:#1c302b;color:#80d1ad}
-[data-theme='dark'] .customer-app :is(.cu-pill-degraded,.cu-pill-warning,.cu-pill-progressing,.cu-pill-pending){background:#332a1c;color:#e5bf78}
+[data-theme='dark'] .customer-app :is(.cu-pill-degraded,.cu-pill-warning,.cu-pill-progressing,.cu-pill-pending,.cu-pill-applying,.cu-pill-waiting_for_enrollment){background:#332a1c;color:#e5bf78}
 [data-theme='dark'] .customer-app :is(.cu-pill-unavailable,.cu-pill-critical,.cu-pill-failed,.cu-pill-false){background:#301c1c;color:#e59a8f}
-[data-theme='dark'] .customer-app :is(.cu-pill-unconfigured,.cu-pill-resolved,.cu-pill-acknowledged){background:#30243f;color:#c6a2f6}
+[data-theme='dark'] .customer-app :is(.cu-pill-unconfigured,.cu-pill-resolved,.cu-pill-acknowledged,.cu-pill-not_assigned,.cu-pill-not_applicable){background:#30243f;color:#c6a2f6}
 
 /* Generic data table used by Solutions, Cluster, Operations, Reports. */
 .cu-table-wrap{overflow:auto}
@@ -158,9 +176,7 @@
 .deployment-app-choices{display:flex;flex-wrap:wrap;gap:10px;font-size:10px;color:var(--cu-muted)}
 .deployment-app-choices label{display:flex;gap:6px;align-items:center}
 .deployment-app-choices input{width:auto;margin:0}
-.deployment-geometry-field{display:flex;flex-direction:column;gap:6px;font-size:10px;color:var(--cu-muted)}
-.deployment-geometry-field textarea{min-height:80px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px;padding:8px;border:1px solid var(--cu-border);border-radius:6px;width:100%;background:#fff;color:var(--cu-ink)}
-[data-theme='dark'] .customer-app .deployment-geometry-field textarea{background:var(--cu-soft);border-color:#414052}
+.deployment-geometry-summary{margin:0;padding:9px 10px;border:1px solid var(--cu-border);border-radius:6px;background:var(--cu-soft,#f8f7fb);color:var(--cu-muted);font-size:10px}
 [data-theme='dark'] .customer-app .cu-event-facts>div{background:var(--cu-soft);border:1px solid var(--cu-border);color:var(--cu-ink)}
 [data-theme='dark'] .customer-app .cu-event-facts :is(dt,dd){color:inherit}
 @media(max-width:600px){.cu-brand{align-items:center}.cu-brand>img{width:140px}.cu-site-form{align-items:stretch;flex-direction:column}.enrollment-designation{grid-template-columns:1fr}.enrollment-designation form{align-items:stretch;flex-direction:column}.enrollment-designation form .cu-btn{width:100%}}

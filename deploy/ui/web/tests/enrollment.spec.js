@@ -31,8 +31,10 @@ const apexCameras=tvtCameras.map(camera=>({
 async function mockDashboard(page,{active=false,postError=false}={}){
   let designated='cam-both';
   const posts=[];
+  const requests=[];
   await page.route('**/dashboard/api/**',async route=>{
     const request=route.request(),url=new URL(request.url()),path=url.pathname;
+    requests.push(path);
     if(path==='/dashboard/api/customer')return route.fulfill({json:{site_id:'test-site',cameras:apexCameras,deployments:[]}});
     if(path==='/dashboard/api/telemetry/events')return route.fulfill({json:{events:[],has_more:false}});
     if(path==='/dashboard/api/cameras/snapshot')return route.fulfill({status:404,json:{error:'unavailable in test'}});
@@ -58,48 +60,22 @@ async function mockDashboard(page,{active=false,postError=false}={}){
     }
     return route.fulfill({status:404,json:{detail:`Unhandled test route: ${request.method()} ${path}`}});
   });
-  return {posts};
+  return {posts,requests};
 }
 
-test('designates only eligible cameras with the exact request body',async({page})=>{
+test('Solutions stays catalog-first without deployment or designation controls',async({page})=>{
   const state=await mockDashboard(page);
   await page.goto('/dashboard');
   await page.getByRole('button',{name:'Solutions',exact:true}).click();
 
-  const control=page.locator('.enrollment-designation[data-deployment-id="dep-primary"]');
-  await expect(control.getByText('Current: Front entrance · cam-both')).toBeVisible();
-  const selector=control.getByLabel('Enrollment camera for dep-primary');
-  await expect(selector.locator('option')).toHaveCount(2);
-  await expect(selector.locator('option')).toHaveText(['Front entrance · cam-both','Reception · cam-face']);
-  await expect(selector.locator('option',{hasText:'Vehicle gate'})).toHaveCount(0);
+  await expect(page.getByRole('heading',{name:/Approved solutions/})).toBeVisible();
+  await expect(page.getByRole('heading',{name:'Deployments'})).toHaveCount(0);
+  await expect(page.locator('.enrollment-designation')).toHaveCount(0);
+  await expect.poll(()=>state.requests.includes('/dashboard/api/v1/deployments')).toBe(false);
 
-  await selector.selectOption('cam-face');
-  await control.getByRole('button',{name:'Change enrollment camera'}).click();
-  await expect.poll(()=>state.posts).toEqual([{camera_id:'cam-face'}]);
-  await expect(control.getByRole('status')).toHaveText('Enrollment camera saved.');
-  await expect(control.getByText('Current: Reception · cam-face')).toBeVisible();
-});
-
-test('surfaces backend designation validation errors',async({page})=>{
-  await mockDashboard(page,{postError:true});
-  await page.goto('/dashboard');
-  await page.getByRole('button',{name:'Solutions',exact:true}).click();
-
-  const control=page.locator('.enrollment-designation[data-deployment-id="dep-primary"]');
-  await control.getByLabel('Enrollment camera for dep-primary').selectOption('cam-face');
-  await control.getByRole('button',{name:'Change enrollment camera'}).click();
-  await expect(control.getByRole('alert')).toContainText('camera is no longer eligible for face enrollment');
-});
-
-test('disables designation changes while enrollment is active',async({page})=>{
-  await mockDashboard(page,{active:true});
-  await page.goto('/dashboard');
-  await page.getByRole('button',{name:'Solutions',exact:true}).click();
-
-  const control=page.locator('.enrollment-designation[data-deployment-id="dep-primary"]');
-  await expect(control.getByLabel('Enrollment camera for dep-primary')).toBeDisabled();
-  await expect(control.getByRole('button',{name:'Change enrollment camera'})).toBeDisabled();
-  await expect(control.getByRole('status')).toContainText('capturing');
+  await page.getByRole('button',{name:'Deploy solution'}).click();
+  await expect(page.locator('textarea')).toHaveCount(0);
+  await expect(page.getByText(/Camera geometry is loaded from each camera/)).toBeVisible();
 });
 
 test('Live enrollment follows every TVT assignment instead of raw assignment order',async({page})=>{

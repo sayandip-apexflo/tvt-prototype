@@ -165,6 +165,14 @@ class CameraLineInput(StrictModel):
     inside_side: str
 
 
+class CameraGeometryUpdateInput(StrictModel):
+    name: str
+    points: list[list[float]]
+    role_key: str | None = None
+    direction: str | None = None
+    inside_side: str | None = None
+
+
 class CameraRoleInput(StrictModel):
     role_key: str
     display_name: str
@@ -489,6 +497,10 @@ def create_app(
     def get_camera(camera_id: str) -> dict[str, Any]:
         return service.get_camera(camera_id)
 
+    @app.get("/api/v1/cameras/{camera_id}/deployment-status")
+    def get_camera_deployment_status(camera_id: str) -> dict[str, Any]:
+        return service.get_camera_deployment_status(camera_id)
+
     @app.patch("/api/v1/cameras/{camera_id}/enabled")
     def set_camera_enabled(
         camera_id: str,
@@ -546,9 +558,11 @@ def create_app(
 
     @app.get("/api/v1/cameras/{camera_id}/geometry")
     def list_camera_geometry(camera_id: str) -> dict[str, Any]:
+        camera = service.get_camera(camera_id)
         return {
             "shapes": service.list_camera_geometry(camera_id),
             "compiled_config": service.camera_geometry_config(camera_id),
+            "geometry_revision": camera["geometry_revision"],
         }
 
     @app.post("/api/v1/cameras/{camera_id}/zones", status_code=201)
@@ -580,6 +594,27 @@ def create_app(
             body.inside_side,
             actor,
             request_id,
+        )
+
+    @app.put("/api/v1/cameras/{camera_id}/geometry/{shape_id}")
+    def update_camera_geometry(
+        camera_id: str,
+        shape_id: str,
+        body: CameraGeometryUpdateInput,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        return service.update_camera_geometry(
+            camera_id,
+            shape_id,
+            name=body.name,
+            points=body.points,
+            role_key=body.role_key,
+            direction=body.direction,
+            inside_side=body.inside_side,
+            actor=actor,
+            request_id=request_id,
         )
 
     @app.delete("/api/v1/cameras/{camera_id}/geometry/{shape_id}", status_code=204)
@@ -915,6 +950,30 @@ def create_app(
     @app.get("/api/v1/reports/attendance-log")
     def attendance_log_report(limit: int = 10) -> Response:
         return _proxy_report("/api/reports/attendance-log", {"limit": str(limit)})
+
+    @app.post("/api/v1/reports/people/{person_id}/name")
+    def set_report_person_display_name(
+        person_id: str,
+        body: PersonNameInput,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        try:
+            return service.set_report_person_display_name(
+                person_id=person_id,
+                display_name=body.display_name,
+                apex=apex,
+                actor=actor,
+                request_id=request_id,
+            )
+        except ApexUnavailableError as error:
+            metrics.application_error("DATABASE_UNAVAILABLE")
+            logger.error(
+                "Report naming failed: apex unavailable",
+                extra={"event": "report_naming_failed", "error_code": "DATABASE_UNAVAILABLE"},
+            )
+            raise ValueError("naming is temporarily unavailable") from error
 
     @app.get("/api/v1/reports/vehicle-traffic")
     def vehicle_traffic_report(date: str | None = None, gate: str | None = None) -> Response:

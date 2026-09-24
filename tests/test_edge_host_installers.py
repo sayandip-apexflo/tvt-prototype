@@ -202,6 +202,7 @@ class EdgeHostInstallerTests(unittest.TestCase):
             "install-k3s-single-node",
             "import-pipeline-traffic-image",
             "bootstrap-postgresql",
+            "upgrade-application",
         ):
             self.assertIn(operation, result.stderr)
         retired = (

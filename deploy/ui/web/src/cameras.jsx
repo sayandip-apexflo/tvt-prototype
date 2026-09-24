@@ -1,6 +1,7 @@
 import React,{useCallback,useEffect,useState} from 'react';
 import {ShieldCheck,X} from 'lucide-react';
 import {base,edgeApi} from './api';
+import {Pill,titleCase} from './shared';
 
 const TABS=['Overview','Stream','Credentials','Zones & Lines'];
 const mutator=(reload,notifyError)=>async promise=>{try{await promise;await reload();return true}catch(e){notifyError(e.message);return false}};
@@ -24,6 +25,49 @@ export function mergeCameraLists(tvtCameras,apexCameras){
     byId.set(c.camera_id,{...existing,name:existing.name||c.friendly_name,tvt:c});
   }
   return [...byId.values()];
+}
+
+function useCameraDeploymentStatus(cameraId){
+  const [status,setStatus]=useState(null);
+  const [error,setError]=useState('');
+  const refresh=useCallback(async()=>{
+    try{
+      const result=await edgeApi(`cameras/${encodeURIComponent(cameraId)}/deployment-status`);
+      setStatus(result);setError('');
+      return result;
+    }catch(e){setError(e.message);return null}
+  },[cameraId]);
+  useEffect(()=>{
+    let live=true,timer;
+    async function poll(){
+      const result=await refresh();
+      if(!live)return;
+      const active=result?.deployments?.some(item=>['pending','applying','waiting_for_enrollment'].includes(item.state));
+      timer=setTimeout(poll,active?2000:10000);
+    }
+    poll();
+    return()=>{live=false;clearTimeout(timer)};
+  },[refresh]);
+  return {status,statusError:error,refreshStatus:refresh};
+}
+
+function DeploymentStatusPanel({status,error}){
+  return <div className="camera-deployment-status">
+    <div className="camera-deployment-status-heading"><h3>Geometry deployment</h3>{status&&<Pill value={status.overall_state} label={titleCase(status.overall_state)}/>}</div>
+    {error&&<p className="cu-notice" role="alert">{error}</p>}
+    {!status&&!error&&<p>Loading deployment status…</p>}
+    {status?.overall_state==='not_assigned'&&<p className="cu-empty">Not assigned. Saved geometry will be used automatically when this camera is deployed.</p>}
+    {status?.deployments?.map(item=><article key={item.deployment_id} className="camera-deployment-status-row">
+      <div><strong>{item.deployment_id}</strong><small>{item.phase?titleCase(item.phase):'Waiting for synchronization'}</small></div>
+      <Pill value={item.state} label={titleCase(item.state)}/>
+      <dl>
+        <div><dt>Deployment revision</dt><dd>{item.applied_revision??'—'} / {item.desired_revision??'—'} <small>applied / desired</small></dd></div>
+        <div><dt>Geometry revision</dt><dd>{item.applied_geometry_revision??'—'} / {item.desired_geometry_revision??'—'} <small>applied / desired</small></dd></div>
+        {item.last_error_code&&<div><dt>Failure</dt><dd>{item.last_error_code}</dd></div>}
+        {item.retry_at&&<div><dt>Retry</dt><dd>{new Date(item.retry_at).toLocaleString()}</dd></div>}
+      </dl>
+    </article>)}
+  </div>;
 }
 
 export function CameraCreateModal({close,onCreated}){
@@ -75,7 +119,7 @@ function RegisterCameraPanel({cameraId,friendlyName,onRegistered}){
   </section>;
 }
 
-function CameraOverviewTab({camera,act}){
+function CameraOverviewTab({camera,act,deploymentStatus,statusError}){
   return <>
     <p>{[camera.manufacturer,camera.model].filter(Boolean).join(' ')||'Unknown vendor'} · Updated {camera.updated_at?new Date(camera.updated_at).toLocaleString():'—'}</p>
     <div className="cu-device-row"><ShieldCheck size={18}/><div><strong>{camera.enabled?'Enabled':'Disabled'}</strong><small>{camera.configured?'Stream configured':'Stream not configured'} · {camera.credentials_configured?'Credentials configured':'No credentials'}</small></div>
@@ -83,6 +127,7 @@ function CameraOverviewTab({camera,act}){
     </div>
     <h3>Assignments</h3>
     {camera.assignments?.length?camera.assignments.map(a=><div className="cu-device-row" key={a.deployment_id}><div><strong>{a.deployment_id}</strong><small>{a.apps.join(', ')} · {a.fps} FPS</small></div></div>):<p className="cu-empty">Not assigned to a deployment yet.</p>}
+    <DeploymentStatusPanel status={deploymentStatus} error={statusError}/>
   </>;
 }
 
@@ -133,19 +178,32 @@ function CameraCredentialsTab({camera,act}){
   </>;
 }
 
-function CameraGeometryTab({cameraId,notifyError}){
+function CameraGeometryTab({cameraId,notifyError,deploymentStatus,statusError,onStatusChanged}){
   const [geometry,setGeometry]=useState(null);
   const [snapshotToken,setSnapshotToken]=useState(()=>Date.now());
   const [snapshotError,setSnapshotError]=useState(false);
   const [mode,setMode]=useState('zone');
   const [draft,setDraft]=useState(null);
+  const [editing,setEditing]=useState(null);
   const [insideEndpoint,setInsideEndpoint]=useState('a');
 
   const load=useCallback(async()=>{setGeometry(await edgeApi(`cameras/${encodeURIComponent(cameraId)}/geometry`))},[cameraId]);
   useEffect(()=>{load()},[load]);
-  const act=mutator(load,notifyError);
+  async function act(promise){
+    try{
+      await promise;
+      await Promise.all([load(),onStatusChanged?.()]);
+      return true;
+    }catch(e){notifyError(e.message);return false}
+  }
 
-  function startMode(next){setMode(next);setDraft(null);setInsideEndpoint('a')}
+  function startMode(next){setMode(next);setDraft(null);setEditing(null);setInsideEndpoint('a')}
+  function editShape(shape){
+    setMode(shape.kind);
+    setDraft({kind:shape.kind,points:shape.points.map(point=>[...point])});
+    setEditing(shape);
+    setInsideEndpoint(shape.inside_side||'a');
+  }
   function onCanvasClick(e){
     const rect=e.currentTarget.getBoundingClientRect();
     const point=[Math.min(1,Math.max(0,(e.clientX-rect.left)/rect.width)),Math.min(1,Math.max(0,(e.clientY-rect.top)/rect.height))];
@@ -155,25 +213,28 @@ function CameraGeometryTab({cameraId,notifyError}){
       return {kind:mode,points:[...points,point]};
     });
   }
-  function resetDraft(){setDraft(null);setInsideEndpoint('a')}
+  function resetDraft(){setDraft(null);setEditing(null);setInsideEndpoint('a')}
   function undoPoint(){setDraft(prev=>prev&&prev.points.length>1?{...prev,points:prev.points.slice(0,-1)}:null)}
 
   async function saveZone(e){
     e.preventDefault();
     if(!draft||draft.points.length<3)return;
     const name=String(new FormData(e.currentTarget).get('name')||'').trim()||'ANPR zone';
-    if(await act(edgeApi(`cameras/${encodeURIComponent(cameraId)}/zones`,{name,points:draft.points})))resetDraft();
+    const path=editing?`cameras/${encodeURIComponent(cameraId)}/geometry/${editing.shape_id}`:`cameras/${encodeURIComponent(cameraId)}/zones`;
+    const payload=editing?{name,points:draft.points,role_key:null,direction:null,inside_side:null}:{name,points:draft.points};
+    if(await act(edgeApi(path,payload,editing?'PUT':'POST')))resetDraft();
   }
   async function saveLine(e){
     e.preventDefault();
     if(!draft||draft.points.length!==2)return;
     const f=new FormData(e.currentTarget);
     const name=String(f.get('name')||'').trim()||'Gate line',roleKey=String(f.get('role_key')||'').trim(),direction=String(f.get('direction')||'entry');
-    if(await act(edgeApi(`cameras/${encodeURIComponent(cameraId)}/lines`,{name,points:draft.points,role_key:roleKey,direction,inside_side:insideEndpoint})))resetDraft();
+    const path=editing?`cameras/${encodeURIComponent(cameraId)}/geometry/${editing.shape_id}`:`cameras/${encodeURIComponent(cameraId)}/lines`;
+    if(await act(edgeApi(path,{name,points:draft.points,role_key:roleKey,direction,inside_side:insideEndpoint},editing?'PUT':'POST')))resetDraft();
   }
   async function deleteShape(shapeId){
-    if(!confirm('Remove this shape? Deployments using it will need reconfiguring.'))return;
-    await act(edgeApi(`cameras/${encodeURIComponent(cameraId)}/geometry/${shapeId}`,undefined,'DELETE'));
+    if(!confirm('Remove this shape? Compatible deployments will update automatically.'))return;
+    if(await act(edgeApi(`cameras/${encodeURIComponent(cameraId)}/geometry/${shapeId}`,undefined,'DELETE'))&&editing?.shape_id===shapeId)resetDraft();
   }
 
   const zoneReady=draft?.kind==='zone'&&draft.points.length>=3;
@@ -196,8 +257,8 @@ function CameraGeometryTab({cameraId,notifyError}){
         ?<div className="cu-empty">Camera preview is unavailable. Confirm the camera is enabled and streaming, then refresh.</div>
         :<img src={`${base}/api/v1/cameras/${encodeURIComponent(cameraId)}/snapshot?t=${snapshotToken}`} alt="Camera preview" draggable={false} onError={()=>setSnapshotError(true)}/>}
       <svg viewBox="0 0 1 1" preserveAspectRatio="none" className="geometry-overlay">
-        {geometry?.shapes.filter(s=>s.kind==='zone').map(s=><polygon key={s.shape_id} className="geometry-shape geometry-zone" points={s.points.map(p=>`${p[0]},${p[1]}`).join(' ')} vectorEffect="non-scaling-stroke"/>)}
-        {geometry?.shapes.filter(s=>s.kind==='line').map(s=><line key={s.shape_id} className={`geometry-line geometry-line-${s.direction}`} x1={s.points[0][0]} y1={s.points[0][1]} x2={s.points[1][0]} y2={s.points[1][1]} vectorEffect="non-scaling-stroke"/>)}
+        {geometry?.shapes.filter(s=>s.kind==='zone'&&s.shape_id!==editing?.shape_id).map(s=><polygon key={s.shape_id} className="geometry-shape geometry-zone" points={s.points.map(p=>`${p[0]},${p[1]}`).join(' ')} vectorEffect="non-scaling-stroke"/>)}
+        {geometry?.shapes.filter(s=>s.kind==='line'&&s.shape_id!==editing?.shape_id).map(s=><line key={s.shape_id} className={`geometry-line geometry-line-${s.direction}`} x1={s.points[0][0]} y1={s.points[0][1]} x2={s.points[1][0]} y2={s.points[1][1]} vectorEffect="non-scaling-stroke"/>)}
         {draft?.kind==='zone'&&draft.points.length>0&&<polyline className="geometry-draft" points={draft.points.map(p=>`${p[0]},${p[1]}`).join(' ')} vectorEffect="non-scaling-stroke"/>}
         {draft?.kind==='line'&&draft.points.length===2&&<line className="geometry-draft" x1={draft.points[0][0]} y1={draft.points[0][1]} x2={draft.points[1][0]} y2={draft.points[1][1]} vectorEffect="non-scaling-stroke"/>}
         {draft?.points.map((p,i)=><circle key={i} className="geometry-vertex" cx={p[0]} cy={p[1]} r={0.012} vectorEffect="non-scaling-stroke"/>)}
@@ -205,24 +266,25 @@ function CameraGeometryTab({cameraId,notifyError}){
       {draft?.kind==='line'&&draft.points.map((p,i)=><span key={i} className="geometry-point-label" style={{left:pct(p[0]),top:pct(p[1])}}>{i===0?'A':'B'}{insideEndpoint===(i===0?'a':'b')?' · inside':''}</span>)}
     </div>
 
-    {mode==='zone'&&zoneReady&&<form className="cu-camera-form" onSubmit={saveZone}>
-      <label className="cu-stream-field">Zone name<input name="name" placeholder="ANPR capture area" required/></label>
+    {mode==='zone'&&zoneReady&&<form key={editing?.shape_id||'new-zone'} className="cu-camera-form" onSubmit={saveZone}>
+      <label className="cu-stream-field">Zone name<input name="name" defaultValue={editing?.name||''} placeholder="ANPR capture area" required/></label>
       <button type="button" className="cu-btn" onClick={resetDraft}>Cancel</button>
-      <button className="cu-btn cu-primary">Save zone ({draft.points.length} points)</button>
+      <button className="cu-btn cu-primary">{editing?'Update':'Save'} zone ({draft.points.length} points)</button>
     </form>}
 
-    {mode==='line'&&lineReady&&<form className="cu-camera-form" onSubmit={saveLine}>
-      <label className="cu-stream-field">Line name<input name="name" placeholder="Main entrance entry" required/></label>
-      <label>Gate name<input name="role_key" pattern="[a-z0-9][a-z0-9.-]*" placeholder="main-entrance" required/></label>
-      <label>This camera detects<select name="direction"><option value="entry">Entry (into the plant)</option><option value="exit">Exit (out of the plant)</option></select></label>
+    {mode==='line'&&lineReady&&<form key={editing?.shape_id||'new-line'} className="cu-camera-form" onSubmit={saveLine}>
+      <label className="cu-stream-field">Line name<input name="name" defaultValue={editing?.name||''} placeholder="Main entrance entry" required/></label>
+      <label>Gate name<input name="role_key" defaultValue={editing?.role_key||''} pattern="[a-z0-9][a-z0-9.-]*" placeholder="main-entrance" required/></label>
+      <label>This camera detects<select name="direction" defaultValue={editing?.direction||'entry'}><option value="entry">Entry (into the plant)</option><option value="exit">Exit (out of the plant)</option></select></label>
       <div className="cu-tabs"><button type="button" className={insideEndpoint==='a'?'active':''} onClick={()=>setInsideEndpoint('a')}>A is inside ({fmtPoint(draft.points[0])})</button><button type="button" className={insideEndpoint==='b'?'active':''} onClick={()=>setInsideEndpoint('b')}>B is inside ({fmtPoint(draft.points[1])})</button></div>
       <button type="button" className="cu-btn" onClick={resetDraft}>Cancel</button>
-      <button className="cu-btn cu-primary">Save line</button>
+      <button className="cu-btn cu-primary">{editing?'Update':'Save'} line</button>
     </form>}
 
     <h3>Saved zones &amp; lines</h3>
     {!geometry?.shapes.length&&<p className="cu-empty">Nothing drawn yet. Draw a zone or line on the preview above, then save it.</p>}
-    {geometry?.shapes.map(s=><div className="cu-device-row" key={s.shape_id}><div><strong>{s.name}</strong><small>{s.shape_key} · {s.points.length} points{s.role_key?` · gate ${s.role_key}`:''}</small></div><button className="cu-btn" onClick={()=>deleteShape(s.shape_id)}>Remove</button></div>)}
+    {geometry?.shapes.map(s=><div className="cu-device-row" key={s.shape_id}><div><strong>{s.name}</strong><small>{s.shape_key} · {s.points.length} points{s.role_key?` · gate ${s.role_key}`:''}</small></div><div className="geometry-shape-actions"><button className="cu-btn" onClick={()=>editShape(s)}>Edit</button><button className="cu-btn" onClick={()=>deleteShape(s.shape_id)}>Remove</button></div></div>)}
+    <DeploymentStatusPanel status={deploymentStatus} error={statusError}/>
   </div>;
 }
 
@@ -231,6 +293,7 @@ export function CameraManagePanel({cameraId,friendlyName,onChanged}){
   const [camera,setCamera]=useState(null);
   const [notFound,setNotFound]=useState(false);
   const [error,setError]=useState('');
+  const {status:deploymentStatus,statusError,refreshStatus}=useCameraDeploymentStatus(cameraId);
   const load=useCallback(async()=>{
     try{setCamera(await edgeApi(`cameras/${encodeURIComponent(cameraId)}`));setNotFound(false);setError('')}
     catch(e){setCamera(null);setNotFound(true);setError(e.message)}
@@ -245,9 +308,9 @@ export function CameraManagePanel({cameraId,friendlyName,onChanged}){
   return <section className="cu-settings-panel">
     <div className="cu-tabs cu-settings-tabs">{TABS.map(t=><button key={t} className={tab===t?'active':''} onClick={()=>setTab(t)}>{t}</button>)}</div>
     {error&&<p className="cu-notice" role="alert">{error}</p>}
-    {tab==='Overview'&&<CameraOverviewTab camera={camera} act={act}/>}
+    {tab==='Overview'&&<CameraOverviewTab camera={camera} act={act} deploymentStatus={deploymentStatus} statusError={statusError}/>}
     {tab==='Stream'&&<CameraStreamTab camera={camera} act={act}/>}
     {tab==='Credentials'&&<CameraCredentialsTab camera={camera} act={act}/>}
-    {tab==='Zones & Lines'&&<CameraGeometryTab cameraId={camera.camera_id} notifyError={setError}/>}
+    {tab==='Zones & Lines'&&<CameraGeometryTab cameraId={camera.camera_id} notifyError={setError} deploymentStatus={deploymentStatus} statusError={statusError} onStatusChanged={refreshStatus}/>}
   </section>;
 }

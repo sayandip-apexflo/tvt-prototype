@@ -213,6 +213,22 @@ inside, one facing outside) each carry one line tagged with a single role,
 correlated by a shared gate name — matching the vendor's two-lines-per-gate
 direction convention.
 
+Every successful create, edit, or delete increments the camera's monotonic
+`geometry_revision` in the same PostgreSQL transaction. For every current
+`tvt-mills-pilot` assignment containing that camera, the management service
+merges only the geometry-owned `zones.anpr` and `lines` keys, preserves other
+configuration, validates the full desired state against the catalog schema,
+and records a new immutable bundle and assignment revision. The HTTP mutation
+does not write to Kubernetes; the existing sync worker applies the committed
+desired revision asynchronously. Unassigned cameras simply retain their saved
+geometry for the next initial deployment.
+
+During face enrollment, geometry mutations update the durable restoration
+configuration and report `waiting_for_enrollment` instead of replacing the
+temporary enrollment app. Camera detail exposes bounded per-deployment pending,
+applying, applied, failed, and retry state together with desired/applied
+deployment and geometry revisions; it never exposes source URLs or credentials.
+
 ## 4. System context
 
 ```mermaid

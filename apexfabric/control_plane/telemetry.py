@@ -14,7 +14,7 @@ from .identity import (
     resolve_identity,
 )
 from .reporting import (
-    SCHEMA as REPORTING_SCHEMA,
+    ensure_schema as ensure_reporting_schema,
     evaluate_attendance,
     evaluate_vehicle_traffic,
 )
@@ -134,7 +134,7 @@ class TelemetryStore:
 
             connection.executescript(ALERT_SCHEMA)
             connection.executescript(IDENTITY_SCHEMA)
-            connection.executescript(REPORTING_SCHEMA)
+            ensure_reporting_schema(connection)
             connection.executescript(ENROLLMENT_WINDOWS_SCHEMA)
             if self.identity_policy is not None:
                 load_identity_extension(connection)

@@ -348,6 +348,55 @@ class EnrollmentSessionTests(unittest.TestCase):
         self.assertEqual(camera["apps"], ["face_enrollment"])
         self.assertEqual(camera["config"], {})
 
+    def test_geometry_edit_waits_for_enrollment_and_restores_latest_config(self):
+        self.deploy_with_face_recognition()
+        self.apply_desired()
+        started = self.activate()
+
+        shape = self.service.create_camera_line(
+            "camera-01",
+            "Updated gate entry",
+            [[0.2, 0.4], [0.8, 0.4]],
+            "updated-gate",
+            "entry",
+            "b",
+            "test",
+            "geometry-during-enrollment",
+        )
+        current = self.current_assignment()
+        self.assertEqual(current["apps"], ["face_enrollment"])
+        self.assertEqual(current["config"], {})
+        status = self.service.get_camera_deployment_status("camera-01")
+        self.assertEqual(status["overall_state"], "waiting_for_enrollment")
+        with self.sessions() as session:
+            row = session.get(
+                EnrollmentSession, uuid.UUID(started["session_id"])
+            )
+            self.assertEqual(
+                row.prior_config["lines"][0]["id"], shape["shape_key"]
+            )
+
+        self.service.cancel_enrollment_session(
+            deployment_key="tvt-mills-v1",
+            session_id=started["session_id"],
+            actor="test",
+            request_id="cancel-after-geometry",
+        )
+        self.service.reconcile_enrollment_sessions(FakeApex())
+        restored = self.current_assignment()
+        self.assertEqual(restored["apps"], ["face_recognition", "anpr"])
+        self.assertEqual(
+            restored["config"]["lines"][0]["id"], shape["shape_key"]
+        )
+        self.apply_desired()
+        self.service.reconcile_enrollment_sessions(FakeApex())
+        status = self.service.get_camera_deployment_status("camera-01")
+        self.assertEqual(status["overall_state"], "applied")
+        self.assertEqual(
+            status["deployments"][0]["applied_geometry_revision"], 1
+        )
+
+
     def test_start_live_reloads_acknowledged_revision_without_pod_restart(self):
         self.deploy_with_face_recognition()
         self.apply_desired()
@@ -796,6 +845,42 @@ class EnrollmentSessionTests(unittest.TestCase):
         self.assertEqual(audit[0]["target_id"], "person-1")
         self.assertNotIn("Jane", json.dumps(audit[0]["details"]))
         self.assertEqual(audit[0]["details"], {})
+
+    def test_report_can_name_an_unnamed_person_without_storing_the_name(self):
+        apex = FakeApex(persons=[{
+            "person_id": "person-1",
+            "status": "auto_enrolled",
+            "display_name": None,
+        }])
+
+        result = self.service.set_report_person_display_name(
+            person_id="person-1",
+            display_name="Jane Doe",
+            apex=apex,
+            actor="op",
+            request_id="report-name-1",
+        )
+
+        self.assertEqual(result, {"person_id": "person-1", "naming_status": "named"})
+        self.assertEqual(apex.renamed, [("person-1", "Jane Doe")])
+        audit = [
+            item for item in self.service.list_audit_events(200)
+            if item["action"] == "reports.person.name"
+        ]
+        self.assertEqual(len(audit), 1)
+        self.assertEqual(audit[0]["target_id"], "person-1")
+        self.assertEqual(audit[0]["details"], {})
+        self.assertNotIn("Jane", json.dumps(audit[0]))
+
+    def test_report_naming_rejects_an_unknown_person(self):
+        with self.assertRaisesRegex(ValueError, "unknown person_id"):
+            self.service.set_report_person_display_name(
+                person_id="ghost",
+                display_name="Jane Doe",
+                apex=FakeApex(),
+                actor="op",
+                request_id="report-name-unknown",
+            )
 
     # 15. No vectors/names/raw payloads/sensitive URLs anywhere except the
     # authorized person-name response.

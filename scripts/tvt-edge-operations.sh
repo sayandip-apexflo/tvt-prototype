@@ -3943,6 +3943,203 @@ if __name__ == "__main__":
 TVT_VERIFY_TRAFFIC_QUALIFICATION_PY
 )
 
+tvt_op_upgrade_application() (
+# Upgrade only the TVT application, database schema, and dashboard image on an
+# already-installed edge. The previous release directory is retained and the
+# application symlinks are restored automatically if a later step fails.
+set -Eeuo pipefail
+umask 027
+
+readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BUNDLE="${REPO_ROOT}"
+
+usage() {
+  echo "usage: scripts/tvt-edge-operations.sh upgrade-application [--bundle DIR]" >&2
+}
+
+while (($#)); do
+  case "$1" in
+    --bundle) BUNDLE="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage; exit 2 ;;
+  esac
+done
+
+# shellcheck source=scripts/lib/tvt-installer-common.sh
+source "${REPO_ROOT}/scripts/lib/tvt-installer-common.sh"
+tvt_require_root
+for command_name in curl docker flock k3s pg_dump python3 readlink runuser systemctl; do
+  command -v "${command_name}" >/dev/null 2>&1 || tvt_fail "required command is unavailable: ${command_name}"
+done
+BUNDLE="$(tvt_canonical_directory "${BUNDLE}")"
+tvt_verify_bundle "${BUNDLE}"
+tvt_acquire_lock
+
+readonly RELEASE_VERSION="$(tvt_manifest_value "${BUNDLE}" release_version)"
+readonly OPT_TVT="${TVT_OPT_DIRECTORY:-/opt/tvt}"
+readonly RELEASE_DIRECTORY="${OPT_TVT}/releases/${RELEASE_VERSION}"
+readonly RESOURCE_DIRECTORY="${RELEASE_DIRECTORY}/resources"
+readonly VENV_DIRECTORY="${RELEASE_DIRECTORY}/venv"
+readonly INSTALL_STATE="${TVT_INSTALL_STATE_ROOT}/install-state.json"
+readonly UPGRADE_REPORT="${TVT_INSTALL_STATE_ROOT}/application-upgrade-report.json"
+
+[[ -L ${OPT_TVT}/current && -L ${OPT_TVT}/venv ]] || \
+  tvt_fail "the installed application links are missing or unsafe"
+previous_release="$(readlink -f "${OPT_TVT}/current")"
+previous_venv="$(readlink -f "${OPT_TVT}/venv")"
+[[ -d ${previous_release} && -x ${previous_venv}/bin/tvt-edge ]] || \
+  tvt_fail "the current TVT release is incomplete"
+[[ ${previous_release} != "${RELEASE_DIRECTORY}" ]] || \
+  tvt_fail "release ${RELEASE_VERSION} is already active"
+
+backup_stamp="$(date --utc +'%Y%m%dT%H%M%SZ')"
+backup_directory="${TVT_INSTALL_STATE_ROOT}/upgrade-backups/${backup_stamp}-${RELEASE_VERSION}"
+install -d -o root -g root -m 0700 "${backup_directory}"
+printf '%s\n' "${previous_release}" >"${backup_directory}/previous-release"
+printf '%s\n' "${previous_venv}" >"${backup_directory}/previous-venv"
+chmod 0600 "${backup_directory}/previous-release" "${backup_directory}/previous-venv"
+for evidence in install-state.json installation-report.json ui-image.lock.json; do
+  if [[ -f ${TVT_INSTALL_STATE_ROOT}/${evidence} ]]; then
+    cp -a "${TVT_INSTALL_STATE_ROOT}/${evidence}" "${backup_directory}/${evidence}"
+  fi
+done
+deployment_count_before="$(runuser -u postgres -- psql -d tvt -Atc 'SELECT count(*) FROM solution_deployments')"
+runuser -u postgres -- pg_dump --format=custom tvt >"${backup_directory}/tvt.pg_dump"
+chmod 0600 "${backup_directory}/tvt.pg_dump"
+
+rollback_required=true
+rollback_application() {
+  local status=$?
+  if ${rollback_required}; then
+    tvt_log "application upgrade failed; restoring ${previous_release}"
+    local old_venv_link old_current_link
+    old_venv_link="${OPT_TVT}/.venv.rollback.$$"
+    old_current_link="${OPT_TVT}/.current.rollback.$$"
+    ln -s "${previous_venv}" "${old_venv_link}"
+    ln -s "${previous_release}" "${old_current_link}"
+    mv -Tf "${old_venv_link}" "${OPT_TVT}/venv"
+    mv -Tf "${old_current_link}" "${OPT_TVT}/current"
+    systemctl restart tvt-edge.service tvt-camera-sync.service || true
+  fi
+  return "${status}"
+}
+trap rollback_application ERR
+
+install -d -o root -g root -m 0755 "${OPT_TVT}/releases" "${RELEASE_DIRECTORY}"
+[[ ! -L ${RELEASE_DIRECTORY} ]] || tvt_fail "refusing symlinked release directory"
+if [[ -f ${RESOURCE_DIRECTORY}/manifest.json ]]; then
+  cmp -s "${BUNDLE}/manifest.json" "${RESOURCE_DIRECTORY}/manifest.json" || \
+    tvt_fail "release ${RELEASE_VERSION} is already present with a different manifest"
+fi
+install -d -o root -g root -m 0755 "${RESOURCE_DIRECTORY}"
+for item in manifest.json checksums.sha256 alembic.ini apexfabric config deploy examples \
+  scripts solution-packs images k3s tvt_edge; do
+  cp -a "${BUNDLE}/${item}" "${RESOURCE_DIRECTORY}/"
+done
+python3 -m venv --clear "${VENV_DIRECTORY}"
+wheel_relative="$(tvt_manifest_value "${BUNDLE}" artifacts.application_wheel)"
+"${VENV_DIRECTORY}/bin/python" -m pip install --disable-pip-version-check \
+  --no-index --find-links "${BUNDLE}/wheels" "${BUNDLE}/${wheel_relative}"
+chown -R root:root "${RELEASE_DIRECTORY}"
+chmod -R go+rX "${VENV_DIRECTORY}" "${RESOURCE_DIRECTORY}"
+export PATH="${VENV_DIRECTORY}/bin:${PATH}"
+
+systemctl stop tvt-camera-sync.service tvt-edge.service
+runuser -u postgres -- env \
+  TVT_RESOURCE_ROOT="${RESOURCE_DIRECTORY}" \
+  TVT_DATABASE_URL=postgresql+psycopg:///tvt \
+  "${VENV_DIRECTORY}/bin/tvt-edge" migrate
+
+new_venv_link="${OPT_TVT}/.venv.${RELEASE_VERSION}.$$"
+new_current_link="${OPT_TVT}/.current.${RELEASE_VERSION}.$$"
+ln -s "${VENV_DIRECTORY}" "${new_venv_link}"
+ln -s "${RELEASE_DIRECTORY}" "${new_current_link}"
+mv -Tf "${new_venv_link}" "${OPT_TVT}/venv"
+mv -Tf "${new_current_link}" "${OPT_TVT}/current"
+systemctl daemon-reload
+systemctl restart tvt-edge.service tvt-camera-sync.service
+
+ui_lock="${TVT_INSTALL_STATE_ROOT}/ui-image.lock.json"
+"${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" publish-ui-image \
+  --registry 127.0.0.1:5000 --scheme http \
+  --archive-dir "${RESOURCE_DIRECTORY}/images" --lock-output "${ui_lock}"
+"${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" install-apexfabric-ui \
+  --image-lock "${ui_lock}"
+
+expected_migration="$(TVT_RESOURCE_ROOT="${RESOURCE_DIRECTORY}" "${VENV_DIRECTORY}/bin/python" - <<'PY'
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+from tvt_edge.paths import RESOURCE_ROOT
+
+heads = ScriptDirectory.from_config(Config(str(RESOURCE_ROOT / "alembic.ini"))).get_heads()
+if len(heads) != 1:
+    raise SystemExit("release must contain exactly one Alembic head")
+print(heads[0])
+PY
+)"
+actual_migration="$(runuser -u postgres -- psql -d tvt -Atc 'SELECT version_num FROM alembic_version')"
+[[ ${actual_migration} == "${expected_migration}" ]] || \
+  tvt_fail "database migration ${actual_migration:-missing} does not match release head ${expected_migration}"
+deployment_count_after="$(runuser -u postgres -- psql -d tvt -Atc 'SELECT count(*) FROM solution_deployments')"
+[[ ${deployment_count_after} == "${deployment_count_before}" ]] || \
+  tvt_fail "application upgrade changed the deployment count"
+api_health="$(curl --fail --silent --show-error --max-time 15 http://127.0.0.1:8089/api/v1/health)"
+python3 - "${api_health}" <<'PY'
+import json
+import sys
+
+health = json.loads(sys.argv[1])
+if health.get("status") != "healthy":
+    raise SystemExit("TVT API is not healthy after upgrade")
+PY
+curl --fail --silent --show-error --max-time 15 http://127.0.0.1:18081/dashboard/ >/dev/null
+
+python3 - "${INSTALL_STATE}" "${UPGRADE_REPORT}" "${RELEASE_VERSION}" \
+  "$(basename "${previous_release}")" "${backup_directory}" "${expected_migration}" \
+  "${deployment_count_after}" <<'PY'
+import datetime
+import json
+import pathlib
+import sys
+
+state_path, report_path = map(pathlib.Path, sys.argv[1:3])
+release, previous, backup, migration, deployment_count = sys.argv[3:]
+now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+try:
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    state = {"schema_version": 1}
+state.update({
+    "release_version": release,
+    "previous_release_version": previous,
+    "status": "installed",
+    "updated_at": now,
+    "completed_at": now,
+})
+state["stages"] = {
+    "application_upgrade": {"status": "completed", "completed_at": now, "updated_at": now}
+}
+state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+report = {
+    "schema_version": 1,
+    "status": "installed",
+    "release_version": release,
+    "previous_release_version": previous,
+    "database_migration": migration,
+    "deployment_count": int(deployment_count),
+    "backup_directory": backup,
+    "completed_at": now,
+}
+report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+chmod 0640 "${INSTALL_STATE}" "${UPGRADE_REPORT}"
+rollback_required=false
+trap - ERR
+tvt_log "application release ${RELEASE_VERSION} upgraded successfully"
+tvt_log "rollback backup: ${backup_directory}"
+
+)
+
 tvt_op_probe_edge_hardware() (
 # Source: scripts/tvt-hardware-inventory.py (probe/verify)
 set -Eeuo pipefail
@@ -4029,6 +4226,7 @@ operations:
   publish-control-images
   publish-ui-image
   qualify-traffic-edge
+  upgrade-application
   verify-k3s-plane
   verify-local-registry
   verify-pipeline-image-sync
@@ -4062,6 +4260,7 @@ case "${operation}" in
   publish-control-images) tvt_op_publish_control_images "$@" ;;
   publish-ui-image) tvt_op_publish_ui_image "$@" ;;
   qualify-traffic-edge) tvt_op_qualify_traffic_edge "$@" ;;
+  upgrade-application) tvt_op_upgrade_application "$@" ;;
   verify-k3s-plane) tvt_op_verify_k3s_plane "$@" ;;
   verify-local-registry) tvt_op_verify_local_registry "$@" ;;
   verify-pipeline-image-sync) tvt_op_verify_pipeline_image_sync "$@" ;;

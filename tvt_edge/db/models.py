@@ -89,6 +89,7 @@ class Camera(Base, IdMixin, TimeMixin):
         String(32), default="provisional", nullable=False
     )
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    geometry_revision: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     row_version: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -382,6 +383,7 @@ class CameraDeploymentAssignment(Base, IdMixin):
     )
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
     requested_fps: Mapped[int] = mapped_column(Integer, default=8, nullable=False)
+    geometry_revision: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
 
 
 class CameraApplicationAssignment(Base, IdMixin):

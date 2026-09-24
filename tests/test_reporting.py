@@ -123,6 +123,15 @@ class AttendanceAggregationTests(unittest.TestCase):
             events = attendance_log(connection)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["action"], "entry")
+        self.assertEqual(events[0]["camera_id"], "main-1")
+
+    def test_log_keeps_camera_id_after_source_event_retention(self):
+        self.store.ingest("dep1", face_event("e1", "main-1", FACE, line_id="gate-1-face_entry"))
+        with self.store._connect() as connection:
+            connection.execute("DELETE FROM events")
+            events = attendance_log(connection)
+        self.assertEqual(events[0]["camera_id"], "main-1")
+
 
     def test_log_emits_one_row_per_crossing_not_per_session(self):
         self.store.ingest("dep1", face_event("e1", "main-1", FACE, line_id="gate-1-face_entry"))

@@ -22,6 +22,9 @@ from apexfabric.solution_management.renderer import render
 from tvt_edge.db.models import (
     Base,
     AuditEvent,
+    Camera,
+    CameraApplicationAssignment,
+    CameraDeploymentAssignment,
     CameraCredentialVersion,
     DeploymentAssignmentSet,
     DeploymentSyncAttempt,
@@ -491,7 +494,20 @@ class ManagementPlaneTests(unittest.TestCase):
                     "points": [[0.0, 0.6], [1.0, 0.6]],
                     "role_key": "main-entrance", "direction": "entry", "inside_side": "b",
                 })
+                updated_line = await client.put(
+                    f"/api/v1/cameras/camera-01/geometry/{line.json()['shape_id']}",
+                    json={
+                        "name": "Updated entrance entry",
+                        "points": [[0.1, 0.55], [0.9, 0.55]],
+                        "role_key": "main-entrance",
+                        "direction": "entry",
+                        "inside_side": "a",
+                    },
+                )
                 geometry = await client.get("/api/v1/cameras/camera-01/geometry")
+                status = await client.get(
+                    "/api/v1/cameras/camera-01/deployment-status"
+                )
                 role = await client.put("/api/v1/cameras/camera-01/role", json={
                     "role_key": "main-entrance", "display_name": "Main entrance",
                     "direction": "entry",
@@ -501,26 +517,415 @@ class ManagementPlaneTests(unittest.TestCase):
                 )
                 after_delete = await client.get("/api/v1/cameras/camera-01/geometry")
             return (
-                zone, bad_zone, line, duplicate_line, geometry, role, deleted, after_delete
+                zone, bad_zone, line, duplicate_line, updated_line, geometry,
+                status, role, deleted, after_delete,
             )
 
-        zone, bad_zone, line, duplicate_line, geometry, role, deleted, after_delete = asyncio.run(
-            exercise()
-        )
+        (
+            zone, bad_zone, line, duplicate_line, updated_line, geometry,
+            status, role, deleted, after_delete,
+        ) = asyncio.run(exercise())
         self.assertEqual(zone.status_code, 201)
         self.assertEqual(zone.json()["shape_key"], "anpr-capture-area")
         self.assertEqual(bad_zone.status_code, 409)
         self.assertEqual(line.status_code, 201)
         self.assertEqual(line.json()["shape_key"], "main-entrance_entry")
         self.assertEqual(duplicate_line.status_code, 409)
+        self.assertEqual(updated_line.status_code, 200)
+        self.assertEqual(updated_line.json()["name"], "Updated entrance entry")
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.json()["overall_state"], "not_assigned")
+        self.assertEqual(status.json()["geometry_revision"], 3)
         compiled = geometry.json()["compiled_config"]
         self.assertEqual(compiled["zones"]["anpr"][0]["id"], "anpr-capture-area")
         self.assertEqual(compiled["lines"][0]["id"], "main-entrance_entry")
-        self.assertEqual(compiled["lines"][0]["accepted"], ["A->B"])
+        self.assertEqual(compiled["lines"][0]["accepted"], ["B->A"])
         self.assertEqual(len(geometry.json()["shapes"]), 2)
         self.assertEqual(role.json()["roles"][0]["role_key"], "main-entrance")
         self.assertEqual(deleted.status_code, 204)
         self.assertEqual(len(after_delete.json()["shapes"]), 1)
+
+    def test_geometry_merge_preserves_non_geometry_configuration(self):
+        merged = self.service._merge_camera_geometry(
+            {
+                "zones": {
+                    "anpr": [{"id": "old"}],
+                    "illegal_parking": [{"id": "keep"}],
+                },
+                "lines": [{"id": "old-entry"}],
+            },
+            {"zones": {"anpr": [{"id": "new"}]}},
+        )
+        self.assertEqual(merged["zones"]["anpr"], [{"id": "new"}])
+        self.assertEqual(
+            merged["zones"]["illegal_parking"], [{"id": "keep"}]
+        )
+        self.assertNotIn("lines", merged)
+
+    def test_geometry_mutations_queue_latest_revision_and_live_reload(self):
+        service, _request, _preview, _committed = self.prepare_catalog_deployment()
+        SyncWorker(
+            self.sessions, self.keyring, FakeKubectl(),
+            worker_id="geometry-initial-worker",
+            image_puller=lambda _reference: None,
+        ).run_once()
+
+        zone = service.create_camera_zone(
+            "camera-01", "ANPR area",
+            [[0.1, 0.1], [0.8, 0.1], [0.8, 0.8], [0.1, 0.8]],
+            "test", "geometry-create",
+        )
+        after_create = service.get_camera_deployment_status("camera-01")
+        self.assertEqual(after_create["geometry_revision"], 1)
+        self.assertEqual(after_create["overall_state"], "pending")
+        self.assertEqual(after_create["deployments"][0]["desired_geometry_revision"], 1)
+        self.assertEqual(after_create["deployments"][0]["applied_geometry_revision"], 0)
+
+        updated = service.update_camera_geometry(
+            "camera-01", zone["shape_id"],
+            name="Updated ANPR area",
+            points=[[0.2, 0.2], [0.9, 0.2], [0.9, 0.9], [0.2, 0.9]],
+            role_key=None, direction=None, inside_side=None,
+            actor="test", request_id="geometry-update",
+        )
+        self.assertEqual(updated["shape_key"], zone["shape_key"])
+        service.delete_camera_geometry(
+            "camera-01", zone["shape_id"], "test", "geometry-delete"
+        )
+
+        pending = service.get_camera_deployment_status("camera-01")
+        self.assertEqual(pending["geometry_revision"], 3)
+        self.assertEqual(pending["deployments"][0]["desired_revision"], 4)
+        self.assertEqual(pending["deployments"][0]["desired_geometry_revision"], 3)
+        with self.sessions() as session:
+            deployment = session.scalar(
+                select(SolutionDeployment).where(
+                    SolutionDeployment.deployment_key == "tvt-mills-v1"
+                )
+            )
+            _catalog_id, assignments, *_ = service._current_catalog_assignments(
+                session, deployment
+            )
+            self.assertEqual(assignments[0]["config"], {})
+            snapshots = session.scalars(
+                select(DeploymentAssignmentSet).where(
+                    DeploymentAssignmentSet.deployment_id == deployment.id
+                )
+            ).all()
+            self.assertEqual(len(snapshots), 4)
+
+        class GeometryLiveReloadKubectl(FakeKubectl):
+            def run(self, *arguments, input_text=None, check=True):
+                if arguments[:2] == ("get", "pods"):
+                    self.calls.append((arguments, input_text))
+
+                    class Result:
+                        stdout = json.dumps({"items": [{
+                            "metadata": {
+                                "name": "tvt-mills-v1-runtime-pod",
+                                "creationTimestamp": "2026-09-24T00:00:00Z",
+                            },
+                            "status": {"phase": "Running"},
+                        }]})
+
+                    return Result()
+                if arguments[:2] == ("get", "--raw"):
+                    self.calls.append((arguments, input_text))
+
+                    class Result:
+                        stdout = json.dumps({"status": "ready", "revision": 4})
+
+                    return Result()
+                return super().run(*arguments, input_text=input_text, check=check)
+
+        client = GeometryLiveReloadKubectl()
+        SyncWorker(
+            self.sessions, self.keyring, client,
+            worker_id="geometry-live-reload-worker",
+            live_reload_timeout=2,
+            image_puller=lambda _reference: None,
+        ).run_once()
+        calls = [call[0] for call in client.calls]
+        self.assertTrue(any(call[:2] == ("get", "--raw") for call in calls))
+        self.assertFalse(any(call[:2] == ("rollout", "restart") for call in calls))
+        applied = service.get_camera_deployment_status("camera-01")
+        self.assertEqual(applied["overall_state"], "applied")
+        self.assertEqual(applied["deployments"][0]["applied_geometry_revision"], 3)
+        self.assertEqual(applied["deployments"][0]["phase"], "completed")
+
+    def test_geometry_validation_rolls_back_and_unassigned_is_reported(self):
+        self.service.create_site(
+            "plant-01", "edge-01", "Plant 01", "Asia/Kolkata", "test", "site"
+        )
+        self.onboard()
+        self.assertEqual(
+            self.service.get_camera_deployment_status("camera-01")["overall_state"],
+            "not_assigned",
+        )
+        service = self.catalog_service()
+        request = self.catalog_request()
+        preview = service.preview_catalog_deployment(**request)
+        service.commit_catalog_deployment(
+            **request,
+            preview_bundle_sha256=preview["bundle_sha256"],
+            idempotency_key="geometry-rollback-fixture",
+            actor="test", request_id="geometry-rollback-fixture",
+        )
+        with self.sessions.begin() as session:
+            session.get(
+                SolutionCatalogEntry, CATALOG_ID
+            ).desired_state_schema = {"not": {}}
+        with self.assertRaisesRegex(ValueError, "invalid tvt-mills-pilot geometry"):
+            service.create_camera_zone(
+                "camera-01", "Rejected area",
+                [[0.1, 0.1], [0.8, 0.1], [0.8, 0.8], [0.1, 0.8]],
+                "test", "geometry-invalid",
+            )
+        with self.sessions() as session:
+            camera = session.scalar(
+                select(Camera).where(Camera.camera_key == "camera-01")
+            )
+            sync = session.scalar(select(DeploymentSyncState))
+            desired = session.get(DeploymentAssignmentSet, sync.desired_assignment_set_id)
+            self.assertEqual(camera.geometry_revision, 0)
+            self.assertEqual(desired.desired_revision, 1)
+        self.assertEqual(service.list_camera_geometry("camera-01"), [])
+
+
+    def test_geometry_queues_every_compatible_deployment(self):
+        service, _request, _preview, _committed = self.prepare_catalog_deployment()
+        second = self.catalog_request()
+        second["deployment_key"] = "tvt-mills-secondary"
+        preview = service.preview_catalog_deployment(**second)
+        service.commit_catalog_deployment(
+            **second,
+            preview_bundle_sha256=preview["bundle_sha256"],
+            idempotency_key="geometry-second-deployment",
+            actor="test",
+            request_id="geometry-second-deployment",
+        )
+
+        service.create_camera_line(
+            "camera-01",
+            "Main gate entry",
+            [[0.1, 0.5], [0.9, 0.5]],
+            "main-gate",
+            "entry",
+            "b",
+            "test",
+            "geometry-multiple",
+        )
+        status = service.get_camera_deployment_status("camera-01")
+        self.assertEqual(len(status["deployments"]), 2)
+        self.assertEqual(
+            {item["deployment_id"] for item in status["deployments"]},
+            {"tvt-mills-v1", "tvt-mills-secondary"},
+        )
+        self.assertTrue(
+            all(
+                item["state"] == "pending"
+                and item["desired_revision"] == 2
+                and item["desired_geometry_revision"] == 1
+                for item in status["deployments"]
+            )
+        )
+
+    def test_unsupported_deployment_is_not_rewritten(self):
+        committed = self.commit()
+        self.service.create_camera_zone(
+            "camera-01",
+            "ANPR area",
+            [[0.1, 0.1], [0.8, 0.1], [0.8, 0.8], [0.1, 0.8]],
+            "test",
+            "geometry-unsupported",
+        )
+        status = self.service.get_camera_deployment_status("camera-01")
+        self.assertEqual(status["geometry_revision"], 1)
+        self.assertEqual(status["overall_state"], "not_applicable")
+        self.assertEqual(status["deployments"][0]["state"], "not_applicable")
+        with self.sessions() as session:
+            sync = session.scalar(select(DeploymentSyncState))
+            desired = session.get(
+                DeploymentAssignmentSet, sync.desired_assignment_set_id
+            )
+            self.assertEqual(desired.id, committed.id)
+            self.assertEqual(desired.desired_revision, 1)
+
+
+    def test_geometry_status_reports_applying_and_failed_without_secrets(self):
+        service, _request, _preview, _committed = self.prepare_catalog_deployment()
+        service.create_camera_zone(
+            "camera-01",
+            "ANPR area",
+            [[0.1, 0.1], [0.8, 0.1], [0.8, 0.8], [0.1, 0.8]],
+            "test",
+            "geometry-status",
+        )
+        worker = SyncWorker(
+            self.sessions,
+            self.keyring,
+            FakeKubectl(),
+            worker_id="geometry-status-worker",
+            image_puller=lambda _reference: None,
+        )
+        work = worker.claim()
+        self.assertIsNotNone(work)
+        with self.sessions.begin() as session:
+            attempt = session.scalar(
+                select(DeploymentSyncAttempt).where(
+                    DeploymentSyncAttempt.desired_revision == 2
+                )
+            )
+            attempt.phase = "waiting_runtime_configuration"
+
+        applying = service.get_camera_deployment_status("camera-01")
+        self.assertEqual(applying["overall_state"], "applying")
+        self.assertEqual(
+            applying["deployments"][0]["phase"], "waiting_runtime_configuration"
+        )
+
+        retry_at = utc_now() + timedelta(seconds=30)
+        with self.sessions.begin() as session:
+            sync = session.scalar(select(DeploymentSyncState))
+            sync.state = "failed"
+            sync.last_error_code = "RUNTIME_CONFIGURATION_FAILED"
+            sync.next_attempt_at = retry_at
+            attempt = session.scalar(
+                select(DeploymentSyncAttempt).where(
+                    DeploymentSyncAttempt.desired_revision == 2
+                )
+            )
+            attempt.status = "retry"
+            attempt.phase = "runtime_configuration"
+            attempt.error_code = "RUNTIME_CONFIGURATION_FAILED"
+            attempt.retry_at = retry_at
+
+        failed = service.get_camera_deployment_status("camera-01")
+        self.assertEqual(failed["overall_state"], "failed")
+        self.assertEqual(
+            failed["deployments"][0]["last_error_code"],
+            "RUNTIME_CONFIGURATION_FAILED",
+        )
+        self.assertIsNotNone(failed["deployments"][0]["retry_at"])
+        with self.sessions() as session:
+            audit_details = [
+                item.details
+                for item in session.scalars(
+                    select(AuditEvent).where(
+                        AuditEvent.action.like("camera.geometry.%")
+                    )
+                ).all()
+            ]
+        bounded_output = json.dumps({"status": failed, "audits": audit_details})
+        for forbidden in ("rtsp://", "camera-secret", "camera-user", "192.0.2.10"):
+            self.assertNotIn(forbidden, bounded_output)
+
+    def test_geometry_rollout_failure_keeps_prior_applied_snapshot(self):
+        service, request, _preview, committed = self.prepare_catalog_deployment()
+        SyncWorker(
+            self.sessions,
+            self.keyring,
+            FakeKubectl(),
+            worker_id="geometry-before-failure",
+            image_puller=lambda _reference: None,
+        ).run_once()
+        zone = service.create_camera_zone(
+            "camera-01",
+            "ANPR area",
+            [[0.1, 0.1], [0.8, 0.1], [0.8, 0.8], [0.1, 0.8]],
+            "test",
+            "geometry-rollout-failure",
+        )
+
+        class FailGeometryFallbackOnce(FakeKubectl):
+            def __init__(self):
+                super().__init__()
+                self.failed = False
+
+            def run(self, *arguments, input_text=None, check=True):
+                if arguments[:2] == ("get", "pods"):
+                    self.calls.append((arguments, input_text))
+
+                    class Result:
+                        stdout = json.dumps(
+                            {
+                                "items": [
+                                    {
+                                        "metadata": {
+                                            "name": "tvt-mills-v1-runtime-pod",
+                                            "creationTimestamp": "2026-09-24T00:00:00Z",
+                                        },
+                                        "status": {"phase": "Running"},
+                                    }
+                                ]
+                            }
+                        )
+
+                    return Result()
+                if arguments[:2] == ("get", "--raw"):
+                    self.calls.append((arguments, input_text))
+
+                    class Result:
+                        stdout = json.dumps({"status": "ready", "revision": 1})
+
+                    return Result()
+                if arguments[:2] == ("rollout", "status") and not self.failed:
+                    self.failed = True
+                    self.calls.append((arguments, input_text))
+                    raise ValueError("geometry fallback rollout failed")
+                return super().run(
+                    *arguments, input_text=input_text, check=check
+                )
+
+        client = FailGeometryFallbackOnce()
+        with self.assertRaisesRegex(
+            ValueError, "geometry fallback rollout failed"
+        ):
+            SyncWorker(
+                self.sessions,
+                self.keyring,
+                client,
+                worker_id="geometry-fallback-failure",
+                live_reload_timeout=0.01,
+                image_puller=lambda _reference: None,
+            ).run_once()
+
+        status = service.get_camera_deployment_status("camera-01")
+        self.assertEqual(status["overall_state"], "failed")
+        self.assertEqual(
+            status["deployments"][0]["applied_geometry_revision"], 0
+        )
+        self.assertEqual(
+            status["deployments"][0]["desired_geometry_revision"], 1
+        )
+        with self.sessions() as session:
+            deployment = session.scalar(select(SolutionDeployment))
+            sync = session.get(DeploymentSyncState, deployment.id)
+            self.assertEqual(sync.applied_assignment_set_id, committed.id)
+            applied_camera = session.scalar(
+                select(CameraDeploymentAssignment).where(
+                    CameraDeploymentAssignment.assignment_set_id == committed.id
+                )
+            )
+            applied_config = session.scalar(
+                select(CameraApplicationAssignment.configuration).where(
+                    CameraApplicationAssignment.camera_assignment_id
+                    == applied_camera.id
+                )
+            )
+            self.assertEqual(
+                applied_config, request["assignments"][0]["config"]
+            )
+            _catalog_id, desired_assignments, *_ = (
+                service._current_catalog_assignments(session, deployment)
+            )
+            self.assertEqual(
+                desired_assignments[0]["config"]["zones"]["anpr"][0]["id"],
+                zone["shape_key"],
+            )
+        self.assertTrue(
+            any(call[0][:2] == ("rollout", "status") for call in client.calls)
+        )
 
     def test_camera_snapshot_and_reports_proxy_to_apex(self):
         import threading

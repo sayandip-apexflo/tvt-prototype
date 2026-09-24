@@ -531,6 +531,10 @@ desired revision. It does not change the Pod template or Pod UID. If the
 runtime does not acknowledge within `TVT_RUNTIME_RELOAD_TIMEOUT`, the worker
 falls back to the normal bundle rollout. Camera endpoint or credential changes
 never use live reload because their `subPath` Secret mounts require a restart.
+Camera geometry revisions are desired-state-only assignment changes and use this
+same exact-revision acknowledgement path; a timeout or negative acknowledgement
+falls back to the existing rollout path without advancing `applied_revision`
+until that fallback succeeds.
 
 Synchronization is idempotent:
 
@@ -901,7 +905,14 @@ the plant interior, and its Entry/Exit role) is configured per camera through
 the console's Zones & Lines tab, over a live snapshot -- see `HLD.md` §3.8.
 The "Site role"/"Direction" columns above are the gate name and role that
 tab's Entry/Exit line configuration is expected to use, correlating the two
-cameras at a physical gate.
+cameras at a physical gate. The saved camera geometry is authoritative: initial
+deployment preview fetches the latest compiled config, and later shape
+create/edit/delete operations atomically queue a new immutable desired revision
+for every compatible deployment. Operators do not copy raw geometry JSON into
+the Solutions page. Camera detail polls the bounded deployment-status endpoint
+for pending/applying/applied/failed state, revision convergence, failure code,
+and retry time. Active enrollment defers application while updating the
+restoration config so the newest geometry is restored automatically.
 
 ## 14. Observability and error handling
 
