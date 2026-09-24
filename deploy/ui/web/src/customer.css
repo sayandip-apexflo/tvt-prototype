@@ -177,6 +177,9 @@
 .deployment-app-choices label{display:flex;gap:6px;align-items:center}
 .deployment-app-choices input{width:auto;margin:0}
 .deployment-geometry-summary{margin:0;padding:9px 10px;border:1px solid var(--cu-border);border-radius:6px;background:var(--cu-soft,#f8f7fb);color:var(--cu-muted);font-size:10px}
+.deployment-advanced{margin:14px 0 4px;border:1px solid var(--cu-border);border-radius:6px;padding:0 12px}
+.deployment-advanced summary{cursor:pointer;padding:10px 0;color:var(--cu-muted);font-size:11px;font-weight:600}
+.deployment-advanced[open]{padding-bottom:12px}
 [data-theme='dark'] .customer-app .cu-event-facts>div{background:var(--cu-soft);border:1px solid var(--cu-border);color:var(--cu-ink)}
 [data-theme='dark'] .customer-app .cu-event-facts :is(dt,dd){color:inherit}
 @media(max-width:600px){.cu-brand{align-items:center}.cu-brand>img{width:140px}.cu-site-form{align-items:stretch;flex-direction:column}.enrollment-designation{grid-template-columns:1fr}.enrollment-designation form{align-items:stretch;flex-direction:column}.enrollment-designation form .cu-btn{width:100%}}

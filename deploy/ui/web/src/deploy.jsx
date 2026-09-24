@@ -1,8 +1,7 @@
 import React,{useCallback,useEffect,useState} from 'react';
-import {Plus,X} from 'lucide-react';
+import {X} from 'lucide-react';
 import {edgeApi} from './api';
-import {Pill,titleCase} from './shared';
-import {useTvtCameras} from './cameras';
+import {titleCase} from './shared';
 
 export function useSolutions(){
   const [solutions,setSolutions]=useState([]);
@@ -25,7 +24,7 @@ function randomId(){
   return `${hex.slice(0,4).join('')}-${hex.slice(4,6).join('')}-${hex.slice(6,8).join('')}-${hex.slice(8,10).join('')}-${hex.slice(10,16).join('')}`;
 }
 
-function DeploymentModal({solutions,cameras,close,onDeployed}){
+export function DeploymentModal({solutions,cameras,close,onDeployed}){
   const [catalogId,setCatalogId]=useState(solutions[0]?.catalog_id||'');
   const [deploymentId,setDeploymentId]=useState('traffic-v4');
   const [inferenceMode,setInferenceMode]=useState('cpu-compatible');
@@ -97,18 +96,25 @@ function DeploymentModal({solutions,cameras,close,onDeployed}){
   }
 
   return <div className="cu-event-scrim" onClick={close}><article className="cu-event-modal" onClick={e=>e.stopPropagation()}>
-    <div className="cu-event-modal-head"><div><span className="cu-eyebrow">DEPLOYMENT</span><h2>Deploy Traffic solution</h2><p>Choose an available immutable catalog image, camera workloads, and resources. Camera geometry is loaded from each camera's Zones &amp; Lines tab when you preview.</p></div><button onClick={close} aria-label="Close"><X/></button></div>
+    <div className="cu-event-modal-head"><div><span className="cu-eyebrow">DEPLOYMENT</span><h2>Deploy solution</h2><p>Choose a solution and the cameras it should run on. Camera geometry is loaded from each camera's Zones &amp; Lines tab when you preview.</p></div><button onClick={close} aria-label="Close"><X/></button></div>
 
     <form className="cu-camera-form" onSubmit={e=>e.preventDefault()}>
-      <label className="cu-stream-field">Catalog entry<select value={catalogId} onChange={e=>setCatalogId(e.target.value)} required>{solutions.map(s=><option key={s.catalog_id} value={s.catalog_id}>{s.solution_name} · {s.version} · {s.hardware_profile}</option>)}</select></label>
+      <label className="cu-stream-field">Catalog entry<select value={catalogId} onChange={e=>setCatalogId(e.target.value)} required>{solutions.map(s=><option key={s.catalog_id} value={s.catalog_id}>{s.solution_name} · {s.version}</option>)}</select></label>
       <label>Deployment ID<input value={deploymentId} onChange={e=>setDeploymentId(e.target.value)} required/></label>
-      <label>Inference mode<select value={inferenceMode} onChange={e=>setInferenceMode(e.target.value)}><option value="cpu-compatible">CPU compatible</option><option value="gpu-npu">Intel GPU + NPU</option></select></label>
-      <label>CPU request<input value={resources.cpu_request} onChange={e=>setResources({...resources,cpu_request:e.target.value})}/></label>
-      <label>CPU limit<input value={resources.cpu_limit} onChange={e=>setResources({...resources,cpu_limit:e.target.value})}/></label>
-      <label>Memory request<input value={resources.memory_request} onChange={e=>setResources({...resources,memory_request:e.target.value})}/></label>
-      <label>Memory limit<input value={resources.memory_limit} onChange={e=>setResources({...resources,memory_limit:e.target.value})}/></label>
-      <label>Persistent state<input value={resources.state_size} onChange={e=>setResources({...resources,state_size:e.target.value})}/></label>
     </form>
+    {/* Hardware/resource tuning stays available but collapsed: site users
+        deploy with the defaults and never need to see infrastructure detail. */}
+    <details className="deployment-advanced">
+      <summary>Advanced settings</summary>
+      <div className="cu-camera-form">
+        <label>Inference mode<select value={inferenceMode} onChange={e=>setInferenceMode(e.target.value)}><option value="cpu-compatible">CPU compatible</option><option value="gpu-npu">Intel GPU + NPU</option></select></label>
+        <label>CPU request<input value={resources.cpu_request} onChange={e=>setResources({...resources,cpu_request:e.target.value})}/></label>
+        <label>CPU limit<input value={resources.cpu_limit} onChange={e=>setResources({...resources,cpu_limit:e.target.value})}/></label>
+        <label>Memory request<input value={resources.memory_request} onChange={e=>setResources({...resources,memory_request:e.target.value})}/></label>
+        <label>Memory limit<input value={resources.memory_limit} onChange={e=>setResources({...resources,memory_limit:e.target.value})}/></label>
+        <label>Persistent state<input value={resources.state_size} onChange={e=>setResources({...resources,state_size:e.target.value})}/></label>
+      </div>
+    </details>
 
     <h3>Cameras</h3>
     {assignableCameras.length?<div className="deployment-camera-list">{assignableCameras.map(c=><div className="cu-device-row deployment-camera-row" key={c.camera_id}>
@@ -120,35 +126,12 @@ function DeploymentModal({solutions,cameras,close,onDeployed}){
     </div>)}</div>:<p className="cu-empty">No assignable cameras. A camera must be enabled with a configured stream first.</p>}
 
     {error&&<p className="cu-notice" role="alert">{error}</p>}
-    {preview&&<p className="cu-notice">Immutable preview ready — {preview.image_reference} · bundle {preview.bundle_sha256.slice(0,16)}…</p>}
+    {preview&&<p className="cu-notice">Ready to deploy {selectedCatalog?.solution_name} {selectedCatalog?.version} to {previewPayload.assignments.length} camera{previewPayload.assignments.length===1?'':'s'}.</p>}
 
     <div className="cu-table-actions" style={{marginTop:16}}>
       <button type="button" className="cu-btn" onClick={close}>Cancel</button>
-      <button type="button" className="cu-btn" disabled={!catalogId||!Object.values(selected).some(Boolean)} onClick={createPreview}>Preview bundle</button>
-      <button type="button" className="cu-btn cu-primary" disabled={!preview||busy} onClick={commit}>{busy?'Committing…':'Commit preview'}</button>
+      <button type="button" className="cu-btn" disabled={!catalogId||!Object.values(selected).some(Boolean)} onClick={createPreview}>Preview deployment</button>
+      <button type="button" className="cu-btn cu-primary" disabled={!preview||busy} onClick={commit}>{busy?'Deploying…':'Deploy'}</button>
     </div>
   </article></div>;
-}
-
-export function SolutionsPage({onChanged}){
-  const {solutions,solutionsError,reloadSolutions}=useSolutions();
-  const {tvtCameras}=useTvtCameras();
-  const [showDeploy,setShowDeploy]=useState(false);
-  const available=solutions.filter(s=>s.status==='available'&&s.image.digest);
-  async function onDeployed(){await reloadSolutions();if(onChanged)await onChanged()}
-
-  return <>
-    <div className="cu-section-title"><h2>Catalog <b>{solutions.length}</b></h2><button className="cu-btn cu-primary" disabled={!available.length} onClick={()=>setShowDeploy(true)}><Plus size={15}/>Deploy solution</button></div>
-    {solutionsError&&<p className="cu-notice" role="alert">{solutionsError}</p>}
-
-    <section className="cu-settings-panel">
-      <h2>Approved solutions</h2>
-      {solutions.length?<div className="cu-table-wrap"><table className="cu-table"><thead><tr><th>Solution</th><th>Hardware</th><th>Image</th><th>Status</th></tr></thead>
-        <tbody>{solutions.map(s=><tr key={s.catalog_id}><td><strong>{s.solution_name}</strong><small>{s.version}</small></td><td>{s.hardware_profile}</td><td className="mono">{s.image.reference||`${s.image.repository}:${s.image.tag}`}</td><td><Pill value={s.status}/></td></tr>)}</tbody>
-      </table></div>:<p className="cu-empty">Catalog is empty. Run the trusted catalog seed and refresh workflow.</p>}
-    </section>
-
-    <p className="cu-notice">Use this page for initial deployment only. Camera geometry and ongoing deployment progress are managed from each camera's Zones &amp; Lines tab. Credentials never appear in bundle previews or this UI.</p>
-    {showDeploy&&<DeploymentModal solutions={available} cameras={tvtCameras} close={()=>setShowDeploy(false)} onDeployed={onDeployed}/>}
-  </>;
 }

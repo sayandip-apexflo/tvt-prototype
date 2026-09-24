@@ -1882,6 +1882,46 @@ subjects:
 roleRef: {kind: Role, name: tvt-node-agent-proxy-reader, apiGroup: rbac.authorization.k8s.io}
 YAML
 
+# The /apexfabricdashboard Cluster page reads apexfabric-control's
+# /api/status, which lists ReplicaSets, Events and ApexNodeStatuses as the
+# node-agent ServiceAccount. The frozen foundation manifest never grants those
+# reads, so the tabs render empty. Grant read-only access additively, same as
+# above.
+k3s kubectl apply -f - <<'YAML'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: tvt-node-agent-cluster-view, namespace: apexfabric}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: tvt-node-agent-cluster-view, namespace: apexfabric}
+subjects:
+  - {kind: ServiceAccount, name: node-agent, namespace: apexfabric}
+roleRef: {kind: Role, name: tvt-node-agent-cluster-view, apiGroup: rbac.authorization.k8s.io}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: tvt-node-agent-node-status-reader}
+rules:
+  - apiGroups: ["apexfabric.com"]
+    resources: ["apexnodestatuses"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: tvt-node-agent-node-status-reader}
+subjects:
+  - {kind: ServiceAccount, name: node-agent, namespace: apexfabric}
+roleRef: {kind: ClusterRole, name: tvt-node-agent-node-status-reader, apiGroup: rbac.authorization.k8s.io}
+YAML
+
 install -o root -g root -m 0644 \
   "${REPO_ROOT}/deploy/systemd/apexfabric-control.service" \
   /etc/systemd/system/apexfabric-control.service

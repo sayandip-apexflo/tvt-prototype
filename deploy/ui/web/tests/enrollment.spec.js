@@ -63,19 +63,23 @@ async function mockDashboard(page,{active=false,postError=false}={}){
   return {posts,requests};
 }
 
-test('Solutions stays catalog-first without deployment or designation controls',async({page})=>{
+test('site dashboard hides infrastructure views and deploys from Cameras',async({page})=>{
   const state=await mockDashboard(page);
   await page.goto('/dashboard');
-  await page.getByRole('button',{name:'Solutions',exact:true}).click();
 
-  await expect(page.getByRole('heading',{name:/Approved solutions/})).toBeVisible();
-  await expect(page.getByRole('heading',{name:'Deployments'})).toHaveCount(0);
-  await expect(page.locator('.enrollment-designation')).toHaveCount(0);
-  await expect.poll(()=>state.requests.includes('/dashboard/api/v1/deployments')).toBe(false);
+  await expect(page.getByRole('button',{name:'Cameras',exact:true})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Solutions',exact:true})).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Cluster',exact:true})).toHaveCount(0);
+  await expect.poll(()=>state.requests.some(path=>path.startsWith('/dashboard/api/v1/cluster'))).toBe(false);
 
+  await page.getByRole('button',{name:'Cameras',exact:true}).click();
   await page.getByRole('button',{name:'Deploy solution'}).click();
   await expect(page.locator('textarea')).toHaveCount(0);
+  await expect(page.locator('.enrollment-designation')).toHaveCount(0);
   await expect(page.getByText(/Camera geometry is loaded from each camera/)).toBeVisible();
+  await expect(page.getByLabel('CPU request')).toBeHidden();
+  await expect(page.getByText(/registry\/traffic|intel-285h/)).toHaveCount(0);
+  await expect.poll(()=>state.requests.includes('/dashboard/api/v1/deployments')).toBe(false);
 });
 
 test('Live enrollment follows every TVT assignment instead of raw assignment order',async({page})=>{

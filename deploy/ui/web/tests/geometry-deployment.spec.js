@@ -89,13 +89,13 @@ async function mockDashboard(page){
 test('initial deployment always previews authoritative camera geometry',async({page})=>{
   const state=await mockDashboard(page);
   await page.goto('/dashboard');
-  await page.getByRole('button',{name:'Solutions',exact:true}).click();
+  await page.getByRole('button',{name:'Cameras',exact:true}).click();
   await page.getByRole('button',{name:'Deploy solution'}).click();
 
   await page.locator('.deployment-camera-choice input').check();
   await expect(page.getByText(/1 saved shapes · revision 2/)).toBeVisible();
   await expect(page.locator('textarea')).toHaveCount(0);
-  await page.getByRole('button',{name:'Preview bundle'}).click();
+  await page.getByRole('button',{name:'Preview deployment'}).click();
 
   await expect.poll(state.previewBody).not.toBeNull();
   expect(state.previewBody().assignments[0].config).toEqual(originalConfig);

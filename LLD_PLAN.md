@@ -909,7 +909,7 @@ cameras at a physical gate. The saved camera geometry is authoritative: initial
 deployment preview fetches the latest compiled config, and later shape
 create/edit/delete operations atomically queue a new immutable desired revision
 for every compatible deployment. Operators do not copy raw geometry JSON into
-the Solutions page. Camera detail polls the bounded deployment-status endpoint
+the deploy dialog (Cameras → Deploy solution). Camera detail polls the bounded deployment-status endpoint
 for pending/applying/applied/failed state, revision convergence, failure code,
 and retry time. Active enrollment defers application while updating the
 restoration config so the newest geometry is restored automatically.

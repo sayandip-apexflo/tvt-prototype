@@ -307,11 +307,12 @@ only supported image input.
 
 ## Phase 4: preview and deploy TVT Mills from the catalog
 
-The normal operator path is the Solutions page at
-`http://127.0.0.1:8089/#solutions`. Select an `available` catalog entry,
-enabled/online cameras, applications, inference mode, resources, and normalized
-geometry. Review the generated bundle and desired state, then commit that exact
-preview.
+The normal operator path is **Cameras → Deploy solution** on the site
+dashboard (`http://<edge-host>:18081/dashboard`). Select an `available` catalog
+entry and enabled cameras with their applications; inference mode and resources
+are under "Advanced settings". Geometry comes from each camera's Zones & Lines
+tab. Preview, then deploy that exact preview. Catalog and cluster detail are in
+the admin view (`/apexfabricdashboard` → Catalog / Cluster).
 
 The equivalent API sequence is:
 

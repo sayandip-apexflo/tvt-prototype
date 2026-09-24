@@ -16,3 +16,7 @@ html[data-theme='dark'] .apex-brand{filter:invert(1)}
 @media(max-width:1024px){.apex-brand{padding:0 8px 28px}.brand-lockup{display:none}.brand-compact{display:block}}
 /* Maintain readable contrast for operational details. */
 .page-heading p,.section-heading p,.kpi>p{color:#81798b}.kpi-top{color:#645d70}.deployment-meta,.deployment-metrics{color:#8a7c97}.topology-footer,.page-footer{color:#95899f}.camera-node small{color:#8d7e9b}.camera-node strong{font-size:9px}.site-node small,.device-node small{color:#8f819b}.site-node strong{font-size:11px}.badge{font-size:9px}.compact strong{font-size:10px}.compact>div>span{font-size:9px}.topology-map{min-height:253px}.topology-branches:has(.device-branch:only-child){justify-content:center}.topology-branches:has(.device-branch:only-child) .device-branch:before{display:none}
+
+/* Admin Cluster/Catalog tables (adminCluster.jsx) */
+.table-wrap td small{display:block;color:#96889f;font-size:10px;margin-top:3px}
+.table-wrap .mono{font:10px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere;max-width:340px}

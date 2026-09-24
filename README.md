@@ -349,8 +349,8 @@ sudo -u tvt-edge /opt/tvt/venv/bin/tvt-edge init-site \
 Catalog state is read with `GET /api/v1/solutions` and explicitly refreshed
 from the edge-local OCI registry with `POST /api/v1/solutions/refresh`.
 Refreshing only resolves the v4 tag and availability; it does not register or
-modify deployments. Create or reconfigure a deployment through the Solutions
-page, or call `POST /api/v1/deployments/preview` followed by
+modify deployments. Create a deployment from the site dashboard's Cameras page
+("Deploy solution"), or call `POST /api/v1/deployments/preview` followed by
 `POST /api/v1/deployments` with the returned `bundle_sha256`. Raw bundle upload
 is restricted to the trusted internal installer endpoint.
 

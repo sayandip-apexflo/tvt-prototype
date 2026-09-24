@@ -11,11 +11,20 @@ docs (`HLD.md`, `LLD_PLAN.md`, `MONITORING.md`, `METRICS.md`, `COMMANDS.md`,
 
 `deploy/ui/web/src` (served at `/dashboard`, port 18081) is the **sole**
 home for TVT frontend logic — present and future. Camera CRUD/credentials,
-deployment lifecycle, zones/lines, enrollment, alerts, cluster/operations
-views, reports, settings: all of it goes there. Never create, resurrect, or
+deployment lifecycle (new deployments start from the Cameras page's "Deploy
+solution"), zones/lines, enrollment, alerts, activity, reports, settings: all
+of it goes there. Never create, resurrect, or
 add to a separate TVT-hosted console. The legacy `ui/` (TypeScript/Vite)
 console has been fully retired and deleted; `tvt_edge/api/app.py` is a
 headless JSON API with no static UI serving.
+
+`/dashboard` is the **site-user** view and must not show infrastructure
+detail: no K3s/cluster views (nodes, pods, services, PVCs, events), catalog
+internals (image references, digests, hardware profiles) or bundle hashes;
+keep resource/inference tuning collapsed under "Advanced". Infrastructure views
+live in `main.jsx`'s `Admin` (`/apexfabricdashboard`, `adminCluster.jsx`:
+Cluster + Catalog) and read only apexfabric-control's `:8088` API. This is
+about hiding detail, not access control — see the next paragraph.
 
 `/dashboard` is deliberately unauthenticated (`deploy/ui/image-contract.yaml`
 `limitations`: "not a security boundary between users") — this stays true

@@ -296,7 +296,12 @@ flowchart TB
 ```
 
 The operator-facing React UI and authoritative camera inventory are served by
-ApexFabric control. TVT components consume its loopback APIs and do not depend
+ApexFabric control. The site-user view (`/dashboard`) covers cameras,
+deployments started from the Cameras page, zones/lines, enrollment, alerts and
+reports, and deliberately hides infrastructure detail. K3s cluster state
+(nodes, workloads, storage, events) and the Solution Pack catalog are shown
+only in the credential-protected admin view (`/apexfabricdashboard`), which
+reads apexfabric-control's own API. TVT components consume its loopback APIs and do not depend
 on an in-cluster ingress controller or Service.
 
 ## 5. Component responsibilities
