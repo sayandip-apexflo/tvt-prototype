@@ -127,6 +127,7 @@ required_resources = {
     "prepare-tvt-edge-host.sh", "install-tvt-edge-host.sh", "alembic.ini",
     "config/platform.env", "config/pipeline.env", "config/hardware-matrix.env",
     "scripts/lib/tvt-installer-common.sh",
+    "scripts/lib/tvt-solution-upgrade.py",
     "scripts/tvt-edge-operations.sh",
     "scripts/tvt-hardware-inventory.py",
     "deploy/k8s/apexfabric-foundation.yaml", "deploy/k8s/apexfabric-node-management.yaml",

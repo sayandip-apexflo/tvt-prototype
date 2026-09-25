@@ -203,6 +203,7 @@ class EdgeHostInstallerTests(unittest.TestCase):
             "import-pipeline-traffic-image",
             "bootstrap-postgresql",
             "upgrade-application",
+            "upgrade-solution-image",
         ):
             self.assertIn(operation, result.stderr)
         retired = (
@@ -216,6 +217,31 @@ class EdgeHostInstallerTests(unittest.TestCase):
         for filename in retired:
             self.assertFalse((ROOT / "scripts" / filename).exists(), filename)
 
+    def test_solution_upgrade_operation_is_resumable_and_secret_free(self) -> None:
+        operations = (ROOT / "scripts/tvt-edge-operations.sh").read_text(
+            encoding="utf-8"
+        )
+        helper = (ROOT / "scripts/lib/tvt-solution-upgrade.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("tvt_op_upgrade_solution_image", operations)
+        for action in ("prepare", "activate", "status", "rollback"):
+            self.assertIn(action, helper)
+        for required in (
+            "validate-solution-delivery.py",
+            "import-pipeline-traffic-image",
+            "k3s",
+            "crictl",
+            "seed-solutions",
+            "refresh-solutions",
+            "source_bundle_sha256",
+            "target_bundle_sha256",
+            "operator_required",
+        ):
+            self.assertIn(required, helper)
+        self.assertNotIn("camera-secret", helper)
+        self.assertNotIn("rtsp://", helper)
+
     def make_bundle(self, root: Path) -> None:
         manifest = json.loads(
             (ROOT / "release/manifest.template.json").read_text(encoding="utf-8")
@@ -227,7 +253,8 @@ class EdgeHostInstallerTests(unittest.TestCase):
         required = {
             "prepare-tvt-edge-host.sh", "install-tvt-edge-host.sh", "alembic.ini",
             "config/platform.env", "config/pipeline.env", "config/hardware-matrix.env",
-            "scripts/lib/tvt-installer-common.sh", "scripts/tvt-edge-operations.sh",
+            "scripts/lib/tvt-installer-common.sh", "scripts/lib/tvt-solution-upgrade.py",
+            "scripts/tvt-edge-operations.sh",
             "scripts/tvt-hardware-inventory.py", "scripts/validate-solution-delivery.py",
             "deploy/k8s/apexfabric-foundation.yaml", "deploy/k8s/apexfabric-node-management.yaml",
             "deploy/host/tvt-edge.env.example", "deploy/host/postgresql-tvt.conf",

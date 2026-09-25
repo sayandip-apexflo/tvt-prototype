@@ -109,6 +109,8 @@ DEFAULT_ROUTES = frozenset(
         "/api/v1/alerts/{alert_id}/notifications",
         "/api/v1/deployments",
         "/api/v1/deployments/preview",
+        "/api/v1/deployments/{deployment_id}/upgrade",
+        "/api/v1/deployments/{deployment_id}/upgrade/preview",
         "/api/v1/deployments/{deployment_id}/assignments",
         "/api/v1/deployments/{deployment_id}/rollback",
         "/api/v1/deployments/{deployment_id}/start",

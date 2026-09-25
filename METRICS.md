@@ -213,7 +213,10 @@ application_build_info{service,version}
 ```
 
 HTTP routes must be normalized templates such as `/cameras/{camera_id}`, not
-raw paths containing IDs.
+raw paths containing IDs. Deployment image changes use the bounded templates
+/api/v1/deployments/{deployment_id}/upgrade/preview and
+/api/v1/deployments/{deployment_id}/upgrade; the deployment ID is never a
+metric-label value.
 
 #### 3.7.1 Face-enrollment sessions
 

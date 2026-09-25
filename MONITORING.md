@@ -327,7 +327,10 @@ tvt_alert_emergency_spool_items
 ```
 
 Use normalized route templates such as `/cameras/{camera_id}`, not raw request
-paths containing IDs.
+paths containing IDs. The deployment upgrade preview and commit endpoints are
+recorded as /api/v1/deployments/{deployment_id}/upgrade/preview and
+/api/v1/deployments/{deployment_id}/upgrade, never with a concrete deployment
+ID in a metric label.
 
 ### 7.3 Label policy
 

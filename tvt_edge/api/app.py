@@ -84,6 +84,16 @@ class CatalogDeploymentCommit(CatalogDeploymentPreview):
     idempotency_key: str
 
 
+class CatalogUpgradePreviewInput(StrictModel):
+    catalog_id: str
+
+
+class CatalogUpgradeCommitInput(CatalogUpgradePreviewInput):
+    source_bundle_sha256: str
+    preview_bundle_sha256: str
+    idempotency_key: str
+
+
 class AssignmentCommit(StrictModel):
     assignments: list[AssignmentInput]
     idempotency_key: str
@@ -748,6 +758,37 @@ def create_app(
     @app.get("/api/v1/deployments")
     def list_deployments() -> list[dict[str, Any]]:
         return service.list_deployments()
+
+    @app.post("/api/v1/deployments/{deployment_id}/upgrade/preview")
+    def preview_catalog_upgrade(
+        deployment_id: str, body: CatalogUpgradePreviewInput
+    ) -> dict[str, Any]:
+        return service.preview_catalog_upgrade(
+            deployment_key=deployment_id, catalog_id=body.catalog_id
+        )
+
+    @app.post("/api/v1/deployments/{deployment_id}/upgrade")
+    def commit_catalog_upgrade(
+        deployment_id: str,
+        body: CatalogUpgradeCommitInput,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        assignment_set = service.commit_catalog_upgrade(
+            deployment_key=deployment_id,
+            catalog_id=body.catalog_id,
+            source_bundle_sha256=body.source_bundle_sha256,
+            preview_bundle_sha256=body.preview_bundle_sha256,
+            idempotency_key=body.idempotency_key,
+            actor=actor,
+            request_id=request_id,
+        )
+        return {
+            "deployment_id": deployment_id,
+            "desired_revision": assignment_set.desired_revision,
+            "state": "pending",
+        }
 
     @app.get("/api/v1/audit-events")
     def list_audit_events(limit: int = 200) -> list[dict[str, Any]]:

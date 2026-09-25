@@ -1153,7 +1153,13 @@ class ManagementService:
                     state = "not_applicable"
                 elif enrollment_owned:
                     state = "waiting_for_enrollment"
-                elif sync.state in {"pending", "applying", "applied", "failed"}:
+                elif sync.state in {
+                    "pending",
+                    "applying",
+                    "applied",
+                    "failed",
+                    "operator_required",
+                }:
                     state = sync.state
                 else:
                     state = "pending"
@@ -1979,15 +1985,16 @@ class ManagementService:
         *,
         catalog_id: str,
         deployment_key: str,
-        assignments: list[dict[str, Any]],
-        inference_mode: str,
-        resources: dict[str, str],
-        state_size: str,
+        assignments: list[dict[str, Any]] | None,
+        inference_mode: str | None,
+        resources: dict[str, str] | None,
+        state_size: str | None,
         namespace: str,
         preview_bundle_sha256: str,
         idempotency_key: str,
         actor: str,
         request_id: str,
+        expected_applied_bundle_sha256: str | None = None,
         _enrollment_session_id: uuid.UUID | None = None,
     ) -> DeploymentAssignmentSet:
         if namespace != "apexfabric":
@@ -2013,6 +2020,26 @@ class ManagementService:
                 )
                 if existing is not None:
                     return existing
+                if expected_applied_bundle_sha256 is not None:
+                    (
+                        _source_catalog_id,
+                        assignments,
+                        inference_mode,
+                        resources,
+                        state_size,
+                        source_bundle,
+                    ) = self._applied_catalog_snapshot(
+                        session, idempotent_deployment, for_update=True
+                    )
+                    if source_bundle.bundle_sha256 != expected_applied_bundle_sha256:
+                        raise ValueError(
+                            "applied deployment changed after upgrade preview; preview it again"
+                        )
+            if assignments is None:
+                raise ValueError("catalog deployment assignments are required")
+            if inference_mode is None or resources is None or state_size is None:
+                raise ValueError("catalog deployment settings are required")
+            if idempotent_deployment is not None:
                 self._block_enrollment_conflicts(
                     session, idempotent_deployment.id, assignments, _enrollment_session_id
                 )
@@ -2088,6 +2115,157 @@ class ManagementService:
             )
             return assignment_set
 
+    def preview_catalog_upgrade(
+        self, *, deployment_key: str, catalog_id: str
+    ) -> dict[str, Any]:
+        """Preview an image/catalog upgrade from the last applied snapshot.
+
+        Assignments are reconstructed server-side so host automation never
+        needs camera endpoints, credentials, or another secret-bearing input.
+        The returned source bundle digest is a compare-and-swap token for the
+        commit endpoint.
+        """
+
+        with self.sessions() as session:
+            deployment = session.scalar(
+                select(SolutionDeployment).where(
+                    SolutionDeployment.deployment_key == deployment_key,
+                    SolutionDeployment.deleted_at.is_(None),
+                )
+            )
+            if deployment is None:
+                raise ValueError(f"unknown deployment {deployment_key!r}")
+            (
+                source_catalog_id,
+                assignments,
+                inference_mode,
+                resources,
+                state_size,
+                source_bundle,
+            ) = self._applied_catalog_snapshot(session, deployment)
+            entry, _deployment, _resolved, bundle, desired_state = (
+                self._catalog_deployment_candidate(
+                    session,
+                    catalog_id=catalog_id,
+                    deployment_key=deployment_key,
+                    assignments=assignments,
+                    inference_mode=inference_mode,
+                    resources=resources,
+                    state_size=state_size,
+                )
+            )
+            source_image = source_bundle.canonical_bundle["applications"][0]["image"]
+            target_image = bundle["applications"][0]["image"]
+            return {
+                "deployment_id": deployment_key,
+                "source_catalog_id": source_catalog_id,
+                "source_applied_revision": self._applied_revision(
+                    session, deployment.id
+                ),
+                "source_bundle_sha256": source_bundle.bundle_sha256,
+                "source_image_digest": source_image.get("digest"),
+                "catalog_id": entry.catalog_id,
+                "bundle_sha256": bundle_sha256(bundle),
+                "image_reference": (
+                    target_image["repository"] + "@" + target_image["digest"]
+                ),
+                "bundle": bundle,
+                "desired_state": desired_state,
+            }
+
+    def commit_catalog_upgrade(
+        self,
+        *,
+        deployment_key: str,
+        catalog_id: str,
+        source_bundle_sha256: str,
+        preview_bundle_sha256: str,
+        idempotency_key: str,
+        actor: str,
+        request_id: str,
+    ) -> DeploymentAssignmentSet:
+        return self.commit_catalog_deployment(
+            catalog_id=catalog_id,
+            deployment_key=deployment_key,
+            assignments=None,
+            inference_mode=None,
+            resources=None,
+            state_size=None,
+            namespace="apexfabric",
+            preview_bundle_sha256=preview_bundle_sha256,
+            idempotency_key=idempotency_key,
+            actor=actor,
+            request_id=request_id,
+            expected_applied_bundle_sha256=source_bundle_sha256,
+        )
+
+    @staticmethod
+    def _applied_revision(session: Session, deployment_id: uuid.UUID) -> int:
+        sync = session.get(DeploymentSyncState, deployment_id)
+        if sync is None or sync.applied_assignment_set_id is None:
+            raise ValueError("deployment has no applied revision")
+        applied = session.get(
+            DeploymentAssignmentSet, sync.applied_assignment_set_id
+        )
+        if applied is None:
+            raise ValueError("applied assignment state is missing")
+        return applied.desired_revision
+
+    def _applied_catalog_snapshot(
+        self,
+        session: Session,
+        deployment: SolutionDeployment,
+        *,
+        for_update: bool = False,
+    ) -> tuple[
+        str,
+        list[dict[str, Any]],
+        str,
+        dict[str, str],
+        str,
+        SolutionBundleRevision,
+    ]:
+        query = select(DeploymentSyncState).where(
+            DeploymentSyncState.deployment_id == deployment.id
+        )
+        if for_update:
+            query = query.with_for_update()
+        sync = session.scalar(query)
+        if (
+            sync is None
+            or sync.state != "applied"
+            or sync.applied_assignment_set_id is None
+            or sync.desired_assignment_set_id != sync.applied_assignment_set_id
+        ):
+            raise ValueError(
+                "deployment must have one stable applied revision before an upgrade"
+            )
+        if self._active_enrollment_session(session, deployment.id) is not None:
+            raise ValueError("deployment upgrade is blocked by an active enrollment session")
+        assignment_set = session.get(
+            DeploymentAssignmentSet, sync.applied_assignment_set_id
+        )
+        if assignment_set is None:
+            raise ValueError("applied assignment state is missing")
+        bundle_revision = session.get(
+            SolutionBundleRevision, assignment_set.bundle_revision_id
+        )
+        if bundle_revision is None:
+            raise ValueError("applied bundle revision is missing")
+        catalog_id, assignments, inference_mode, resources, state_size = (
+            self._catalog_assignments_from_set(
+                session, deployment, assignment_set
+            )
+        )
+        return (
+            catalog_id,
+            assignments,
+            inference_mode,
+            resources,
+            state_size,
+            bundle_revision,
+        )
+
     @staticmethod
     def _current_catalog_assignments(
         session: Session, deployment: SolutionDeployment
@@ -2105,7 +2283,19 @@ class ManagementService:
         )
         if assignment_set is None:
             raise ValueError("deployment has no committed assignments")
+        return ManagementService._catalog_assignments_from_set(
+            session, deployment, assignment_set
+        )
+
+    @staticmethod
+    def _catalog_assignments_from_set(
+        session: Session,
+        deployment: SolutionDeployment,
+        assignment_set: DeploymentAssignmentSet,
+    ) -> tuple[str, list[dict[str, Any]], str, dict[str, str], str]:
         bundle_revision = session.get(SolutionBundleRevision, assignment_set.bundle_revision_id)
+        if bundle_revision is None:
+            raise ValueError("deployment assignment bundle is missing")
         configuration = bundle_revision.canonical_bundle.get("configuration", {})
         catalog_id = configuration.get("catalog_id")
         if not catalog_id:
@@ -2118,6 +2308,8 @@ class ManagementService:
         assignments: list[dict[str, Any]] = []
         for camera_assignment in camera_assignments:
             camera = session.get(Camera, camera_assignment.camera_id)
+            if camera is None:
+                raise ValueError("deployment assignment camera is missing")
             apps = session.scalars(
                 select(CameraApplicationAssignment).where(
                     CameraApplicationAssignment.camera_assignment_id == camera_assignment.id

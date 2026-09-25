@@ -3991,6 +3991,51 @@ if __name__ == "__main__":
 TVT_VERIFY_TRAFFIC_QUALIFICATION_PY
 )
 
+tvt_op_upgrade_solution_image() (
+# Prepare, activate, inspect, or roll back a checksum-pinned CV image release.
+set -Eeuo pipefail
+umask 077
+
+readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+[[ $# -gt 0 ]] || {
+  echo "usage: scripts/tvt-edge-operations.sh upgrade-solution-image {prepare|activate|status|rollback} [arguments]" >&2
+  exit 2
+}
+readonly ACTION="$1"
+
+# shellcheck source=scripts/lib/tvt-installer-common.sh
+source "${REPO_ROOT}/scripts/lib/tvt-installer-common.sh"
+case "${ACTION}" in
+  prepare)
+    BUNDLE=""
+    arguments=("$@")
+    for ((index=1; index < ${#arguments[@]}; index++)); do
+      if [[ ${arguments[index]} == --bundle ]]; then
+        BUNDLE="${arguments[index + 1]:-}"
+        break
+      fi
+    done
+    [[ -n ${BUNDLE} ]] || tvt_fail "prepare requires --bundle DIR"
+    tvt_require_root
+    BUNDLE="$(tvt_canonical_directory "${BUNDLE}")"
+    tvt_verify_bundle "${BUNDLE}"
+    tvt_acquire_lock
+    ;;
+  activate|rollback)
+    tvt_require_root
+    tvt_acquire_lock
+    ;;
+  status)
+    ;;
+  *)
+    echo "usage: scripts/tvt-edge-operations.sh upgrade-solution-image {prepare|activate|status|rollback} [arguments]" >&2
+    exit 2
+    ;;
+esac
+
+exec python3 "${REPO_ROOT}/scripts/lib/tvt-solution-upgrade.py" "$@"
+)
+
 tvt_op_upgrade_application() (
 # Upgrade only the TVT application, database schema, and dashboard image on an
 # already-installed edge. The previous release directory is retained and the
@@ -4281,6 +4326,7 @@ operations:
   publish-ui-image
   qualify-traffic-edge
   upgrade-application
+  upgrade-solution-image
   verify-k3s-plane
   verify-local-registry
   verify-pipeline-image-sync
@@ -4315,6 +4361,7 @@ case "${operation}" in
   publish-ui-image) tvt_op_publish_ui_image "$@" ;;
   qualify-traffic-edge) tvt_op_qualify_traffic_edge "$@" ;;
   upgrade-application) tvt_op_upgrade_application "$@" ;;
+  upgrade-solution-image) tvt_op_upgrade_solution_image "$@" ;;
   verify-k3s-plane) tvt_op_verify_k3s_plane "$@" ;;
   verify-local-registry) tvt_op_verify_local_registry "$@" ;;
   verify-pipeline-image-sync) tvt_op_verify_pipeline_image_sync "$@" ;;

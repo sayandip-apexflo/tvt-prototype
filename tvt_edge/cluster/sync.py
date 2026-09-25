@@ -78,6 +78,20 @@ class AppliedState:
     cameras: tuple[WorkCamera, ...]
 
 
+def _bundle_image_references(bundle: dict[str, Any]) -> tuple[str, ...]:
+    references = []
+    for application in bundle.get("applications", []):
+        image = application.get("image", {})
+        repository = image.get("repository")
+        digest = image.get("digest")
+        tag = image.get("tag")
+        if repository and digest:
+            references.append(f"{repository}@{digest}")
+        elif repository and tag:
+            references.append(f"{repository}:{tag}")
+    return tuple(sorted(references))
+
+
 class NodeImagePreflight:
     """Verify an immutable catalog image digest is already cached on a node.
 
@@ -710,6 +724,11 @@ class SyncWorker:
         mutation_started = False
         recovery_error: Exception | None = None
         recovered = False
+        image_changed = bool(
+            work.previous is not None
+            and _bundle_image_references(work.bundle)
+            != _bundle_image_references(work.previous.bundle)
+        )
         try:
             self._preflight_images(work)
             inputs = self._secret_inputs(work)
@@ -821,6 +840,7 @@ class SyncWorker:
                 error,
                 recovered=recovered,
                 recovery_error=recovery_error,
+                operator_required=recovered and image_changed,
             )
             raise
 
@@ -904,6 +924,7 @@ class SyncWorker:
         *,
         recovered: bool = False,
         recovery_error: Exception | None = None,
+        operator_required: bool = False,
     ) -> None:
         now = utc_now()
         safe_error = redact_text(str(error))
@@ -935,13 +956,15 @@ class SyncWorker:
                 attempt.safe_detail["recovery_error"] = redact_text(
                     str(recovery_error)
                 )
-            attempt.retry_at = now + timedelta(seconds=retry_delay)
+            attempt.retry_at = (
+                None if operator_required else now + timedelta(seconds=retry_delay)
+            )
             operation.status = "failed"
             operation.finished_at = now
             operation.error_code = code
             operation.safe_result = copy.deepcopy(attempt.safe_detail)
             if sync.desired_assignment_set_id == work.assignment_set_id:
-                sync.state = "failed"
+                sync.state = "operator_required" if operator_required else "failed"
                 sync.next_attempt_at = attempt.retry_at
                 sync.last_error_code = code
             else:
