@@ -149,7 +149,10 @@ def catalog_traffic_bundle(
                 "metrics": {"path": "/metrics", "port": "management", "format": "json"},
                 "events": {"path": "/events", "port": "management", "protocol": "sse"},
             },
-            "environment": {"SOLUTION_PACK": solution_pack, **devices},
+            # Disable the runtime's periodic full-frame camera_snapshot_event: nothing
+            # consumes it, and its ~400 KB JPEGs evicted real face/plate events from the
+            # byte-bounded telemetry store. Event-attached evidence frames are unaffected.
+            "environment": {"SOLUTION_PACK": solution_pack, "TVT_SNAPSHOT_INTERVAL_S": "0", **devices},
         }],
         "configuration": {
             "edge_id": edge_id,

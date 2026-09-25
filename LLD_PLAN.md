@@ -747,9 +747,13 @@ activating -> capturing -> restoring -> completed
                          -> failed      (via restoring, activation only)
 ```
 
-`naming_status` (`not_applicable -> pending_name -> named`) is independent:
-a session reaches its terminal status once the camera is confirmed restored,
-even if the captured person still needs a display name.
+`naming_status` (`not_applicable -> pending_name -> named`, or
+`pending_name -> discarded`) is independent: a session reaches its terminal
+status once the camera is confirmed restored, even if the captured face
+still needs a name. No person record exists until the operator names it;
+stopping the session first, or letting `NAMING_TIMEOUT_SECONDS` (15 min)
+pass, discards the staged captures (`ENROLLMENT_UNNAMED_DISCARDED`) and the
+API answers "No record created for unnamed person".
 
 **Reconciliation cadence.** A bounded background task inside the management
 API process (`tvt_edge/api/app.py::create_app`'s
@@ -762,48 +766,36 @@ process/host restart. This satisfies the "not the daily retention timer"
 requirement without adding a new metrics port or systemd unit.
 
 **Capture correlation without touching embeddings.** The management plane
-polls apexfabric-control's existing, unmodified
-`GET /api/telemetry/events?deployment_id=` (already used by the live-feed
-panel) and reads only the outer envelope's `event_id`/`event_type`/
-`application`/`camera_id`/`occurred_at`, plus the vendor's optional
-non-sensitive `payload.payload.quality` block for an operator-configured
-quality floor -- it never reads or forwards `payload.payload.embeddings`.
-Outcome (`created` vs. `duplicate`) is derived by cross-referencing the
-accepted event's ID against `GET /api/persons` (also unmodified,
-already-existing), which already carries `enrollment_source_event_id` per
-person; no new apexfabric-control endpoint was added. Naming an
-auto-enrolled person calls the existing, unmodified
-`POST /api/persons/rename`.
+polls apexfabric-control's `GET /api/telemetry/events?deployment_id=` and
+reads only the outer envelope's `event_id`/`event_type`/`application`/
+`camera_id`/`occurred_at`, plus the vendor's optional non-sensitive
+`payload.payload.quality` block for an operator-configured quality floor --
+it never reads or forwards `payload.payload.embeddings`. A session keeps up
+to `MAX_ENROLLMENT_CAPTURES` (5) eligible captures: it stops capturing at
+that count, `CAPTURE_SETTLE_SECONDS` (10s) after the first, or at the
+capture deadline. It asks `GET /api/enrollment-captures?capture_id=` which
+of them apexfabric-control staged (valid vectors) and whether any already
+matches a named person (`duplicate`: staged captures discarded, no record).
+Naming calls `POST /api/persons/enroll {capture_ids, display_name}`, which
+creates the named person from the staged vectors in one transaction (409 if
+the face now matches an enrolled person); stopping or the naming timeout
+calls `POST /api/enrollment-captures/discard`.
 
-**Known, deliberately unpatched upstream gap.** Person creation semantics
-live entirely in `apexfabric/control_plane/identity.py::resolve_identity`
-(pinned copy per §6/AGENTS.md §1 -- "never edit to fix a TVT problem"),
-which today:
+**Identity resolution (TVT divergence from upstream `k3s-prototype`).**
+`apexfabric/control_plane/identity.py::resolve_identity` was changed so
+that:
 
-1. Auto-creates a new `auto_enrolled` person for **any** unmatched
-   `face_detection_event`, not only an authorized `enrollment_capture_event`
-   during an active session (`tests/test_identity.py::
-   test_unmatched_face_auto_enrolls_and_a_near_duplicate_matches` already
-   encodes this as current behavior). TVT enrollment sessions correctly gate
-   *their own* person creation (only an accepted `enrollment_capture_event`
-   inside a `capturing` session is ever treated as a capture), but cannot
-   prevent identity.py from continuing to auto-enroll people from ordinary
-   face-recognition traffic outside any session -- that requires an
-   event-type/authorization check inside `resolve_identity` itself.
-2. Appends a new embedding row on every matched sighting, not only on
-   creation -- an unbounded per-sighting vector-table growth
-   `MONITORING.md` §18-style retention does not currently address.
+1. A `face_detection_event` only ever matches a *named* person at or above
+   `APEXFABRIC_FACE_MATCH_THRESHOLD`; an unmatched face creates nothing and
+   gets no attendance session.
+2. Recognition never adds vectors to a person's gallery -- only the
+   operator-named enrollment captures are stored.
+3. An `enrollment_capture_event` is only staged in `enrollment_captures`
+   (expires after 30 min); a person is created solely by
+   `PersonStore.enroll`.
 
-The correct upstream (`k3s-prototype`) fix is to change
-`resolve_identity` so that (a) `face_detection_event` only ever matches, (b)
-only `enrollment_capture_event` may create a person, and ideally (c) an
-optional authorization hook lets a management plane gate that creation on
-an active, revision-confirmed session, plus (d) bound repeat-sighting vector
-inserts. No TVT-side workaround was attempted that would duplicate this
-logic or the vectors it protects into PostgreSQL; this repository's
-TVT-authored contribution stops at the deployment/session boundary and
-leaves `apexfabric/control_plane/identity.py` and its tests unmodified per
-AGENTS.md §1/§6.
+Pre-existing unnamed (`auto_enrolled`) records are removed once with
+`tvt-edge-operations.sh purge-unnamed-persons` (see COMMANDS.md).
 
 **Retention, deletion, backup/restore, and filesystem protection for the
 identity/vector store.** `apexfabric-control`'s `TelemetryStore.
@@ -842,16 +834,24 @@ configured line's `_entry`/`_exit` ID suffix as `plate_read_event`/
    (`GET /api/v1/reports/vehicle-traffic`, `GET /api/v1/reports/attendance`)
    when called from the console; the systemd units call apexfabric-control
    directly. Apex's own aggregation is the sessions' source of truth --
-   TVT does not re-derive or store per-event state.
-2. `tvt_edge/reporting/email_report.py` filters that day's sessions to ones
-   starting in the half-open interval `[09:00, 18:00)` `Asia/Kolkata`, then
-   computes `entered_count`/`exited_count` (vehicle traffic) or the sum of
-   `duration_seconds` across closed sessions (attendance).
+   TVT does not re-derive or store per-event state. Apex persists plant-wide
+   attendance visits plus compact daily first/last plate aggregates.
+2. Face-event timestamps open and close one plant-wide visit per resolved
+   identity, even when entry and exit occur at different gates. The API returns
+   one total row for every named/registered person, including zero-visit people;
+   only complete intervals contribute duration and incomplete intervals remain
+   explicit. Accepted ANPR events whose camera timestamps fall in `[09:00, 18:00)`
+   `Asia/Kolkata` update a `(local_date, normalized_plate)` row containing the
+   earliest/latest in-window detection and detection count. One detection has an
+   unknown duration. `tvt_edge/reporting/email_report.py` clips attendance
+   intervals to the same window; the apexfabric-control systemd unit pins matching
+   timezone and window values so out-of-window plate reads cannot extend a duration.
 3. The vehicle-traffic CSV never carries plate text: a `vehicle_ref` token is
    assigned per distinct plate within that render only (not persisted, not
-   stable across days). The attendance CSV never carries a person's display
-   name: it uses the internal `person_id` only. This mirrors the discipline
-   the (retired) collector-era store applied to plate text.
+   stable across days) and reports first detection, last detection, duration,
+   detection count, and completeness. The attendance CSV never carries a
+   person's display name: it uses the internal `person_id` and reports first
+   entry, last exit, visit count, total duration, and incomplete-session count.
 4. `/var/lib/tvt-reporting/reporting.sqlite3` holds only per-`(report_date,
    report_kind)` delivery state (`pending`/`sending`/`sent`/`failed`), an
    immutable CSV snapshot, and a deterministic `Message-ID` -- no

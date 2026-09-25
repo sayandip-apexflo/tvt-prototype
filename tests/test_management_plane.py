@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import tempfile
 import unittest
@@ -47,6 +48,8 @@ ROOT = Path(__file__).resolve().parents[1]
 CATALOG_DELIVERY = ROOT / "solution-packs/catalog/tvt-mills-pilot-2026.09.18-v1"
 CATALOG_ID = "tvt-mills-pilot:2026.09.18-v1"
 CATALOG_DIGEST = "sha256:" + "1" * 64
+UPGRADE_CATALOG_ID = "tvt-mills-pilot:2026.09.18-v3"
+UPGRADE_CATALOG_DIGEST = "sha256:" + "3" * 64
 
 
 class FakeKubectl:
@@ -296,6 +299,30 @@ class ManagementPlaneTests(unittest.TestCase):
             request_id="catalog-commit-1",
         )
         return service, request, preview, committed
+
+    def add_upgrade_catalog(self):
+        with self.sessions.begin() as session:
+            source = session.get(SolutionCatalogEntry, CATALOG_ID)
+            session.add(
+                SolutionCatalogEntry(
+                    catalog_id=UPGRADE_CATALOG_ID,
+                    solution_name=source.solution_name,
+                    version="2026.09.18-v3",
+                    hardware_profile=source.hardware_profile,
+                    architectures=copy.deepcopy(source.architectures),
+                    local_registry=source.local_registry,
+                    repository=source.repository,
+                    tag="intel-285h-2026.09.18-v3",
+                    resolved_digest=UPGRADE_CATALOG_DIGEST,
+                    status="available",
+                    contract_json=copy.deepcopy(source.contract_json),
+                    desired_state_schema=copy.deepcopy(source.desired_state_schema),
+                    desired_state_example=copy.deepcopy(source.desired_state_example),
+                    provenance=copy.deepcopy(source.provenance),
+                    checksums=copy.deepcopy(source.checksums),
+                    last_refreshed_at=utc_now(),
+                )
+            )
 
     def catalog_request_with_face_recognition(self):
         request = self.catalog_request()
@@ -1099,6 +1126,150 @@ class ManagementPlaneTests(unittest.TestCase):
         self.assertNotIn("rtsp://", json.dumps(preview))
         self.assertEqual(commit["state"], "pending")
 
+    def test_catalog_upgrade_clones_only_the_stable_applied_snapshot(self):
+        service, request, first_preview, first = self.prepare_catalog_deployment()
+        SyncWorker(
+            self.sessions,
+            self.keyring,
+            FakeKubectl(),
+            worker_id="upgrade-source-worker",
+            image_puller=lambda _reference: None,
+        ).run_once()
+        self.add_upgrade_catalog()
+
+        preview = service.preview_catalog_upgrade(
+            deployment_key=request["deployment_key"],
+            catalog_id=UPGRADE_CATALOG_ID,
+        )
+        self.assertEqual(preview["source_bundle_sha256"], first_preview["bundle_sha256"])
+        self.assertEqual(preview["source_applied_revision"], first.desired_revision)
+        self.assertEqual(preview["catalog_id"], UPGRADE_CATALOG_ID)
+        self.assertEqual(preview["source_image_digest"], CATALOG_DIGEST)
+        self.assertEqual(
+            preview["bundle"]["applications"][0]["image"]["digest"],
+            UPGRADE_CATALOG_DIGEST,
+        )
+        self.assertEqual(
+            preview["desired_state"]["cameras"][0]["config"],
+            request["assignments"][0]["config"],
+        )
+        self.assertNotIn("rtsp://", json.dumps(preview))
+
+        committed = service.commit_catalog_upgrade(
+            deployment_key=request["deployment_key"],
+            catalog_id=UPGRADE_CATALOG_ID,
+            source_bundle_sha256=preview["source_bundle_sha256"],
+            preview_bundle_sha256=preview["bundle_sha256"],
+            idempotency_key="solution-upgrade:test-1",
+            actor="test",
+            request_id="solution-upgrade:test-1",
+        )
+        self.assertEqual(committed.desired_revision, first.desired_revision + 1)
+        with self.sessions() as session:
+            sync = session.scalar(select(DeploymentSyncState))
+            self.assertEqual(sync.state, "pending")
+            assignments = session.scalars(
+                select(CameraDeploymentAssignment).where(
+                    CameraDeploymentAssignment.assignment_set_id == committed.id
+                )
+            ).all()
+            self.assertEqual(len(assignments), 1)
+            self.assertEqual(assignments[0].requested_fps, 8)
+
+    def test_catalog_upgrade_commit_rejects_an_applied_revision_race(self):
+        service, request, _first_preview, _first = self.prepare_catalog_deployment()
+        SyncWorker(
+            self.sessions,
+            self.keyring,
+            FakeKubectl(),
+            worker_id="upgrade-race-source-worker",
+            image_puller=lambda _reference: None,
+        ).run_once()
+        self.add_upgrade_catalog()
+        upgrade_preview = service.preview_catalog_upgrade(
+            deployment_key=request["deployment_key"],
+            catalog_id=UPGRADE_CATALOG_ID,
+        )
+
+        changed = copy.deepcopy(request)
+        changed["assignments"][0]["fps"] = 9
+        changed_preview = service.preview_catalog_deployment(**changed)
+        service.commit_catalog_deployment(
+            **changed,
+            preview_bundle_sha256=changed_preview["bundle_sha256"],
+            idempotency_key="intervening-change",
+            actor="test",
+            request_id="intervening-change",
+        )
+        SyncWorker(
+            self.sessions,
+            self.keyring,
+            FakeKubectl(),
+            worker_id="upgrade-race-worker",
+            image_puller=lambda _reference: None,
+        ).run_once()
+
+        with self.assertRaisesRegex(ValueError, "changed after upgrade preview"):
+            service.commit_catalog_upgrade(
+                deployment_key=request["deployment_key"],
+                catalog_id=UPGRADE_CATALOG_ID,
+                source_bundle_sha256=upgrade_preview["source_bundle_sha256"],
+                preview_bundle_sha256=upgrade_preview["bundle_sha256"],
+                idempotency_key="solution-upgrade:stale",
+                actor="test",
+                request_id="solution-upgrade:stale",
+            )
+
+    def test_catalog_upgrade_requires_an_applied_idle_deployment(self):
+        service, request, _preview, _committed = self.prepare_catalog_deployment()
+        self.add_upgrade_catalog()
+        with self.assertRaisesRegex(ValueError, "stable applied revision"):
+            service.preview_catalog_upgrade(
+                deployment_key=request["deployment_key"],
+                catalog_id=UPGRADE_CATALOG_ID,
+            )
+
+    def test_catalog_upgrade_api_uses_server_side_assignment_snapshot(self):
+        service, request, _preview, _committed = self.prepare_catalog_deployment()
+        SyncWorker(
+            self.sessions,
+            self.keyring,
+            FakeKubectl(),
+            worker_id="upgrade-api-source-worker",
+            image_puller=lambda _reference: None,
+        ).run_once()
+        self.add_upgrade_catalog()
+        app = create_app(self.sessions, self.keyring)
+        from types import SimpleNamespace
+        from tvt_edge.api.app import (
+            CatalogUpgradeCommitInput,
+            CatalogUpgradePreviewInput,
+        )
+
+        preview_route = self.route_handler(
+            app, "/api/v1/deployments/{deployment_id}/upgrade/preview", "POST"
+        )
+        commit_route = self.route_handler(
+            app, "/api/v1/deployments/{deployment_id}/upgrade", "POST"
+        )
+        preview = preview_route(
+            request["deployment_key"],
+            CatalogUpgradePreviewInput(catalog_id=UPGRADE_CATALOG_ID),
+        )
+        committed = commit_route(
+            request["deployment_key"],
+            CatalogUpgradeCommitInput(
+                catalog_id=UPGRADE_CATALOG_ID,
+                source_bundle_sha256=preview["source_bundle_sha256"],
+                preview_bundle_sha256=preview["bundle_sha256"],
+                idempotency_key="solution-upgrade:api",
+            ),
+            SimpleNamespace(state=SimpleNamespace(request_id="api:upgrade")),
+            None,
+        )
+        self.assertEqual(committed["state"], "pending")
+        self.assertNotIn("assignments", committed)
+
     def test_catalog_sync_pulls_digest_before_any_kubernetes_mutation(self):
         _service, _request, _preview, _committed = self.prepare_catalog_deployment()
         client = FakeKubectl()
@@ -1217,6 +1388,9 @@ class ManagementPlaneTests(unittest.TestCase):
                 select(DeploymentSyncAttempt).order_by(DeploymentSyncAttempt.started_at)
             ).all()
             self.assertEqual(applied.id, first.id)
+            self.assertEqual(sync.state, "operator_required")
+            self.assertIsNone(sync.next_attempt_at)
+            self.assertIsNone(attempts[-1].retry_at)
             self.assertTrue(attempts[-1].safe_detail["previous_applied_bundle_restored"])
         rollback = service.rollback(
             "tvt-mills-v1", first_preview["bundle_sha256"], "test", "explicit-rollback"

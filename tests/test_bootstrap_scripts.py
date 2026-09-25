@@ -107,6 +107,23 @@ class BootstrapScriptTests(unittest.TestCase):
         self.assertIn("APEXFABRIC_BODY_EMBEDDING_DIM=1", environment)
         self.assertIn("APEXFABRIC_FACE_MATCH_THRESHOLD=0.6", environment)
 
+    def test_apexfabric_ui_install_restarts_control_with_fast_readiness_probe(self):
+        installer = self.text("install-apexfabric-ui.sh")
+        self.assertIn("systemctl restart apexfabric-control.service", installer)
+        self.assertIn("http://127.0.0.1:8088/api/customer", installer)
+        self.assertNotIn(
+            "--max-time 2 http://127.0.0.1:8088/api/status",
+            installer,
+        )
+
+    def test_application_upgrade_accepts_preexisting_workload_degradation(self):
+        installer = self.text("upgrade-application.sh")
+        self.assertIn(
+            'for component_name in ("host", "database", "k3s_api")',
+            installer,
+        )
+        self.assertNotIn('health.get("status") != "healthy"', installer)
+
     def test_camera_sync_uses_interactive_poll_interval(self):
         service = (ROOT / "deploy/systemd/tvt-camera-sync.service").read_text()
         self.assertIn("tvt-edge sync --interval 1", service)

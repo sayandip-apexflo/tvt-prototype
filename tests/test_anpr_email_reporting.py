@@ -70,6 +70,21 @@ def vehicle_session(plate: str, gate: str, entry: str, exit_: str | None, status
     }
 
 
+def vehicle_span(plate: str, first: str, last: str, detection_count: int = 2) -> dict[str, Any]:
+    first_time = datetime.fromisoformat(first).timestamp()
+    last_time = datetime.fromisoformat(last).timestamp()
+    return {
+        "report_date": datetime.fromisoformat(first).date().isoformat(),
+        "plate_key": "".join(character for character in plate.upper() if character.isalnum()),
+        "plate_text": plate,
+        "first_detection_time": first_time,
+        "last_detection_time": last_time,
+        "duration_seconds": last_time - first_time if detection_count >= 2 else None,
+        "detection_count": detection_count,
+        "status": "complete" if detection_count >= 2 else "single_detection",
+    }
+
+
 def attendance_session(person_id: str, display_name: str, gate: str, entry: str, exit_: str, duration: float) -> dict[str, Any]:
     return {
         "person_id": person_id, "display_name": display_name, "gate": gate,
@@ -83,11 +98,11 @@ def test_vehicle_report_never_puts_plate_text_in_the_csv_or_email(tmp_path: Path
     report_settings = settings(tmp_path)
     store = ReportingStore(report_settings.database_path)
     apex = FakeApex(vehicle={
-        "sessions": [
-            vehicle_session("AB12CD3456", "main-entrance", "2026-09-18T09:15:00+05:30", "2026-09-18T17:00:00+05:30"),
-            vehicle_session("XY98ZT7654", "plant-entrance", "2026-09-18T10:00:00+05:30", None, status="open"),
+        "vehicles": [
+            vehicle_span("AB12CD3456", "2026-09-18T09:15:00+05:30", "2026-09-18T17:00:00+05:30"),
+            vehicle_span("XY98ZT7654", "2026-09-18T10:00:00+05:30", "2026-09-18T10:00:00+05:30", detection_count=1),
         ],
-        "entered_count": 2, "exited_count": 1,
+        "sessions": [], "entered_count": 0, "exited_count": 0,
     })
 
     report = ensure_vehicle_report(store, report_settings, apex, datetime(2026, 9, 18).date())
@@ -95,15 +110,16 @@ def test_vehicle_report_never_puts_plate_text_in_the_csv_or_email(tmp_path: Path
     rendered = message.as_string()
 
     assert report.row_count == 2
-    assert report.summary == {"entered_count": 2, "exited_count": 1}
-    assert "Vehicles entered: 2" in rendered
-    assert "Vehicles exited: 1" in rendered
+    assert report.summary == {"vehicle_count": 2, "duration_count": 1, "single_detection_count": 1}
+    assert "Vehicles observed: 2" in rendered
+    assert "Vehicles with a duration: 1" in rendered
     assert "AB12CD3456" not in rendered
     assert "XY98ZT7654" not in rendered
     assert "AB12CD3456" not in report.csv_text
     assert "XY98ZT7654" not in report.csv_text
     assert "vehicle_ref" in report.csv_text
-    assert "main-entrance" in report.csv_text
+    assert "duration_hh_mm_ss" in report.csv_text
+    assert "07:45:00" in report.csv_text
 
 
 def test_attendance_report_never_puts_display_name_in_the_csv_or_email(tmp_path: Path) -> None:
@@ -113,6 +129,7 @@ def test_attendance_report_never_puts_display_name_in_the_csv_or_email(tmp_path:
         "sessions": [
             attendance_session("p-1", "Jane Doe", "main-entrance", "2026-09-18T09:00:00+05:30", "2026-09-18T17:30:00+05:30", 8.5 * 3600),
         ],
+        "people": [{"person_id": "p-1", "display_name": "Jane Doe"}],
         "total_duration_seconds": 8.5 * 3600,
     })
 
@@ -121,21 +138,45 @@ def test_attendance_report_never_puts_display_name_in_the_csv_or_email(tmp_path:
     rendered = message.as_string()
 
     assert report.row_count == 1
-    assert report.summary == {"total_duration_seconds": 8.5 * 3600}
+    assert report.summary == {
+        "registered_person_count": 1,
+        "people_present_count": 1,
+        "incomplete_session_count": 0,
+        "total_duration_seconds": 8.5 * 3600,
+    }
     assert "Total time inside the plant: 08:30:00" in rendered
     assert "Jane Doe" not in rendered
     assert "Jane Doe" not in report.csv_text
     assert "p-1" in report.csv_text
 
 
+def test_open_attendance_visit_started_before_window_is_incomplete(tmp_path: Path) -> None:
+    report_settings = settings(tmp_path)
+    store = ReportingStore(report_settings.database_path)
+    entry_time = datetime.fromisoformat("2026-09-18T08:00:00+05:30").timestamp()
+    apex = FakeApex(attendance={
+        "sessions": [{
+            "person_id": "p-1", "display_name": "Jane Doe", "status": "open",
+            "entry_time": entry_time, "exit_time": None,
+        }],
+        "people": [{"person_id": "p-1", "display_name": "Jane Doe"}],
+    })
+
+    report = ensure_attendance_report(store, report_settings, apex, datetime(2026, 9, 18).date())
+
+    assert report.summary["incomplete_session_count"] == 1
+    assert report.summary["total_duration_seconds"] == 0
+
+
 def test_window_filters_out_sessions_starting_outside_the_configured_hours(tmp_path: Path) -> None:
     report_settings = settings(tmp_path)
     store = ReportingStore(report_settings.database_path)
     apex = FakeApex(vehicle={
-        "sessions": [
-            vehicle_session("AB12CD3456", "main-entrance", "2026-09-18T09:15:00+05:30", "2026-09-18T09:20:00+05:30"),
-            vehicle_session("XY98ZT7654", "main-entrance", "2026-09-18T23:00:00+05:30", "2026-09-18T23:05:00+05:30"),
+        "vehicles": [
+            vehicle_span("AB12CD3456", "2026-09-18T09:15:00+05:30", "2026-09-18T09:20:00+05:30"),
+            vehicle_span("XY98ZT7654", "2026-09-18T23:00:00+05:30", "2026-09-18T23:05:00+05:30"),
         ],
+        "sessions": [],
     })
     report = ensure_vehicle_report(store, report_settings, apex, datetime(2026, 9, 18).date())
     assert report.row_count == 1
@@ -192,6 +233,13 @@ def test_apex_unavailable_propagates_without_sending_or_recording_a_report(tmp_p
         raise AssertionError("expected the reporting-unavailable failure to propagate")
     assert not sender.messages
     assert store.report(datetime(2026, 9, 18).date(), "vehicle_traffic") is None
+
+
+def test_apex_vehicle_aggregation_uses_the_same_report_window() -> None:
+    service = Path("deploy/systemd/apexfabric-control.service").read_text(encoding="utf-8")
+    assert "Environment=APEXFABRIC_REPORT_TIMEZONE=Asia/Kolkata" in service
+    assert "Environment=APEXFABRIC_REPORT_WINDOW_START=09:00" in service
+    assert "Environment=APEXFABRIC_REPORT_WINDOW_END=18:00" in service
 
 
 def test_timer_is_exactly_1830_and_has_no_late_catchup() -> None:

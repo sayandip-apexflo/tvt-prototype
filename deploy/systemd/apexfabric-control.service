@@ -12,6 +12,9 @@ Environment=PATH=/opt/tvt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr
 Environment=PYTHONPATH=/opt/tvt/current/resources
 Environment=KUBECONFIG=/etc/tvt/kubeconfig
 Environment=APEXFABRIC_STATE_DIR=/var/lib/apexfabric/control
+Environment=APEXFABRIC_REPORT_TIMEZONE=Asia/Kolkata
+Environment=APEXFABRIC_REPORT_WINDOW_START=09:00
+Environment=APEXFABRIC_REPORT_WINDOW_END=18:00
 Environment=APEXFABRIC_REGISTRY_ADDRESS=127.0.0.1:5000
 Environment=APEXFABRIC_TELEMETRY_MAX_BYTES=41943040
 Environment=APEXFABRIC_TELEMETRY_HIGH_WATERMARK=0.90

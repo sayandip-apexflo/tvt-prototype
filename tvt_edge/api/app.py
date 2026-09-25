@@ -21,7 +21,7 @@ from tvt_edge import __version__
 from tvt_edge.alerting import AlertingService
 from tvt_edge.apex_client import ApexClient, ApexUnavailableError
 from tvt_edge.cluster import ClusterStatusReader
-from tvt_edge.enrollment import EnrollmentReconciler
+from tvt_edge.enrollment import UNNAMED_DISCARDED_MESSAGE, EnrollmentReconciler
 from tvt_edge.observability import (
     EdgeMetrics,
     WatchdogMetricsCollector,
@@ -80,6 +80,16 @@ class CatalogDeploymentPreview(StrictModel):
 
 
 class CatalogDeploymentCommit(CatalogDeploymentPreview):
+    preview_bundle_sha256: str
+    idempotency_key: str
+
+
+class CatalogUpgradePreviewInput(StrictModel):
+    catalog_id: str
+
+
+class CatalogUpgradeCommitInput(CatalogUpgradePreviewInput):
+    source_bundle_sha256: str
     preview_bundle_sha256: str
     idempotency_key: str
 
@@ -749,6 +759,37 @@ def create_app(
     def list_deployments() -> list[dict[str, Any]]:
         return service.list_deployments()
 
+    @app.post("/api/v1/deployments/{deployment_id}/upgrade/preview")
+    def preview_catalog_upgrade(
+        deployment_id: str, body: CatalogUpgradePreviewInput
+    ) -> dict[str, Any]:
+        return service.preview_catalog_upgrade(
+            deployment_key=deployment_id, catalog_id=body.catalog_id
+        )
+
+    @app.post("/api/v1/deployments/{deployment_id}/upgrade")
+    def commit_catalog_upgrade(
+        deployment_id: str,
+        body: CatalogUpgradeCommitInput,
+        request: Request,
+        x_tvt_actor: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        actor, request_id = identity(request, x_tvt_actor)
+        assignment_set = service.commit_catalog_upgrade(
+            deployment_key=deployment_id,
+            catalog_id=body.catalog_id,
+            source_bundle_sha256=body.source_bundle_sha256,
+            preview_bundle_sha256=body.preview_bundle_sha256,
+            idempotency_key=body.idempotency_key,
+            actor=actor,
+            request_id=request_id,
+        )
+        return {
+            "deployment_id": deployment_id,
+            "desired_revision": assignment_set.desired_revision,
+            "state": "pending",
+        }
+
     @app.get("/api/v1/audit-events")
     def list_audit_events(limit: int = 200) -> list[dict[str, Any]]:
         return service.list_audit_events(limit)
@@ -892,25 +933,35 @@ def create_app(
         x_tvt_actor: str | None = Header(default=None),
     ) -> dict[str, Any]:
         actor, request_id = identity(request, x_tvt_actor)
-        return service.cancel_enrollment_session(
-            deployment_key=deployment_id, session_id=session_id, actor=actor, request_id=request_id,
+        view = service.cancel_enrollment_session(
+            deployment_key=deployment_id,
+            session_id=session_id,
+            actor=actor,
+            request_id=request_id,
+            apex=apex,
         )
+        if view.get("naming_status") != "named":
+            # Stopping before the person is named never creates a record.
+            raise ValueError(UNNAMED_DISCARDED_MESSAGE)
+        return view
 
     @app.get("/api/v1/enrollment/people")
     def enrollment_people(deployment_id: str | None = None) -> list[dict[str, Any]]:
         return service.list_people_awaiting_names(deployment_id)
 
-    @app.post("/api/v1/enrollment/people/{person_id}/name")
-    def set_person_display_name(
-        person_id: str,
+    @app.post("/api/v1/deployments/{deployment_id}/enrollment/sessions/{session_id}/name")
+    def name_enrollment_session(
+        deployment_id: str,
+        session_id: str,
         body: PersonNameInput,
         request: Request,
         x_tvt_actor: str | None = Header(default=None),
     ) -> dict[str, Any]:
         actor, request_id = identity(request, x_tvt_actor)
         try:
-            return service.set_person_display_name(
-                person_id=person_id,
+            return service.name_enrollment_session(
+                deployment_key=deployment_id,
+                session_id=session_id,
                 display_name=body.display_name,
                 apex=apex,
                 actor=actor,
@@ -950,30 +1001,6 @@ def create_app(
     @app.get("/api/v1/reports/attendance-log")
     def attendance_log_report(limit: int = 10) -> Response:
         return _proxy_report("/api/reports/attendance-log", {"limit": str(limit)})
-
-    @app.post("/api/v1/reports/people/{person_id}/name")
-    def set_report_person_display_name(
-        person_id: str,
-        body: PersonNameInput,
-        request: Request,
-        x_tvt_actor: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        actor, request_id = identity(request, x_tvt_actor)
-        try:
-            return service.set_report_person_display_name(
-                person_id=person_id,
-                display_name=body.display_name,
-                apex=apex,
-                actor=actor,
-                request_id=request_id,
-            )
-        except ApexUnavailableError as error:
-            metrics.application_error("DATABASE_UNAVAILABLE")
-            logger.error(
-                "Report naming failed: apex unavailable",
-                extra={"event": "report_naming_failed", "error_code": "DATABASE_UNAVAILABLE"},
-            )
-            raise ValueError("naming is temporarily unavailable") from error
 
     @app.get("/api/v1/reports/vehicle-traffic")
     def vehicle_traffic_report(date: str | None = None, gate: str | None = None) -> Response:

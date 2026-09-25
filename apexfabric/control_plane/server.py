@@ -30,6 +30,7 @@ from apexfabric.solution_management.catalog import SolutionCatalog
 from apexfabric.solution_management.renderer import render
 from apexfabric.solution_management.validation import validate_bundle
 from apexfabric.control_plane.telemetry import TelemetryStore
+from apexfabric.control_plane.identity import DuplicatePersonError
 from apexfabric.control_plane.device_registry import DeviceRegistry
 from apexfabric.control_plane.storage_failover import reconcile_local_storage_failover
 
@@ -42,7 +43,10 @@ CAMERA_INVENTORY_SECRET = "apexfabric-camera-sources"
 # The "people/vehicles currently in frame" feature was removed from the
 # dashboard; drop these event types at ingestion so no telemetry endpoint
 # serves them, rather than just hiding them client-side.
-SUPPRESSED_TELEMETRY_EVENT_TYPES = {"pedestrian_count_per_frame", "vehicle_count_per_frame"}
+# camera_snapshot_event is a periodic full-frame JPEG (~400 KB) that nothing
+# consumes; storing it filled the byte-bounded telemetry store and evicted real
+# face/plate events within about a minute. Face/plate events carry their own frame.
+SUPPRESSED_TELEMETRY_EVENT_TYPES = {"pedestrian_count_per_frame", "vehicle_count_per_frame", "camera_snapshot_event"}
 TRAFFIC_INFERENCE_MODES = {
     "cpu-compatible": {"VEHICLE_DEVICE": "CPU", "PLATE_DEVICE": "CPU", "OCR_DEVICE": "CPU"},
     "intel-gpu-npu": {"VEHICLE_DEVICE": "GPU", "PLATE_DEVICE": "NPU", "OCR_DEVICE": "MULTI:GPU,NPU"},
@@ -1605,6 +1609,12 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/persons":
             status = parse_qs(parsed.query).get("status", [None])[0]
             self.json_response(HTTPStatus.OK, {"persons": self.controller.persons.list(status)})
+        elif path == "/api/enrollment-captures":
+            try:
+                capture_ids = parse_qs(parsed.query).get("capture_id", [])
+                self.json_response(HTTPStatus.OK, {"captures": self.controller.persons.enrollment_captures(capture_ids)})
+            except ValueError as error:
+                self.json_response(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         elif path == "/api/enrollment-windows":
             name = parse_qs(parsed.query).get("name", [None])[0]
             self.json_response(HTTPStatus.OK, {"windows": self.controller.enrollment_windows_for(name)})
@@ -1683,6 +1693,15 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("person_id is required")
                 self.controller.persons.rename(request["person_id"], request.get("display_name"))
                 self.json_response(HTTPStatus.OK, {"ok": True}); return
+            elif path == "/api/persons/enroll":
+                try:
+                    person_id = self.controller.persons.enroll(request.get("capture_ids"), request.get("display_name"))
+                except DuplicatePersonError as error:
+                    self.json_response(HTTPStatus.CONFLICT, {"error": str(error), "matched_person_id": error.person_id}); return
+                self.json_response(HTTPStatus.OK, {"person_id": person_id}); return
+            elif path == "/api/enrollment-captures/discard":
+                discarded = self.controller.persons.discard_captures(request.get("capture_ids"))
+                self.json_response(HTTPStatus.OK, {"discarded": discarded}); return
             elif path == "/api/bundles/generate":
                 self.json_response(HTTPStatus.OK, self.controller.generate_bundle(request)); return
             elif path == "/api/catalog/refresh":

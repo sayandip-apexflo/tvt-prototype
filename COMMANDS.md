@@ -88,6 +88,48 @@ For scripted package generation and rebuilding after a GitHub commit, run
 `scripts/make-tvt-edge-release.sh --help` and follow
 [TVT edge release build runbook](docs/EDGE-RELEASE-BUILD.md).
 
+## Upgrade an installed edge
+
+Use the target release bundle to plan and stage every in-place application,
+dashboard, node-management, manifest, or CV-image change:
+
+```bash
+<release-bundle>/scripts/tvt-edge-operations.sh \
+  upgrade-release plan --bundle <release-bundle>
+
+sudo <release-bundle>/scripts/tvt-edge-operations.sh \
+  upgrade-release prepare --bundle <release-bundle> \
+  [--deployment-id <deployment-id>]
+
+sudo <release-bundle>/scripts/tvt-edge-operations.sh \
+  upgrade-release activate --operation-id <operation-id>
+
+sudo <release-bundle>/scripts/tvt-edge-operations.sh \
+  upgrade-release status --operation-id <operation-id>
+```
+
+`--deployment-id` is required only when the plan reports a changed CV
+solution. For a plan reporting `platform_maintenance`, prepare with explicit
+disruptive intent; reboot when status is `platform_reboot_required`, then
+activate with the same operation ID:
+
+```bash
+sudo <release-bundle>/scripts/tvt-edge-operations.sh upgrade-release prepare \
+  --bundle <release-bundle> --platform-maintenance
+sudo reboot
+```
+
+Before building a rebooting platform release, verify that `uname -r` matches
+the kernel targeted by `/boot/vmlinuz`; otherwise reboot, re-probe, and build a
+new release version. If post-reboot verification ever detects a different
+kernel, keep the rejected release immutable, probe again, and start a new
+platform-maintenance operation with a newer version. See the recovery details
+in `DEPLOYMENT.md`.
+
+See
+[TVT edge release deployment](DEPLOYMENT.md) for availability, verification,
+resume, rollback, and release-specific operator-action instructions.
+
 ## Phase 1: edge-local OCI registry and K3s
 
 Run these commands from the `tvt-prototype` repository root on the Ubuntu 24.04
@@ -579,3 +621,20 @@ sudo rm -f /var/lib/tvt/hardware-driver-reboot-required
 
 This records operationally that post-reboot qualification is complete. It does
 not remove the version recipe or cached driver artifacts.
+
+## Face identity: remove unnamed persons
+
+Face recognition no longer creates people: a person exists only after an
+operator names a face captured by an enrollment session on `/dashboard`.
+Edges upgraded from an earlier release may still hold unnamed
+auto-enrolled records. Remove them once (named people are kept; unnamed
+people's face vectors and attendance sessions are deleted):
+
+```bash
+sudo /opt/tvt/current/resources/scripts/tvt-edge-operations.sh purge-unnamed-persons --dry-run
+sudo /opt/tvt/current/resources/scripts/tvt-edge-operations.sh purge-unnamed-persons
+```
+
+The real run first copies the telemetry database to
+`/var/lib/tvt/install/telemetry-before-purge-unnamed-<timestamp>.sqlite3`
+(root-only). Re-running is harmless.

@@ -27,8 +27,19 @@ ACTIVE_STATUSES = frozenset({"activating", "capturing", "restoring"})
 TERMINAL_STATUSES = frozenset({"completed", "timed_out", "cancelled", "failed"})
 ALL_STATUSES = ACTIVE_STATUSES | TERMINAL_STATUSES
 
-NAMING_STATUSES = frozenset({"not_applicable", "pending_name", "named"})
+NAMING_STATUSES = frozenset({"not_applicable", "pending_name", "named", "discarded"})
 CAPTURE_RESULTS = frozenset({"created", "duplicate"})
+
+# A session collects up to MAX_ENROLLMENT_CAPTURES faces: it stops capturing
+# once it has that many, or CAPTURE_SETTLE_SECONDS after the first one, or at
+# the capture deadline. Several frames per person give recognition cameras
+# more than one reference view -- recognition itself never adds faces.
+MAX_ENROLLMENT_CAPTURES = 5
+CAPTURE_SETTLE_SECONDS = 10
+# Captured faces nobody names are discarded after this long; must stay below
+# apexfabric/control_plane/identity.py ENROLLMENT_CAPTURE_MAX_AGE_SECONDS.
+NAMING_TIMEOUT_SECONDS = 900
+UNNAMED_DISCARDED_MESSAGE = "No record created for unnamed person"
 
 DEFAULT_CAPTURE_WINDOW_SECONDS = 300
 MIN_CAPTURE_WINDOW_SECONDS = 30
@@ -57,6 +68,7 @@ ENROLLMENT_ERROR_CODES = frozenset(
         "ENROLLMENT_CAPTURE_REJECTED",
         "ENROLLMENT_TIMEOUT",
         "ENROLLMENT_RESTORE_DEGRADED",
+        "ENROLLMENT_UNNAMED_DISCARDED",
     }
 )
 
@@ -175,6 +187,17 @@ def has_rejected_capture_attempt(
         ):
             return True
     return False
+
+
+def eligible_capture_candidates(events: list[dict[str, Any]], **kwargs: Any) -> list[CaptureCandidate]:
+    """Every eligible candidate in this poll, earliest occurred_at first."""
+
+    candidates = [
+        candidate
+        for candidate in (eligible_capture_candidate(event, **kwargs) for event in events)
+        if candidate is not None
+    ]
+    return sorted(candidates, key=lambda item: (item.occurred_at, item.event_id))
 
 
 def select_first_capture(events: list[dict[str, Any]], **kwargs: Any) -> CaptureCandidate | None:

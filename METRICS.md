@@ -213,7 +213,10 @@ application_build_info{service,version}
 ```
 
 HTTP routes must be normalized templates such as `/cameras/{camera_id}`, not
-raw paths containing IDs.
+raw paths containing IDs. Deployment image changes use the bounded templates
+/api/v1/deployments/{deployment_id}/upgrade/preview and
+/api/v1/deployments/{deployment_id}/upgrade; the deployment ID is never a
+metric-label value.
 
 #### 3.7.1 Face-enrollment sessions
 
@@ -241,6 +244,10 @@ ENROLLMENT_RESTORE_DEGRADED    -- queuing or confirming the restoration
                                    commit failed this tick (typically K3s
                                    unavailable); the session stays
                                    'restoring' and retries
+ENROLLMENT_UNNAMED_DISCARDED   -- a captured face was never named within
+                                   the naming timeout (15 min), so its
+                                   staged captures were discarded and no
+                                   person record was created
 ```
 
 Successful transitions (`capturing`, `restoring`, `completed`, `timed_out`,
