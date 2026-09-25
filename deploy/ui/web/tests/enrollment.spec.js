@@ -28,8 +28,9 @@ const apexCameras=tvtCameras.map(camera=>({
   assigned_to:camera.camera_id==='cam-both'?['raw-wrong-deployment']:['dep-primary'],
 }));
 
-async function mockDashboard(page,{active=false,postError=false}={}){
+async function mockDashboard(page,{active=false,postError=false,pendingName=false}={}){
   let designated='cam-both';
+  let namingStatus=pendingName?'pending_name':null;
   const posts=[];
   const requests=[];
   await page.route('**/dashboard/api/**',async route=>{
@@ -53,10 +54,22 @@ async function mockDashboard(page,{active=false,postError=false}={}){
       const cameraId=deploymentId==='dep-primary'?designated:'another-camera';
       return route.fulfill({json:{deployment_key:deploymentId,camera_id:cameraId}});
     }
+    const captured=()=>({session_id:'session-1',status:'completed',result_code:'ok',capture_result:'created',capture_count:3,naming_status:namingStatus});
+    if(path==='/dashboard/api/v1/deployments/dep-primary/enrollment/sessions/session-1/cancel'){
+      posts.push({cancel:true});
+      namingStatus='discarded';
+      return route.fulfill({status:409,json:{detail:'No record created for unnamed person'}});
+    }
+    if(path==='/dashboard/api/v1/deployments/dep-primary/enrollment/sessions/session-1/name'){
+      posts.push(request.postDataJSON());
+      namingStatus='named';
+      return route.fulfill({json:captured()});
+    }
     const status=path.match(/^\/dashboard\/api\/v1\/deployments\/([^/]+)\/enrollment\/status$/);
     if(status){
       const deploymentId=decodeURIComponent(status[1]);
-      return route.fulfill({json:{deployment_key:deploymentId,designated_camera_id:deploymentId==='dep-primary'?designated:'another-camera',session:active?{session_id:'session-1',status:'capturing'}:null,degraded:false}});
+      const session=namingStatus&&deploymentId==='dep-primary'?captured():active?{session_id:'session-1',status:'capturing'}:null;
+      return route.fulfill({json:{deployment_key:deploymentId,designated_camera_id:deploymentId==='dep-primary'?designated:'another-camera',session,degraded:false}});
     }
     return route.fulfill({status:404,json:{detail:`Unhandled test route: ${request.method()} ${path}`}});
   });
@@ -93,4 +106,32 @@ test('Live enrollment follows every TVT assignment instead of raw assignment ord
   await page.getByRole('button',{name:'Cameras',exact:true}).click();
   await page.getByRole('button',{name:/Vehicle gate/}).click();
   await expect(page.getByRole('button',{name:'Start enrollment'})).toHaveCount(0);
+});
+
+test('Stopping enrollment before naming shows that no record was created',async({page})=>{
+  const state=await mockDashboard(page,{pendingName:true});
+  await page.goto('/dashboard');
+  await page.getByRole('button',{name:/Front entrance/}).click();
+
+  await expect(page.getByText(/Face captured \(3 frames\)/)).toBeVisible();
+  await expect(page.getByRole('button',{name:'Start enrollment'})).toHaveCount(0);
+  await page.getByRole('button',{name:'Stop enrollment'}).click();
+
+  await expect(page.getByRole('alert').filter({hasText:'No record created for unnamed person'})).toBeVisible();
+  await expect(page.getByLabel('Name this person')).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Start enrollment'})).toBeVisible();
+  expect(state.posts).toContainEqual({cancel:true});
+});
+
+test('Naming a captured face enrolls the person',async({page})=>{
+  const state=await mockDashboard(page,{pendingName:true});
+  await page.goto('/dashboard');
+  await page.getByRole('button',{name:/Front entrance/}).click();
+
+  await page.getByLabel('Name this person').fill('Jane Doe');
+  await page.getByRole('button',{name:'Save name'}).click();
+
+  await expect(page.getByText('Name saved.')).toBeVisible();
+  await expect(page.getByRole('button',{name:'Stop enrollment'})).toHaveCount(0);
+  expect(state.posts).toContainEqual({display_name:'Jane Doe'});
 });

@@ -734,7 +734,9 @@ in job or event payloads. Face-enrollment sessions
 (`tvt_edge/enrollment.py::EnrollmentReconciler`, running as a bounded task
 inside the management API process on a short interval, not the daily
 retention timer) log their session ID as `operation_id` for the same reason
--- see METRICS.md §3.7.1 for the bounded `error_code`s it can emit.
+-- see METRICS.md §3.7.1 for the bounded `error_code`s it can emit
+(including `ENROLLMENT_UNNAMED_DISCARDED` when a captured face is never
+named and is discarded without creating a person).
 
 These IDs belong in logs, not Prometheus labels.
 

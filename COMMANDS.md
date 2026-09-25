@@ -579,3 +579,20 @@ sudo rm -f /var/lib/tvt/hardware-driver-reboot-required
 
 This records operationally that post-reboot qualification is complete. It does
 not remove the version recipe or cached driver artifacts.
+
+## Face identity: remove unnamed persons
+
+Face recognition no longer creates people: a person exists only after an
+operator names a face captured by an enrollment session on `/dashboard`.
+Edges upgraded from an earlier release may still hold unnamed
+auto-enrolled records. Remove them once (named people are kept; unnamed
+people's face vectors and attendance sessions are deleted):
+
+```bash
+sudo /opt/tvt/current/resources/scripts/tvt-edge-operations.sh purge-unnamed-persons --dry-run
+sudo /opt/tvt/current/resources/scripts/tvt-edge-operations.sh purge-unnamed-persons
+```
+
+The real run first copies the telemetry database to
+`/var/lib/tvt/install/telemetry-before-purge-unnamed-<timestamp>.sqlite3`
+(root-only). Re-running is harmless.

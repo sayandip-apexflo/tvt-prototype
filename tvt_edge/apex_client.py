@@ -22,6 +22,11 @@ class ApexUnavailableError(RuntimeError):
     DNS failure, timeout) -- distinct from a well-formed non-200 response."""
 
 
+class ApexDuplicatePersonError(ValueError):
+    """apexfabric-control refused an enrollment because the face already
+    matches an enrolled person (HTTP 409)."""
+
+
 @dataclass(frozen=True)
 class ApexResponse:
     status: int
@@ -110,6 +115,8 @@ class ApexClient:
                 parsed = {}
         if result.status >= 500:
             raise ApexUnavailableError(f"apex returned HTTP {result.status} for {path}")
+        if result.status == 409:
+            raise ApexDuplicatePersonError(str(parsed.get("error") or "face is already enrolled"))
         if result.status >= 400:
             raise ValueError(str(parsed.get("error") or f"apex rejected request ({result.status})"))
         return parsed
@@ -142,3 +149,21 @@ class ApexClient:
 
     def rename_person(self, person_id: str, display_name: str) -> None:
         self.post_json("/api/persons/rename", {"person_id": person_id, "display_name": display_name})
+
+    def enrollment_captures(self, capture_ids: list[str]) -> list[dict[str, Any]]:
+        """Staged enrollment captures (IDs, camera, time, any named-person
+        match) -- never the embedding."""
+
+        url = f"/api/enrollment-captures?{urlencode([('capture_id', item) for item in capture_ids])}"
+        result = self.get_json(url)
+        return list(result.get("captures") or [])
+
+    def enroll_person(self, capture_ids: list[str], display_name: str) -> str:
+        result = self.post_json(
+            "/api/persons/enroll", {"capture_ids": capture_ids, "display_name": display_name}
+        )
+        return str(result["person_id"])
+
+    def discard_enrollment_captures(self, capture_ids: list[str]) -> int:
+        result = self.post_json("/api/enrollment-captures/discard", {"capture_ids": capture_ids})
+        return int(result.get("discarded") or 0)

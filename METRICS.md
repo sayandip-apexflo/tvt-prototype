@@ -244,6 +244,10 @@ ENROLLMENT_RESTORE_DEGRADED    -- queuing or confirming the restoration
                                    commit failed this tick (typically K3s
                                    unavailable); the session stays
                                    'restoring' and retries
+ENROLLMENT_UNNAMED_DISCARDED   -- a captured face was never named within
+                                   the naming timeout (15 min), so its
+                                   staged captures were discarded and no
+                                   person record was created
 ```
 
 Successful transitions (`capturing`, `restoring`, `completed`, `timed_out`,

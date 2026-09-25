@@ -747,9 +747,13 @@ activating -> capturing -> restoring -> completed
                          -> failed      (via restoring, activation only)
 ```
 
-`naming_status` (`not_applicable -> pending_name -> named`) is independent:
-a session reaches its terminal status once the camera is confirmed restored,
-even if the captured person still needs a display name.
+`naming_status` (`not_applicable -> pending_name -> named`, or
+`pending_name -> discarded`) is independent: a session reaches its terminal
+status once the camera is confirmed restored, even if the captured face
+still needs a name. No person record exists until the operator names it;
+stopping the session first, or letting `NAMING_TIMEOUT_SECONDS` (15 min)
+pass, discards the staged captures (`ENROLLMENT_UNNAMED_DISCARDED`) and the
+API answers "No record created for unnamed person".
 
 **Reconciliation cadence.** A bounded background task inside the management
 API process (`tvt_edge/api/app.py::create_app`'s
@@ -762,48 +766,36 @@ process/host restart. This satisfies the "not the daily retention timer"
 requirement without adding a new metrics port or systemd unit.
 
 **Capture correlation without touching embeddings.** The management plane
-polls apexfabric-control's existing, unmodified
-`GET /api/telemetry/events?deployment_id=` (already used by the live-feed
-panel) and reads only the outer envelope's `event_id`/`event_type`/
-`application`/`camera_id`/`occurred_at`, plus the vendor's optional
-non-sensitive `payload.payload.quality` block for an operator-configured
-quality floor -- it never reads or forwards `payload.payload.embeddings`.
-Outcome (`created` vs. `duplicate`) is derived by cross-referencing the
-accepted event's ID against `GET /api/persons` (also unmodified,
-already-existing), which already carries `enrollment_source_event_id` per
-person; no new apexfabric-control endpoint was added. Naming an
-auto-enrolled person calls the existing, unmodified
-`POST /api/persons/rename`.
+polls apexfabric-control's `GET /api/telemetry/events?deployment_id=` and
+reads only the outer envelope's `event_id`/`event_type`/`application`/
+`camera_id`/`occurred_at`, plus the vendor's optional non-sensitive
+`payload.payload.quality` block for an operator-configured quality floor --
+it never reads or forwards `payload.payload.embeddings`. A session keeps up
+to `MAX_ENROLLMENT_CAPTURES` (5) eligible captures: it stops capturing at
+that count, `CAPTURE_SETTLE_SECONDS` (10s) after the first, or at the
+capture deadline. It asks `GET /api/enrollment-captures?capture_id=` which
+of them apexfabric-control staged (valid vectors) and whether any already
+matches a named person (`duplicate`: staged captures discarded, no record).
+Naming calls `POST /api/persons/enroll {capture_ids, display_name}`, which
+creates the named person from the staged vectors in one transaction (409 if
+the face now matches an enrolled person); stopping or the naming timeout
+calls `POST /api/enrollment-captures/discard`.
 
-**Known, deliberately unpatched upstream gap.** Person creation semantics
-live entirely in `apexfabric/control_plane/identity.py::resolve_identity`
-(pinned copy per §6/AGENTS.md §1 -- "never edit to fix a TVT problem"),
-which today:
+**Identity resolution (TVT divergence from upstream `k3s-prototype`).**
+`apexfabric/control_plane/identity.py::resolve_identity` was changed so
+that:
 
-1. Auto-creates a new `auto_enrolled` person for **any** unmatched
-   `face_detection_event`, not only an authorized `enrollment_capture_event`
-   during an active session (`tests/test_identity.py::
-   test_unmatched_face_auto_enrolls_and_a_near_duplicate_matches` already
-   encodes this as current behavior). TVT enrollment sessions correctly gate
-   *their own* person creation (only an accepted `enrollment_capture_event`
-   inside a `capturing` session is ever treated as a capture), but cannot
-   prevent identity.py from continuing to auto-enroll people from ordinary
-   face-recognition traffic outside any session -- that requires an
-   event-type/authorization check inside `resolve_identity` itself.
-2. Appends a new embedding row on every matched sighting, not only on
-   creation -- an unbounded per-sighting vector-table growth
-   `MONITORING.md` §18-style retention does not currently address.
+1. A `face_detection_event` only ever matches a *named* person at or above
+   `APEXFABRIC_FACE_MATCH_THRESHOLD`; an unmatched face creates nothing and
+   gets no attendance session.
+2. Recognition never adds vectors to a person's gallery -- only the
+   operator-named enrollment captures are stored.
+3. An `enrollment_capture_event` is only staged in `enrollment_captures`
+   (expires after 30 min); a person is created solely by
+   `PersonStore.enroll`.
 
-The correct upstream (`k3s-prototype`) fix is to change
-`resolve_identity` so that (a) `face_detection_event` only ever matches, (b)
-only `enrollment_capture_event` may create a person, and ideally (c) an
-optional authorization hook lets a management plane gate that creation on
-an active, revision-confirmed session, plus (d) bound repeat-sighting vector
-inserts. No TVT-side workaround was attempted that would duplicate this
-logic or the vectors it protects into PostgreSQL; this repository's
-TVT-authored contribution stops at the deployment/session boundary and
-leaves `apexfabric/control_plane/identity.py` and its tests unmodified per
-AGENTS.md §1/§6.
+Pre-existing unnamed (`auto_enrolled`) records are removed once with
+`tvt-edge-operations.sh purge-unnamed-persons` (see COMMANDS.md).
 
 **Retention, deletion, backup/restore, and filesystem protection for the
 identity/vector store.** `apexfabric-control`'s `TelemetryStore.

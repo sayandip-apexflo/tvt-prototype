@@ -21,6 +21,7 @@ from apexfabric.solution_management.catalog import (
     CatalogError,
     resolve_registry_digest,
 )
+from tvt_edge.apex_client import ApexDuplicatePersonError
 from tvt_edge.delivery_metadata import load_delivery_metadata
 from tvt_edge.bundles import (
     PACK_NAME_TO_SOLUTION_PACK,
@@ -66,9 +67,13 @@ from tvt_edge.enrollment import (
     DEFAULT_CAPTURE_WINDOW_SECONDS,
     MAX_CAPTURE_WINDOW_SECONDS,
     MIN_CAPTURE_WINDOW_SECONDS,
+    CAPTURE_SETTLE_SECONDS,
+    MAX_ENROLLMENT_CAPTURES,
+    NAMING_TIMEOUT_SECONDS,
     RESULT_CODE_TERMINAL_STATUS,
+    UNNAMED_DISCARDED_MESSAGE,
+    eligible_capture_candidates,
     has_rejected_capture_attempt,
-    select_first_capture,
 )
 from tvt_edge.geometry import ShapeInput, compile_camera_config, line_shape_key, slugify, validate_shape
 from tvt_edge.security import CredentialKeyring, redact, redact_text
@@ -2768,33 +2773,99 @@ class ManagementService:
         return self._enrollment_session_view_by_id(session_id)
 
     def cancel_enrollment_session(
-        self, *, deployment_key: str, session_id: str, actor: str, request_id: str
+        self,
+        *,
+        deployment_key: str,
+        session_id: str,
+        actor: str,
+        request_id: str,
+        apex: Any | None = None,
     ) -> dict[str, Any]:
+        """Stop an enrollment before its person is named. While capturing,
+        this cancels the session; once a face is captured but not yet named,
+        it discards the staged captures. Either way no person record is
+        created. Idempotent for already-stopped or named sessions."""
+
+        discard_ids: list[str] = []
+        capture_scope: tuple[str, str, datetime, datetime] | None = None
         with self.sessions.begin() as session:
             deployment = self._deployment_for_update(session, deployment_key)
             row = session.get(EnrollmentSession, uuid.UUID(session_id), with_for_update=True)
             if row is None or row.deployment_id != deployment.id:
                 raise ValueError(f"unknown enrollment session {session_id!r}")
-            if row.status not in ("activating", "capturing"):
-                # Already restoring/terminal: cancellation is idempotent.
+            if row.status in ("activating", "capturing"):
+                if row.status == "capturing" and row.activated_at and row.capture_deadline_at:
+                    camera = session.get(Camera, row.camera_id)
+                    capture_scope = (
+                        self._runtime_workload_name(session, deployment),
+                        camera.camera_key,
+                        self._as_aware(row.activated_at, utc_now()),
+                        self._as_aware(row.capture_deadline_at, utc_now()),
+                    )
+                row.status = "restoring"
+                row.result_code = "cancelled"
+                row.restoration_started_at = utc_now()
+                action = "enrollment.session.cancel"
+            elif row.naming_status == "pending_name":
+                discard_ids = list(row.capture_event_ids or [])
+                row.naming_status = "discarded"
+                row.error_code = "ENROLLMENT_UNNAMED_DISCARDED"
+                action = "enrollment.session.discard"
+            else:
+                # Already restoring/terminal/named: cancellation is idempotent.
                 return self._enrollment_session_view(session, row)
-            row.status = "restoring"
-            row.result_code = "cancelled"
-            row.restoration_started_at = utc_now()
             self._audit(
                 session,
                 actor=actor,
                 request_id=request_id,
-                action="enrollment.session.cancel",
+                action=action,
                 target_type="deployment",
                 target_id=deployment_key,
                 details={"session_id": session_id},
             )
+        if apex is not None and capture_scope is not None:
+            discard_ids = self._staged_capture_ids(apex, *capture_scope)
+        self._discard_staged_captures(apex, discard_ids)
         # The reconciler's next tick observes restoration_assignment_set_id
         # is still unset for this 'restoring' session and queues the restore
         # (see reconcile_enrollment_sessions) -- cancellation does not itself
         # depend on the browser staying open to finish restoring the camera.
         return self._enrollment_session_view_by_id(uuid.UUID(session_id))
+
+    def _staged_capture_ids(
+        self,
+        apex: Any,
+        runtime_workload: str,
+        camera_key: str,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> list[str]:
+        """Best effort: IDs of enrollment captures this session's window may
+        have staged in apexfabric-control. Staged captures also expire there
+        on their own, so a failure here never blocks the caller."""
+
+        try:
+            candidates = eligible_capture_candidates(
+                apex.recent_events(runtime_workload),
+                deployment_key=runtime_workload,
+                camera_key=camera_key,
+                window_start=window_start,
+                window_end=window_end,
+                minimum_sharpness=self.enrollment_minimum_sharpness,
+            )
+        except Exception:
+            return []
+        return [candidate.event_id for candidate in candidates]
+
+    @staticmethod
+    def _discard_staged_captures(apex: Any | None, capture_ids: list[str]) -> None:
+        if apex is None or not capture_ids:
+            return
+        for start in range(0, len(capture_ids), 16):
+            try:
+                apex.discard_enrollment_captures(capture_ids[start:start + 16])
+            except Exception:
+                return  # apexfabric-control expires staged captures itself
 
     def get_enrollment_status(self, deployment_key: str) -> dict[str, Any]:
         with self.sessions() as session:
@@ -2951,6 +3022,12 @@ class ManagementService:
             "naming_status": row.naming_status,
             "capture_result": row.capture_result,
             "person_id": row.person_id,
+            "capture_count": len(row.capture_event_ids or []),
+            "naming_deadline_at": (
+                (row.captured_at + timedelta(seconds=NAMING_TIMEOUT_SECONDS)).isoformat()
+                if row.captured_at and row.naming_status == "pending_name"
+                else None
+            ),
             "result_code": row.result_code,
             "error_code": row.error_code,
             "capture_window_seconds": row.capture_window_seconds,
@@ -3001,35 +3078,51 @@ class ManagementService:
                 )
             return results
 
-    def set_person_display_name(
-        self, *, person_id: str, display_name: str, apex: Any, actor: str, request_id: str
+    def name_enrollment_session(
+        self,
+        *,
+        deployment_key: str,
+        session_id: str,
+        display_name: str,
+        apex: Any,
+        actor: str,
+        request_id: str,
     ) -> dict[str, Any]:
+        """Create the person for a captured face. This is the only path that
+        creates a person record; the display name goes to apexfabric-control
+        and is never copied into the management database or its audit log."""
+
         name = display_name.strip()
         if not name or len(name) > 160:
             raise ValueError("display_name is required (maximum 160 characters)")
         with self.sessions() as session:
-            row = session.scalar(
-                select(EnrollmentSession).where(
-                    EnrollmentSession.person_id == person_id,
-                    EnrollmentSession.capture_result == "created",
-                )
-            )
-            if row is None:
-                raise ValueError("unknown person_id")
-            already_named = row.naming_status == "named"
-        if not already_named:
-            apex.rename_person(person_id, name)
+            row = session.get(EnrollmentSession, uuid.UUID(session_id))
+            deployment = session.get(SolutionDeployment, row.deployment_id) if row else None
+            if row is None or deployment is None or deployment.deployment_key != deployment_key:
+                raise ValueError(f"unknown enrollment session {session_id!r}")
+            if row.naming_status == "named":
+                return self._enrollment_session_view(session, row)
+            if row.naming_status == "discarded":
+                raise ValueError(UNNAMED_DISCARDED_MESSAGE)
+            if row.naming_status != "pending_name" or not row.capture_event_ids:
+                raise ValueError("this enrollment has no captured face to name")
+            capture_ids = list(row.capture_event_ids)
+        try:
+            person_id = apex.enroll_person(capture_ids, name)
+        except ApexDuplicatePersonError as error:
+            self._discard_unnamed_session(uuid.UUID(session_id), capture_result="duplicate")
+            self._discard_staged_captures(apex, capture_ids)
+            raise ValueError(f"{error}. {UNNAMED_DISCARDED_MESSAGE}") from error
+        except ValueError as error:
+            # Staged captures expired or were already consumed.
+            self._discard_unnamed_session(uuid.UUID(session_id))
+            raise ValueError(UNNAMED_DISCARDED_MESSAGE) from error
         with self.sessions.begin() as session:
-            row = session.scalar(
-                select(EnrollmentSession)
-                .where(
-                    EnrollmentSession.person_id == person_id,
-                    EnrollmentSession.capture_result == "created",
-                )
-                .with_for_update()
-            )
-            if row is not None and row.naming_status != "named":
+            row = session.get(EnrollmentSession, uuid.UUID(session_id), with_for_update=True)
+            if row is not None and row.naming_status == "pending_name":
+                row.person_id = person_id
                 row.naming_status = "named"
+                row.error_code = None
                 self._audit(
                     session,
                     actor=actor,
@@ -3039,42 +3132,43 @@ class ManagementService:
                     target_id=person_id,
                     details={},
                 )
-        return {"person_id": person_id, "naming_status": "named"}
+        return self._enrollment_session_view_by_id(uuid.UUID(session_id))
 
-    def set_report_person_display_name(
-        self, *, person_id: str, display_name: str, apex: Any, actor: str, request_id: str
-    ) -> dict[str, Any]:
-        """Name an unnamed identity surfaced by attendance reporting.
-
-        Ordinary face-recognition traffic can create auto-enrolled people that
-        are not associated with a TVT enrollment session. Reports must offer a
-        narrow naming path for those records without copying the display name
-        into the management database or its audit log.
-        """
-        name = display_name.strip()
-        if not name or len(name) > 160:
-            raise ValueError("display_name is required (maximum 160 characters)")
-        person = next(
-            (item for item in apex.list_persons() if item.get("person_id") == person_id),
-            None,
-        )
-        if person is None:
-            raise ValueError("unknown person_id")
-        if person.get("display_name"):
-            return {"person_id": person_id, "naming_status": "named"}
-
-        apex.rename_person(person_id, name)
+    def _discard_unnamed_session(
+        self, session_id: uuid.UUID, *, capture_result: str | None = None
+    ) -> list[str]:
         with self.sessions.begin() as session:
-            self._audit(
-                session,
-                actor=actor,
-                request_id=request_id,
-                action="reports.person.name",
-                target_type="person",
-                target_id=person_id,
-                details={},
+            row = session.get(EnrollmentSession, session_id, with_for_update=True)
+            if row is None or row.naming_status != "pending_name":
+                return []
+            row.naming_status = "discarded"
+            row.error_code = "ENROLLMENT_UNNAMED_DISCARDED"
+            if capture_result:
+                row.capture_result = capture_result
+            return list(row.capture_event_ids or [])
+
+    def _expire_unnamed_sessions(self, apex: Any, current_time: datetime) -> list[dict[str, Any]]:
+        cutoff = current_time - timedelta(seconds=NAMING_TIMEOUT_SECONDS)
+        with self.sessions() as session:
+            rows = session.execute(
+                select(EnrollmentSession.id, EnrollmentSession.captured_at).where(
+                    EnrollmentSession.naming_status == "pending_name"
+                )
+            ).all()
+        results: list[dict[str, Any]] = []
+        for session_id, captured_at in rows:
+            if captured_at is None or self._as_aware(captured_at, current_time) > cutoff:
+                continue
+            capture_ids = self._discard_unnamed_session(session_id)
+            self._discard_staged_captures(apex, capture_ids)
+            results.append(
+                {
+                    "session_id": str(session_id),
+                    "transition": "discarded",
+                    "error_code": "ENROLLMENT_UNNAMED_DISCARDED",
+                }
             )
-        return {"person_id": person_id, "naming_status": "named"}
+        return results
 
     def reconcile_enrollment_sessions(
         self, apex: Any, *, now: datetime | None = None
@@ -3108,6 +3202,17 @@ class ManagementService:
                 }
             if outcome is not None:
                 results.append(outcome)
+        try:
+            results.extend(self._expire_unnamed_sessions(apex, current_time))
+        except Exception as error:
+            results.append(
+                {
+                    "session_id": None,
+                    "transition": None,
+                    "error_code": "INTERNAL_ERROR",
+                    "detail": redact_text(str(error)),
+                }
+            )
         return results
 
     def _reconcile_one_enrollment_session(
@@ -3150,27 +3255,17 @@ class ManagementService:
                         (row.prior_apps, row.prior_config, row.prior_fps, row.actor, row.request_id),
                     )
             elif status == "capturing":
-                capture_deadline_at = self._as_aware(row.capture_deadline_at, current_time)
-                if capture_deadline_at is not None and current_time >= capture_deadline_at:
-                    row.status = "restoring"
-                    row.result_code = "timed_out"
-                    row.error_code = error_code = "ENROLLMENT_TIMEOUT"
-                    row.restoration_started_at = current_time
-                    transition = "restoring"
-                    pending = (
-                        "restore",
-                        (row.prior_apps, row.prior_config, row.prior_fps, row.actor, row.request_id),
-                    )
-                else:
-                    pending = (
-                        "poll",
-                        (
-                            self._as_aware(row.activated_at, current_time),
-                            capture_deadline_at,
-                            row.actor,
-                            row.request_id,
-                        ),
-                    )
+                # The deadline is enforced inside _poll_enrollment_capture so
+                # faces captured just before it are still collected.
+                pending = (
+                    "poll",
+                    (
+                        self._as_aware(row.activated_at, current_time),
+                        self._as_aware(row.capture_deadline_at, current_time),
+                        row.actor,
+                        row.request_id,
+                    ),
+                )
             elif status == "restoring":
                 if row.restoration_assignment_set_id is not None:
                     if self._is_revision_applied(session, deployment.id, row.restoration_revision):
@@ -3231,6 +3326,7 @@ class ManagementService:
                     deadline,
                     actor,
                     request_id,
+                    current_time,
                 )
                 if capture_outcome is not None:
                     return capture_outcome
@@ -3250,20 +3346,50 @@ class ManagementService:
         deadline: datetime,
         actor: str,
         request_id: str,
+        current_time: datetime,
     ) -> dict[str, Any] | None:
+        """Collect staged enrollment captures for a 'capturing' session.
+
+        Finishes capturing once MAX_ENROLLMENT_CAPTURES are staged,
+        CAPTURE_SETTLE_SECONDS after the first one, or at the deadline. A
+        capture that already matches a named person ends the session as
+        'duplicate' and is discarded. No person is created here: a captured
+        session waits in naming_status 'pending_name' for
+        name_enrollment_session."""
+
+        deadline_passed = current_time >= deadline
         try:
             events = apex.recent_events(runtime_workload)
+            candidates = eligible_capture_candidates(
+                events,
+                deployment_key=runtime_workload,
+                camera_key=camera_key,
+                window_start=activated_at,
+                window_end=deadline,
+                minimum_sharpness=self.enrollment_minimum_sharpness,
+            )
+            staged = (
+                apex.enrollment_captures(
+                    [candidate.event_id for candidate in candidates[:MAX_ENROLLMENT_CAPTURES]]
+                )
+                if candidates
+                else []
+            )
         except Exception:
-            return None  # apex unreachable this tick; the session stays 'capturing'
-        candidate = select_first_capture(
-            events,
-            deployment_key=runtime_workload,
-            camera_key=camera_key,
-            window_start=activated_at,
-            window_end=deadline,
-            minimum_sharpness=self.enrollment_minimum_sharpness,
-        )
-        if candidate is None:
+            # apex unreachable this tick: keep capturing unless the window is over.
+            if deadline_passed:
+                return self._time_out_enrollment_capture(
+                    session_id, deployment_key, camera_key, current_time
+                )
+            return None
+        staged_ids = {item.get("capture_id") for item in staged}
+        accepted = [candidate for candidate in candidates if candidate.event_id in staged_ids]
+
+        if not accepted:
+            if deadline_passed:
+                return self._time_out_enrollment_capture(
+                    session_id, deployment_key, camera_key, current_time
+                )
             if has_rejected_capture_attempt(
                 events, deployment_key=runtime_workload, camera_key=camera_key
             ):
@@ -3277,44 +3403,81 @@ class ManagementService:
                     "error_code": "ENROLLMENT_CAPTURE_REJECTED",
                 }
             return None
-        try:
-            persons = apex.list_persons()
-        except Exception:
+
+        settled = current_time - accepted[0].occurred_at >= timedelta(seconds=CAPTURE_SETTLE_SECONDS)
+        if len(accepted) < MAX_ENROLLMENT_CAPTURES and not settled and not deadline_passed:
             return None
-        created_person = next(
-            (item for item in persons if item.get("enrollment_source_event_id") == candidate.event_id),
-            None,
-        )
-        capture_result = "created" if created_person else "duplicate"
-        person_id = created_person.get("person_id") if created_person else None
+
+        capture_ids = [candidate.event_id for candidate in accepted]
+        duplicate = next((item for item in staged if item.get("matched_person_id")), None)
+        capture_result = "duplicate" if duplicate else "created"
 
         with self.sessions.begin() as session:
             row = session.get(EnrollmentSession, session_id, with_for_update=True)
             if row is None or row.status != "capturing":
                 return None
-            row.accepted_event_id = candidate.event_id
+            row.accepted_event_id = capture_ids[0]
+            row.capture_event_ids = None if duplicate else capture_ids
             row.error_code = None
             row.capture_result = capture_result
-            row.person_id = person_id
-            row.naming_status = "pending_name" if capture_result == "created" else "not_applicable"
-            row.captured_at = utc_now()
+            row.person_id = duplicate.get("matched_person_id") if duplicate else None
+            row.naming_status = "not_applicable" if duplicate else "pending_name"
+            row.captured_at = current_time
             row.status = "restoring"
-            row.restoration_started_at = utc_now()
+            row.restoration_started_at = current_time
             prior_apps, prior_config, prior_fps = row.prior_apps, row.prior_config, row.prior_fps
+        if duplicate:
+            self._discard_staged_captures(apex, capture_ids)
 
+        return self._queue_enrollment_restore(
+            session_id, deployment_key, camera_key, prior_apps, prior_config, prior_fps,
+            actor, request_id, error_code=None,
+        )
+
+    def _time_out_enrollment_capture(
+        self, session_id: uuid.UUID, deployment_key: str, camera_key: str, current_time: datetime
+    ) -> dict[str, Any] | None:
+        with self.sessions.begin() as session:
+            row = session.get(EnrollmentSession, session_id, with_for_update=True)
+            if row is None or row.status != "capturing":
+                return None
+            row.status = "restoring"
+            row.result_code = "timed_out"
+            row.error_code = "ENROLLMENT_TIMEOUT"
+            row.restoration_started_at = current_time
+            restore = (row.prior_apps, row.prior_config, row.prior_fps, row.actor, row.request_id)
+        return self._queue_enrollment_restore(
+            session_id, deployment_key, camera_key, *restore, error_code="ENROLLMENT_TIMEOUT",
+        )
+
+    def _queue_enrollment_restore(
+        self,
+        session_id: uuid.UUID,
+        deployment_key: str,
+        camera_key: str,
+        apps: list[str],
+        config: dict[str, Any],
+        fps: int,
+        actor: str,
+        request_id: str,
+        *,
+        error_code: str | None,
+    ) -> dict[str, Any]:
         try:
             assignment_set = self._apply_enrollment_target(
                 deployment_key=deployment_key,
                 camera_key=camera_key,
-                apps=prior_apps,
-                config=prior_config,
-                fps=prior_fps,
+                apps=apps,
+                config=config,
+                fps=fps,
                 idempotency_key=f"enrollment-restore:{session_id}",
                 session_id=session_id,
                 actor=actor,
                 request_id=request_id,
             )
         except Exception:
+            # The session stays 'restoring' with restoration_assignment_set_id
+            # unset; the next reconcile tick retries the restore.
             return {
                 "session_id": str(session_id),
                 "transition": "restoring",
@@ -3325,7 +3488,7 @@ class ManagementService:
             if row is not None and row.status == "restoring":
                 row.restoration_assignment_set_id = assignment_set.id
                 row.restoration_revision = assignment_set.desired_revision
-        return {"session_id": str(session_id), "transition": "restoring", "error_code": None}
+        return {"session_id": str(session_id), "transition": "restoring", "error_code": error_code}
 
     @staticmethod
     def _store_bundle_revision(

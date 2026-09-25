@@ -4301,6 +4301,55 @@ else
 fi
 )
 
+tvt_op_purge_unnamed_persons() (
+# One-shot removal of every face-recognition person that was never named
+# (pre-0009 auto-enrollment records), with its face/body vectors and
+# attendance sessions. Named persons are untouched. Idempotent.
+set -Eeuo pipefail
+
+readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+STATE_DIRECTORY="/var/lib/apexfabric/control"
+PYTHON="/opt/tvt/venv/bin/python3"
+BACKUP_DIRECTORY="/var/lib/tvt/install"
+DRY_RUN=""
+
+usage() {
+  echo "usage: scripts/tvt-edge-operations.sh purge-unnamed-persons [--dry-run] [--state-dir DIR]" >&2
+}
+
+while (($#)); do
+  case "$1" in
+    --dry-run) DRY_RUN="--dry-run"; shift ;;
+    --state-dir) STATE_DIRECTORY="${2:?}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage; exit 2 ;;
+  esac
+done
+
+[[ ${EUID} -eq 0 ]] || { echo "run as root" >&2; exit 1; }
+database="${STATE_DIRECTORY}/telemetry/telemetry.sqlite3"
+[[ -f ${database} ]] || { echo "${database} not found" >&2; exit 1; }
+[[ -x ${PYTHON} ]] || { echo "${PYTHON} not found" >&2; exit 1; }
+owner="$(stat -c %U "${database}")"
+
+if [[ -z ${DRY_RUN} ]]; then
+  install -d -m 0700 "${BACKUP_DIRECTORY}"
+  backup="${BACKUP_DIRECTORY}/telemetry-before-purge-unnamed-$(date -u +%Y%m%dT%H%M%SZ).sqlite3"
+  "${PYTHON}" -c 'import sqlite3, sys
+source = sqlite3.connect(sys.argv[1], timeout=30)
+target = sqlite3.connect(sys.argv[2])
+source.backup(target)
+target.close()
+source.close()' "${database}" "${backup}"
+  chmod 0600 "${backup}"
+  echo "Backed up ${database} to ${backup}" >&2
+fi
+
+runuser -u "${owner}" -- env PYTHONPATH="${REPO_ROOT}" "${PYTHON}" \
+  -m apexfabric.control_plane.identity purge-unnamed \
+  --state-dir "${STATE_DIRECTORY}" ${DRY_RUN}
+)
+
 tvt_operations_usage() {
   cat >&2 <<'EOF'
 usage: scripts/tvt-edge-operations.sh OPERATION [arguments]
@@ -4324,6 +4373,7 @@ operations:
   probe-edge-hardware
   publish-control-images
   publish-ui-image
+  purge-unnamed-persons
   qualify-traffic-edge
   upgrade-application
   upgrade-solution-image
@@ -4359,6 +4409,7 @@ case "${operation}" in
   probe-edge-hardware) tvt_op_probe_edge_hardware "$@" ;;
   publish-control-images) tvt_op_publish_control_images "$@" ;;
   publish-ui-image) tvt_op_publish_ui_image "$@" ;;
+  purge-unnamed-persons) tvt_op_purge_unnamed_persons "$@" ;;
   qualify-traffic-edge) tvt_op_qualify_traffic_edge "$@" ;;
   upgrade-application) tvt_op_upgrade_application "$@" ;;
   upgrade-solution-image) tvt_op_upgrade_solution_image "$@" ;;

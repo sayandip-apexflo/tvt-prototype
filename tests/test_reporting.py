@@ -46,6 +46,14 @@ def face_event(event_id, camera_id, face, zone_id=None, line_id=None, timestamp=
     }
 
 
+def enroll(store, name, face, capture_id):
+    """Named persons only come from operator enrollment (see identity.py)."""
+    event = face_event(capture_id, "enrollment-camera", face)
+    event.update(event_type="enrollment_capture_event", application="face_enrollment")
+    store.ingest("dep1", event)
+    return PersonStore(store).enroll([f"dep1:{capture_id}"], name)
+
+
 def plate_event(event_id, camera_id, plate_text, zone_id=None, line_id=None, confidence=0.95, timestamp=None):
     payload = {
         "vehicle_ref": f"{camera_id}:1", "vehicle_track_id": 1,
@@ -107,10 +115,15 @@ class AttendanceAggregationTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         policy = IdentityPolicy(face_dim=4, body_dim=4, match_threshold=0.9)
         self.store = TelemetryStore(Path(self.directory.name), RetentionPolicy(minimum_free_bytes=1), identity_policy=policy)
+        self.asha = enroll(self.store, "Asha Rao", FACE, "enrol-asha")
 
     def sessions(self):
         with self.store._connect() as connection:
             return [dict(row) for row in connection.execute("SELECT * FROM attendance_sessions").fetchall()]
+
+    def test_unenrolled_face_records_no_attendance(self):
+        self.store.ingest("dep1", face_event("e1", "main-1", FACE_OTHER, "gate-1-face_entry"))
+        self.assertEqual(self.sessions(), [])
 
     def test_entry_then_exit_closes_session_with_positive_duration(self):
         self.store.ingest("dep1", face_event("e1", "main-1", FACE, "gate-1-face_entry"))
@@ -187,20 +200,8 @@ class AttendanceAggregationTests(unittest.TestCase):
             "dep1",
             face_event("e2", "back-exit", FACE_NEAR, line_id="back_exit", timestamp="2026-09-18T11:00:00+05:30"),
         )
-        person_id = self.sessions()[0]["person_id"]
-        people = PersonStore(self.store)
-        people.rename(person_id, "Asha Rao")
-        self.store.ingest(
-            "dep1",
-            face_event(
-                "registered-no-visit", "enrollment-camera", FACE_OTHER,
-                timestamp="2026-09-18T10:00:00+05:30",
-            ),
-        )
-        second_person_id = next(
-            person["person_id"] for person in people.list() if person["person_id"] != person_id
-        )
-        people.rename(second_person_id, "Bina Shah")
+        self.assertEqual(self.sessions()[0]["person_id"], self.asha)
+        enroll(self.store, "Bina Shah", FACE_OTHER, "enrol-bina")
 
         with self.store._connect() as connection:
             report = attendance_report(connection, date="2026-09-18")
@@ -215,8 +216,6 @@ class AttendanceAggregationTests(unittest.TestCase):
 
     def test_open_session_is_reported_as_incomplete_without_duration(self):
         self.store.ingest("dep1", face_event("e1", "main-1", FACE, line_id="gate-1-face_entry"))
-        person_id = self.sessions()[0]["person_id"]
-        PersonStore(self.store).rename(person_id, "Asha Rao")
         with self.store._connect() as connection:
             report = attendance_report(connection)
             events = attendance_log(connection)

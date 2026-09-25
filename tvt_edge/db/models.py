@@ -469,8 +469,8 @@ class EnrollmentCameraDesignation(Base, IdMixin, TimeMixin):
 
 class EnrollmentSession(Base, IdMixin):
     """Durable state machine for one operator-triggered face-enrollment
-    cycle: swap the designated camera to apps=["face_enrollment"], accept at
-    most one enrollment_capture_event, then restore its exact prior
+    cycle: swap the designated camera to apps=["face_enrollment"], accept up to
+    MAX_ENROLLMENT_CAPTURES enrollment_capture_events, then restore its exact prior
     apps/config/fps. See docs/contracts/tvt-mills-v1/README.md and
     tvt_edge/enrollment.py (EnrollmentReconciler, which drives every
     transition below except the operator-triggered start/cancel).
@@ -480,9 +480,12 @@ class EnrollmentSession(Base, IdMixin):
                              -> cancelled (goes through restoring first)
                              -> failed
 
-    naming_status is independent of status: pending_name -> named. A
-    session can reach 'completed' with naming_status still 'pending_name' --
-    restoration never waits on the operator naming the person.
+    naming_status is independent of status: pending_name -> named, or
+    pending_name -> discarded when the operator stops without naming or the
+    naming timeout passes. A session can reach 'completed' with
+    naming_status still 'pending_name' -- restoration never waits on the
+    operator naming the person. No person record exists until it is named
+    (apexfabric-control only stages the captured faces).
     """
 
     __tablename__ = "enrollment_sessions"
@@ -492,7 +495,7 @@ class EnrollmentSession(Base, IdMixin):
             name="enrollment_session_status",
         ),
         CheckConstraint(
-            "naming_status IN ('not_applicable','pending_name','named')",
+            "naming_status IN ('not_applicable','pending_name','named','discarded')",
             name="enrollment_session_naming_status",
         ),
         CheckConstraint(
@@ -530,6 +533,8 @@ class EnrollmentSession(Base, IdMixin):
     naming_status: Mapped[str] = mapped_column(String(16), default="not_applicable", nullable=False)
     capture_result: Mapped[str | None] = mapped_column(String(16))
     accepted_event_id: Mapped[str | None] = mapped_column(String(255))
+    # apexfabric-control staged capture IDs awaiting a name (no embeddings).
+    capture_event_ids: Mapped[list[str] | None] = mapped_column(JSON)
     person_id: Mapped[str | None] = mapped_column(String(64))
     result_code: Mapped[str | None] = mapped_column(String(64))
     error_code: Mapped[str | None] = mapped_column(String(64))

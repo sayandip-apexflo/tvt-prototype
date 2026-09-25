@@ -1,8 +1,9 @@
 """Tests for the durable face-enrollment session state machine added in
 tvt_edge/enrollment.py + tvt_edge/service.py (see docs/contracts/
 tvt-mills-v1/README.md). Uses the same catalog fixture shape as
-tests/test_management_plane.py; the pinned apexfabric.control_plane tests
-(test_enrollment_windows.py, test_identity.py) are left untouched.
+tests/test_management_plane.py; the pinned apexfabric.control_plane test
+(test_enrollment_windows.py) is left untouched; test_identity.py covers the
+TVT identity divergence (no auto-enrollment).
 """
 
 import json
@@ -16,7 +17,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from tvt_edge.apex_client import ApexClient, ApexUnavailableError
+from tvt_edge.apex_client import ApexClient, ApexDuplicatePersonError, ApexUnavailableError
 from tvt_edge.cluster.sync import SyncWorker
 from tvt_edge.db.models import (
     AuditEvent,
@@ -27,7 +28,11 @@ from tvt_edge.db.models import (
     utc_now,
 )
 from tvt_edge.enrollment import (
+    CAPTURE_SETTLE_SECONDS,
     DEFAULT_ACTIVATION_TIMEOUT_SECONDS,
+    MAX_ENROLLMENT_CAPTURES,
+    NAMING_TIMEOUT_SECONDS,
+    UNNAMED_DISCARDED_MESSAGE,
     eligible_capture_candidate,
     select_first_capture,
 )
@@ -121,10 +126,12 @@ class LiveReloadKubectl(FakeKubectl):
 
 class FakeApex:
     """Stand-in for ApexClient with the same method surface enrollment.py
-    calls (recent_events/list_persons/rename_person), so tests never need a
-    real apexfabric-control process."""
+    calls (recent_events, staged enrollment captures, enroll/discard), so
+    tests never need a real apexfabric-control process. Every enrollment
+    capture event is treated as staged unless listed in `unstaged`;
+    `matches` maps a capture ID to the named person it already matches."""
 
-    def __init__(self, events=None, persons=None, unavailable=False):
+    def __init__(self, events=None, persons=None, unavailable=False, matches=None, unstaged=(), duplicate_on_enroll=False):
         self.events = events or []
         self.persons = []
         for person in persons or []:
@@ -138,6 +145,12 @@ class FakeApex:
         self.unavailable = unavailable
         self.renamed = []
         self.event_queries = []
+        self.matches = dict(matches or {})
+        self.unstaged = set(unstaged)
+        self.duplicate_on_enroll = duplicate_on_enroll
+        self.consumed = set()
+        self.enrolled = []
+        self.discarded = []
 
     def recent_events(self, deployment_id):
         self.event_queries.append(deployment_id)
@@ -152,6 +165,29 @@ class FakeApex:
 
     def rename_person(self, person_id, display_name):
         self.renamed.append((person_id, display_name))
+
+    def enrollment_captures(self, capture_ids):
+        if self.unavailable:
+            raise ApexUnavailableError("apex unreachable")
+        return [
+            {"capture_id": item, "matched_person_id": self.matches.get(item)}
+            for item in capture_ids
+            if item not in self.unstaged and item not in self.consumed
+        ]
+
+    def enroll_person(self, capture_ids, display_name):
+        if self.duplicate_on_enroll:
+            raise ApexDuplicatePersonError("This face is already enrolled as Someone")
+        if any(item in self.consumed for item in capture_ids):
+            raise ValueError("enrollment capture expired or unknown; start a new enrollment")
+        self.consumed.update(capture_ids)
+        self.enrolled.append((list(capture_ids), display_name))
+        return "person-new"
+
+    def discard_enrollment_captures(self, capture_ids):
+        self.discarded.extend(capture_ids)
+        self.consumed.update(capture_ids)
+        return len(capture_ids)
 
 
 def capture_event(deployment_id, camera_id, event_id, occurred_at_iso, quality=None):
@@ -288,6 +324,22 @@ class EnrollmentSessionTests(unittest.TestCase):
         return self.service.start_enrollment_session(
             deployment_key="tvt-mills-v1", actor="test", request_id="start-1", **kwargs
         )
+
+    def reconcile_settled(self, apex):
+        """Reconcile as if the capture settle period after the first
+        capture has already passed."""
+        return self.service.reconcile_enrollment_sessions(
+            apex, now=utc_now() + timedelta(seconds=CAPTURE_SETTLE_SECONDS)
+        )
+
+    def capture_one(self, **apex_kwargs):
+        """Drive an activated session through one captured face."""
+        activated_at = self.service.get_enrollment_status("tvt-mills-v1")["session"]["activated_at"]
+        apex = FakeApex(
+            events=[capture_event("tvt-mills-v1", "camera-01", "evt-1", activated_at)], **apex_kwargs
+        )
+        self.reconcile_settled(apex)
+        return apex
 
     def activate(self):
         """Start a session and drive it to 'capturing'."""
@@ -459,25 +511,27 @@ class EnrollmentSessionTests(unittest.TestCase):
         self.assertEqual(status["session"]["status"], "capturing")
         self.assertEqual(status["session"]["session_id"], started["session_id"])
 
-    # 5. A valid capture creates exactly one pending person.
-    def test_valid_capture_creates_one_pending_person(self):
+    # 5. A valid capture waits for a name; no person exists yet.
+    def test_valid_capture_waits_for_a_name_without_creating_a_person(self):
         self.deploy_with_face_recognition()
         self.activate()
         status = self.service.get_enrollment_status("tvt-mills-v1")
         activated_at = status["session"]["activated_at"]
         apex = FakeApex(
             events=[capture_event("tvt-mills-v1", "camera-01", "evt-1", activated_at, {"sharpness": 0.9})],
-            persons=[{"person_id": "person-1", "enrollment_source_event_id": "tvt-mills-v1:evt-1", "status": "auto_enrolled", "display_name": None}],
         )
-        results = self.service.reconcile_enrollment_sessions(apex)
+        results = self.reconcile_settled(apex)
         self.assertEqual(results[0]["transition"], "restoring")
         status = self.service.get_enrollment_status("tvt-mills-v1")
         self.assertEqual(status["session"]["capture_result"], "created")
-        self.assertEqual(status["session"]["person_id"], "person-1")
+        self.assertIsNone(status["session"]["person_id"])
+        self.assertEqual(status["session"]["capture_count"], 1)
+        self.assertIsNotNone(status["session"]["naming_deadline_at"])
         self.assertEqual(status["session"]["naming_status"], "pending_name")
         pending = self.service.list_people_awaiting_names()
         self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0]["person_id"], "person-1")
+        self.assertEqual(pending[0]["session_id"], status["session"]["session_id"])
+        self.assertEqual(apex.enrolled, [])
         self.assertEqual(apex.event_queries, [RUNTIME_WORKLOAD])
 
         observer = status["observer"]
@@ -534,38 +588,33 @@ class EnrollmentSessionTests(unittest.TestCase):
         self.activate()
         status = self.service.get_enrollment_status("tvt-mills-v1")
         activated_at = status["session"]["activated_at"]
-        apex = FakeApex(
-            events=[capture_event("tvt-mills-v1", "camera-01", "evt-1", activated_at)],
-            persons=[{"person_id": "person-1", "enrollment_source_event_id": "tvt-mills-v1:evt-1", "status": "auto_enrolled", "display_name": None}],
-        )
-        self.service.reconcile_enrollment_sessions(apex)
+        apex = FakeApex(events=[capture_event("tvt-mills-v1", "camera-01", "evt-1", activated_at)])
+        self.reconcile_settled(apex)
         with self.sessions() as session:
             before = session.scalar(select(EnrollmentSession))
             accepted_event_id = before.accepted_event_id
-        # Replay the same event (and pretend a second person got created) --
-        # must not be reconsidered because the session already left 'capturing'.
-        apex.persons.append({"person_id": "person-2", "enrollment_source_event_id": "tvt-mills-v1:evt-1", "status": "auto_enrolled", "display_name": None})
-        self.service.reconcile_enrollment_sessions(apex)
+            capture_ids = list(before.capture_event_ids)
+        # Replay the same event plus a new one -- must not be reconsidered
+        # because the session already left 'capturing'.
+        apex.events.append(capture_event("tvt-mills-v1", "camera-01", "evt-2", activated_at))
+        self.reconcile_settled(apex)
         with self.sessions() as session:
             after = session.scalar(select(EnrollmentSession))
             self.assertEqual(after.accepted_event_id, accepted_event_id)
-            self.assertEqual(after.person_id, "person-1")
+            self.assertEqual(after.capture_event_ids, capture_ids)
         self.assertEqual(len(self.service.list_people_awaiting_names()), 1)
 
-    # 8. A match to an existing person returns 'duplicate'.
+    # 8. A match to an existing named person returns 'duplicate'.
     def test_matched_face_returns_duplicate_and_creates_no_person(self):
         self.deploy_with_face_recognition()
         self.activate()
-        status = self.service.get_enrollment_status("tvt-mills-v1")
-        activated_at = status["session"]["activated_at"]
-        apex = FakeApex(
-            events=[capture_event("tvt-mills-v1", "camera-01", "evt-1", activated_at)],
-            persons=[],  # no new person: the face matched an existing gallery entry
-        )
-        self.service.reconcile_enrollment_sessions(apex)
+        capture_id = f"{RUNTIME_WORKLOAD}:evt-1"
+        apex = self.capture_one(matches={capture_id: "person-9"})
         status = self.service.get_enrollment_status("tvt-mills-v1")
         self.assertEqual(status["session"]["capture_result"], "duplicate")
-        self.assertIsNone(status["session"]["person_id"])
+        self.assertEqual(status["session"]["person_id"], "person-9")
+        self.assertEqual(apex.discarded, [capture_id])
+        self.assertEqual(apex.enrolled, [])
         self.assertEqual(status["session"]["naming_status"], "not_applicable")
         self.assertEqual(self.service.list_people_awaiting_names(), [])
         # Camera is still restored regardless of the duplicate outcome.
@@ -578,7 +627,7 @@ class EnrollmentSessionTests(unittest.TestCase):
         status = self.service.get_enrollment_status("tvt-mills-v1")
         activated_at = status["session"]["activated_at"]
         apex = FakeApex(events=[capture_event("tvt-mills-v1", "camera-01", "evt-1", activated_at)])
-        self.service.reconcile_enrollment_sessions(apex)
+        self.reconcile_settled(apex)
         with self.sessions() as session:
             row = session.scalar(select(EnrollmentSession))
             self.assertIsNotNone(row.restoration_assignment_set_id)
@@ -592,7 +641,7 @@ class EnrollmentSessionTests(unittest.TestCase):
         status = self.service.get_enrollment_status("tvt-mills-v1")
         activated_at = status["session"]["activated_at"]
         apex = FakeApex(events=[capture_event("tvt-mills-v1", "camera-01", "evt-1", activated_at)])
-        self.service.reconcile_enrollment_sessions(apex)
+        self.reconcile_settled(apex)
         # Restore commit is queued but not yet applied -- must still be 'restoring'.
         status = self.service.get_enrollment_status("tvt-mills-v1")
         self.assertEqual(status["session"]["status"], "restoring")
@@ -688,7 +737,7 @@ class EnrollmentSessionTests(unittest.TestCase):
         status = self.service.get_enrollment_status("tvt-mills-v1")
         activated_at = status["session"]["activated_at"]
         apex = FakeApex(events=[capture_event("tvt-mills-v1", "camera-01", "evt-1", activated_at)])
-        self.service.reconcile_enrollment_sessions(apex)  # -> restoring, commit queued
+        self.reconcile_settled(apex)  # -> restoring, commit queued
 
         restarted_service = ManagementService(
             self.sessions, self.keyring, catalog_resolver=lambda *_a: CATALOG_DIGEST
@@ -782,25 +831,26 @@ class EnrollmentSessionTests(unittest.TestCase):
         camera_01 = self.current_assignment("camera-01")
         self.assertEqual(camera_01["apps"], ["face_enrollment"])
 
-    # 14. Name validation, unknown-person handling, and naming audit.
-    def test_name_validation_and_unknown_person(self):
+    # 14. Name validation, unknown-session handling, and naming audit.
+    def test_name_validation_and_unknown_session(self):
         self.deploy_with_face_recognition()
-        apex = FakeApex()
-        with self.assertRaisesRegex(ValueError, "unknown person_id"):
-            self.service.set_person_display_name(
-                person_id="ghost", display_name="Jane", apex=apex, actor="op", request_id="n1"
+        with self.assertRaisesRegex(ValueError, "unknown enrollment session"):
+            self.service.name_enrollment_session(
+                deployment_key="tvt-mills-v1", session_id=str(uuid.uuid4()), display_name="Jane",
+                apex=FakeApex(), actor="op", request_id="n1",
             )
+
+    def name_session(self, apex, name="Jane Doe", request_id="n1"):
+        session_id = self.service.get_enrollment_status("tvt-mills-v1")["session"]["session_id"]
+        return self.service.name_enrollment_session(
+            deployment_key="tvt-mills-v1", session_id=session_id, display_name=name,
+            apex=apex, actor="op", request_id=request_id,
+        )
 
     def test_retention_prunes_old_terminal_sessions_but_never_a_pending_name(self):
         self.deploy_with_face_recognition()
         started = self.activate()
-        status = self.service.get_enrollment_status("tvt-mills-v1")
-        activated_at = status["session"]["activated_at"]
-        apex = FakeApex(
-            events=[capture_event("tvt-mills-v1", "camera-01", "evt-1", activated_at)],
-            persons=[{"person_id": "person-1", "enrollment_source_event_id": "tvt-mills-v1:evt-1", "status": "auto_enrolled", "display_name": None}],
-        )
-        self.service.reconcile_enrollment_sessions(apex)
+        apex = self.capture_one()
         self.apply_desired()
         self.service.reconcile_enrollment_sessions(apex)
         status = self.service.get_enrollment_status("tvt-mills-v1")
@@ -813,74 +863,133 @@ class EnrollmentSessionTests(unittest.TestCase):
         with self.sessions() as session:
             self.assertIsNotNone(session.get(EnrollmentSession, uuid.UUID(started["session_id"])))
 
-        self.service.set_person_display_name(
-            person_id="person-1", display_name="Jane Doe", apex=apex, actor="op", request_id="n1"
-        )
+        self.name_session(apex)
         result = self.service.apply_retention(far_future)
         self.assertEqual(result["enrollment_sessions"], 1)
         with self.sessions() as session:
             self.assertIsNone(session.get(EnrollmentSession, uuid.UUID(started["session_id"])))
 
-    def test_naming_sets_status_and_audits_without_storing_the_name(self):
+    def test_naming_creates_the_person_and_audits_without_storing_the_name(self):
         self.deploy_with_face_recognition()
         self.activate()
-        status = self.service.get_enrollment_status("tvt-mills-v1")
-        activated_at = status["session"]["activated_at"]
-        apex = FakeApex(
-            events=[capture_event("tvt-mills-v1", "camera-01", "evt-1", activated_at)],
-            persons=[{"person_id": "person-1", "enrollment_source_event_id": "tvt-mills-v1:evt-1", "status": "auto_enrolled", "display_name": None}],
-        )
-        self.service.reconcile_enrollment_sessions(apex)
+        apex = self.capture_one()
         with self.assertRaisesRegex(ValueError, "required"):
-            self.service.set_person_display_name(
-                person_id="person-1", display_name="   ", apex=apex, actor="op", request_id="n0"
-            )
-        result = self.service.set_person_display_name(
-            person_id="person-1", display_name="Jane Doe", apex=apex, actor="op", request_id="n1"
-        )
+            self.name_session(apex, name="   ", request_id="n0")
+        result = self.name_session(apex)
         self.assertEqual(result["naming_status"], "named")
-        self.assertEqual(apex.renamed, [("person-1", "Jane Doe")])
+        self.assertEqual(result["person_id"], "person-new")
+        self.assertEqual(apex.enrolled, [([f"{RUNTIME_WORKLOAD}:evt-1"], "Jane Doe")])
+        # Naming again is idempotent and creates nothing further.
+        self.assertEqual(self.name_session(apex, request_id="n2")["naming_status"], "named")
+        self.assertEqual(len(apex.enrolled), 1)
         audit = [item for item in self.service.list_audit_events(200) if item["action"] == "enrollment.person.name"]
         self.assertEqual(len(audit), 1)
-        self.assertEqual(audit[0]["target_id"], "person-1")
+        self.assertEqual(audit[0]["target_id"], "person-new")
         self.assertNotIn("Jane", json.dumps(audit[0]["details"]))
         self.assertEqual(audit[0]["details"], {})
 
-    def test_report_can_name_an_unnamed_person_without_storing_the_name(self):
-        apex = FakeApex(persons=[{
-            "person_id": "person-1",
-            "status": "auto_enrolled",
-            "display_name": None,
-        }])
-
-        result = self.service.set_report_person_display_name(
-            person_id="person-1",
-            display_name="Jane Doe",
-            apex=apex,
-            actor="op",
-            request_id="report-name-1",
+    def test_stopping_before_naming_discards_captures_and_creates_no_person(self):
+        self.deploy_with_face_recognition()
+        started = self.activate()
+        apex = self.capture_one()
+        stopped = self.service.cancel_enrollment_session(
+            deployment_key="tvt-mills-v1", session_id=started["session_id"], actor="op",
+            request_id="stop-1", apex=apex,
         )
+        self.assertEqual(stopped["naming_status"], "discarded")
+        self.assertEqual(stopped["error_code"], "ENROLLMENT_UNNAMED_DISCARDED")
+        self.assertEqual(apex.discarded, [f"{RUNTIME_WORKLOAD}:evt-1"])
+        with self.assertRaisesRegex(ValueError, UNNAMED_DISCARDED_MESSAGE):
+            self.name_session(apex)
+        self.assertEqual(apex.enrolled, [])
+        self.assertEqual(self.service.list_people_awaiting_names(), [])
 
-        self.assertEqual(result, {"person_id": "person-1", "naming_status": "named"})
-        self.assertEqual(apex.renamed, [("person-1", "Jane Doe")])
-        audit = [
-            item for item in self.service.list_audit_events(200)
-            if item["action"] == "reports.person.name"
-        ]
-        self.assertEqual(len(audit), 1)
-        self.assertEqual(audit[0]["target_id"], "person-1")
-        self.assertEqual(audit[0]["details"], {})
-        self.assertNotIn("Jane", json.dumps(audit[0]))
+    def test_cancelling_while_capturing_discards_staged_captures(self):
+        self.deploy_with_face_recognition()
+        started = self.activate()
+        activated_at = self.service.get_enrollment_status("tvt-mills-v1")["session"]["activated_at"]
+        apex = FakeApex(events=[capture_event("tvt-mills-v1", "camera-01", "evt-1", activated_at)])
+        self.service.reconcile_enrollment_sessions(apex)  # staged but not yet settled
+        self.assertEqual(self.service.get_enrollment_status("tvt-mills-v1")["session"]["status"], "capturing")
+        cancelled = self.service.cancel_enrollment_session(
+            deployment_key="tvt-mills-v1", session_id=started["session_id"], actor="op",
+            request_id="cancel-1", apex=apex,
+        )
+        self.assertEqual(cancelled["result_code"], "cancelled")
+        self.assertEqual(apex.discarded, [f"{RUNTIME_WORKLOAD}:evt-1"])
+        self.assertEqual(apex.enrolled, [])
 
-    def test_report_naming_rejects_an_unknown_person(self):
-        with self.assertRaisesRegex(ValueError, "unknown person_id"):
-            self.service.set_report_person_display_name(
-                person_id="ghost",
-                display_name="Jane Doe",
-                apex=FakeApex(),
-                actor="op",
-                request_id="report-name-unknown",
-            )
+    def test_unnamed_capture_is_discarded_after_the_naming_timeout(self):
+        self.deploy_with_face_recognition()
+        self.activate()
+        apex = self.capture_one()
+        results = self.service.reconcile_enrollment_sessions(
+            apex, now=utc_now() + timedelta(seconds=NAMING_TIMEOUT_SECONDS + CAPTURE_SETTLE_SECONDS + 1)
+        )
+        self.assertIn(
+            {"session_id": self.service.get_enrollment_status("tvt-mills-v1")["session"]["session_id"],
+             "transition": "discarded", "error_code": "ENROLLMENT_UNNAMED_DISCARDED"},
+            results,
+        )
+        self.assertEqual(self.service.get_enrollment_status("tvt-mills-v1")["session"]["naming_status"], "discarded")
+        self.assertEqual(apex.discarded, [f"{RUNTIME_WORKLOAD}:evt-1"])
+        self.assertEqual(apex.enrolled, [])
+
+    def test_naming_a_face_that_is_already_enrolled_creates_no_person(self):
+        self.deploy_with_face_recognition()
+        self.activate()
+        apex = self.capture_one(duplicate_on_enroll=True)
+        with self.assertRaisesRegex(ValueError, "already enrolled as Someone.*" + UNNAMED_DISCARDED_MESSAGE):
+            self.name_session(apex)
+        session = self.service.get_enrollment_status("tvt-mills-v1")["session"]
+        self.assertEqual((session["naming_status"], session["capture_result"]), ("discarded", "duplicate"))
+        self.assertEqual(apex.discarded, [f"{RUNTIME_WORKLOAD}:evt-1"])
+
+    def test_session_collects_several_captures_before_waiting_for_a_name(self):
+        self.deploy_with_face_recognition()
+        self.activate()
+        activated_at = self.service.get_enrollment_status("tvt-mills-v1")["session"]["activated_at"]
+        apex = FakeApex(events=[
+            capture_event("tvt-mills-v1", "camera-01", f"evt-{index}", activated_at) for index in range(3)
+        ])
+        self.service.reconcile_enrollment_sessions(apex)
+        self.assertEqual(self.service.get_enrollment_status("tvt-mills-v1")["session"]["status"], "capturing")
+        self.reconcile_settled(apex)
+        self.assertEqual(self.service.get_enrollment_status("tvt-mills-v1")["session"]["capture_count"], 3)
+
+    def test_session_stops_capturing_immediately_at_the_capture_limit(self):
+        self.deploy_with_face_recognition()
+        self.activate()
+        activated_at = self.service.get_enrollment_status("tvt-mills-v1")["session"]["activated_at"]
+        apex = FakeApex(events=[
+            capture_event("tvt-mills-v1", "camera-01", f"evt-{index}", activated_at)
+            for index in range(MAX_ENROLLMENT_CAPTURES + 2)
+        ])
+        self.service.reconcile_enrollment_sessions(apex)
+        session = self.service.get_enrollment_status("tvt-mills-v1")["session"]
+        self.assertEqual(session["naming_status"], "pending_name")
+        self.assertEqual(session["capture_count"], MAX_ENROLLMENT_CAPTURES)
+
+    def test_capture_rejected_by_apex_is_not_accepted(self):
+        self.deploy_with_face_recognition()
+        self.activate()
+        apex = self.capture_one(unstaged={f"{RUNTIME_WORKLOAD}:evt-1"})
+        session = self.service.get_enrollment_status("tvt-mills-v1")["session"]
+        self.assertEqual(session["status"], "capturing")
+        self.assertEqual(session["error_code"], "ENROLLMENT_CAPTURE_REJECTED")
+        self.assertEqual(apex.enrolled, [])
+
+    def test_capture_just_before_the_deadline_is_kept(self):
+        self.deploy_with_face_recognition()
+        self.activate()
+        activated_at = self.service.get_enrollment_status("tvt-mills-v1")["session"]["activated_at"]
+        with self.sessions.begin() as session:
+            row = session.scalar(select(EnrollmentSession))
+            row.capture_deadline_at = utc_now() - timedelta(seconds=1)
+        apex = FakeApex(events=[capture_event("tvt-mills-v1", "camera-01", "evt-1", activated_at)])
+        self.service.reconcile_enrollment_sessions(apex)
+        session = self.service.get_enrollment_status("tvt-mills-v1")["session"]
+        self.assertEqual((session["result_code"], session["naming_status"]), (None, "pending_name"))
 
     # 15. No vectors/names/raw payloads/sensitive URLs anywhere except the
     # authorized person-name response.
@@ -891,9 +1000,8 @@ class EnrollmentSessionTests(unittest.TestCase):
         activated_at = status["session"]["activated_at"]
         apex = FakeApex(
             events=[capture_event("tvt-mills-v1", "camera-01", "evt-1", activated_at, {"sharpness": 0.9})],
-            persons=[{"person_id": "person-1", "enrollment_source_event_id": "tvt-mills-v1:evt-1", "status": "auto_enrolled", "display_name": None}],
         )
-        self.service.reconcile_enrollment_sessions(apex)
+        self.reconcile_settled(apex)
         blob = json.dumps(self.service.get_enrollment_status("tvt-mills-v1"))
         blob += json.dumps(self.service.list_enrollment_sessions("tvt-mills-v1"))
         blob += json.dumps(self.service.list_people_awaiting_names())
@@ -1052,12 +1160,12 @@ class EnrollmentHttpRouteTests(unittest.TestCase):
         self.assertEqual(status.status_code, 200)
         self.assertEqual(status.json()["session"]["status"], "activating")
         self.assertEqual(len(sessions_list.json()), 1)
-        self.assertEqual(cancel.status_code, 200)
-        self.assertEqual(cancel.json()["status"], "restoring")
+        self.assertEqual(cancel.status_code, 409)
+        self.assertEqual(cancel.json()["detail"], UNNAMED_DISCARDED_MESSAGE)
         self.assertEqual(people.status_code, 200)
         self.assertEqual(people.json(), [])
 
-    def test_naming_route_surfaces_unknown_person_as_client_error(self):
+    def test_naming_route_surfaces_unknown_session_as_client_error(self):
         import asyncio
 
         import httpx
@@ -1070,7 +1178,8 @@ class EnrollmentHttpRouteTests(unittest.TestCase):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
                 return await client.post(
-                    "/api/v1/enrollment/people/ghost/name", json={"display_name": "Jane"}
+                    f"/api/v1/deployments/tvt-mills-v1/enrollment/sessions/{uuid.uuid4()}/name",
+                    json={"display_name": "Jane"},
                 )
 
         response = asyncio.run(exercise())

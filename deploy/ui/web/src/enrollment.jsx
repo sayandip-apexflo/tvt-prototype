@@ -2,6 +2,10 @@ import React,{useEffect,useMemo,useRef,useState} from 'react';
 import {edgeApi} from './api';
 
 const ACTIVE_STATUSES=['activating','capturing','restoring'];
+const UNNAMED_DISCARDED='No record created for unnamed person';
+// Keep polling while capturing or while a captured face waits for a name
+// (the server discards it after the naming timeout).
+const needsPolling=session=>!!session&&(ACTIVE_STATUSES.includes(session.status)||session.naming_status==='pending_name');
 const STATUS_TEXT={
   activating:'Switching the camera to enrollment mode…',
   capturing:'Ready — ask the person to look directly at the camera.',
@@ -141,7 +145,7 @@ export function EnrollmentDeploymentPanel({deploymentId}){
         const x=await edgeApi(`deployments/${encodeURIComponent(deploymentId)}/enrollment/status`);
         if(!live)return;
         setSession(x.session);setObserver(x.observer||null);setError('');
-        if(x.session&&ACTIVE_STATUSES.includes(x.session.status))timer.current=setTimeout(poll,2000);
+        if(needsPolling(x.session))timer.current=setTimeout(poll,2000);
       }catch(e){if(live){setError(e.message);timer.current=setTimeout(poll,5000)}}
     }
     poll();
@@ -149,10 +153,11 @@ export function EnrollmentDeploymentPanel({deploymentId}){
   },[deploymentId]);
 
   async function pollAgain(){
+    if(timer.current)clearTimeout(timer.current);
     try{
       const x=await edgeApi(`deployments/${encodeURIComponent(deploymentId)}/enrollment/status`);
       setSession(x.session);setObserver(x.observer||null);
-      if(x.session&&ACTIVE_STATUSES.includes(x.session.status))timer.current=setTimeout(pollAgain,2000);
+      if(needsPolling(x.session))timer.current=setTimeout(pollAgain,2000);
     }catch(e){setError(e.message);timer.current=setTimeout(pollAgain,5000)}
   }
   async function start(){
@@ -163,27 +168,31 @@ export function EnrollmentDeploymentPanel({deploymentId}){
       timer.current=setTimeout(pollAgain,2000);
     }catch(e){setError(e.message)}finally{setBusy(false)}
   }
-  async function cancel(){
+  // Stopping before the person is named never creates a record; the API
+  // answers with the "No record created for unnamed person" error.
+  async function stop(){
     setBusy(true);setError('');
     try{setSession(await edgeApi(`deployments/${encodeURIComponent(deploymentId)}/enrollment/sessions/${session.session_id}/cancel`,{}))}
-    catch(e){setError(e.message)}finally{setBusy(false)}
+    catch(e){setError(e.message)}
+    finally{setBusy(false);await pollAgain()}
   }
   async function saveName(e){
     e.preventDefault();setBusy(true);setError('');
     try{
-      await edgeApi(`enrollment/people/${session.person_id}/name`,{display_name:name});
-      const x=await edgeApi(`deployments/${encodeURIComponent(deploymentId)}/enrollment/status`);
-      setSession(x.session);setObserver(x.observer||null);setName('');
-    }catch(e){setError(e.message)}finally{setBusy(false)}
+      setSession(await edgeApi(`deployments/${encodeURIComponent(deploymentId)}/enrollment/sessions/${session.session_id}/name`,{display_name:name}));setName('');
+    }catch(e){setError(e.message)}
+    finally{setBusy(false);await pollAgain()}
   }
 
   const status=session?.status,active=!!session&&ACTIVE_STATUSES.includes(status);
+  const awaitingName=session?.naming_status==='pending_name';
+  const discarded=session?.naming_status==='discarded';
 
   return <section className="cu-settings-panel">
     <div className="cu-section-title"><h2>Face enrollment</h2><span>{deploymentId}</span></div>
-    <p>This camera is designated for face enrollment. Starting a session switches it to enrollment mode for a short window, then restores it automatically.</p>
+    <p>This camera is designated for face enrollment. Starting a session switches it to enrollment mode for a short window, captures a few frames of the person, then restores it automatically. The person is enrolled only once you name them.</p>
     {error&&<p className="cu-notice" role="alert">{error}</p>}
-    {!active&&<button className="cu-btn cu-primary" disabled={busy} onClick={start}>{busy?'Starting…':'Start enrollment'}</button>}
+    {!active&&!awaitingName&&<button className="cu-btn cu-primary" disabled={busy} onClick={start}>{busy?'Starting…':'Start enrollment'}</button>}
     {active&&<p>{STATUS_TEXT[status]}</p>}
     {observer&&<div className="enrollment-observer" role="status">
       <strong>{OBSERVER_TEXT[observer.stage]||observer.stage.replaceAll('_',' ')}</strong>
@@ -192,13 +201,15 @@ export function EnrollmentDeploymentPanel({deploymentId}){
       {observer.safe_reason&&<small>Diagnostic: {observer.safe_reason.replaceAll('_',' ')}</small>}
       {!!observer.timeline?.length&&<ol>{observer.timeline.map((item,index)=><li key={`${item.stage}-${index}`}><span>{OBSERVER_TEXT[item.stage]||item.stage.replaceAll('_',' ')}</span><time>{new Date(item.occurred_at).toLocaleTimeString()}</time></li>)}</ol>}
     </div>}
-    {active&&status==='capturing'&&<button className="cu-btn" disabled={busy} onClick={cancel}>Cancel</button>}
-    {session?.capture_result&&<p className="cu-notice" role="status">{session.capture_result==='created'?'Face captured — new person.':'Face captured — matched an existing person.'}</p>}
+    {awaitingName&&<p className="cu-notice" role="status">Face captured ({session.capture_count} {session.capture_count===1?'frame':'frames'}). Enter a name to enroll this person — no record is created until you do.</p>}
+    {session?.capture_result==='duplicate'&&<p className="cu-notice" role="status">This face is already enrolled — no new record created.</p>}
     {!active&&session?.result_code&&session.result_code!=='ok'&&<p className="cu-notice">{RESULT_TEXT[session.result_code]||`Enrollment ${session.result_code.replaceAll('_',' ')}.`}</p>}
-    {session?.naming_status==='pending_name'&&<form className="cu-site-form" onSubmit={saveName}>
+    {discarded&&!error&&<p className="cu-notice" role="alert">{UNNAMED_DISCARDED}</p>}
+    {awaitingName&&<form className="cu-site-form" onSubmit={saveName}>
       <label>Name this person<input value={name} onChange={e=>setName(e.target.value)} required maxLength={160} placeholder="e.g. Jane Doe"/></label>
       <button className="cu-btn cu-primary" disabled={busy}>{busy?'Saving…':'Save name'}</button>
     </form>}
+    {(status==='capturing'||awaitingName)&&<button className="cu-btn" disabled={busy} onClick={stop}>Stop enrollment</button>}
     {session?.naming_status==='named'&&<p className="cu-notice" role="status">Name saved.</p>}
   </section>;
 }
