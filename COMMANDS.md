@@ -88,6 +88,32 @@ For scripted package generation and rebuilding after a GitHub commit, run
 `scripts/make-tvt-edge-release.sh --help` and follow
 [TVT edge release build runbook](docs/EDGE-RELEASE-BUILD.md).
 
+## Upgrade an installed edge
+
+Use the target release bundle to plan and stage every in-place application,
+dashboard, node-management, manifest, or CV-image change:
+
+```bash
+<release-bundle>/scripts/tvt-edge-operations.sh \
+  upgrade-release plan --bundle <release-bundle>
+
+sudo <release-bundle>/scripts/tvt-edge-operations.sh \
+  upgrade-release prepare --bundle <release-bundle> \
+  [--deployment-id <deployment-id>]
+
+sudo <release-bundle>/scripts/tvt-edge-operations.sh \
+  upgrade-release activate --operation-id <operation-id>
+
+sudo <release-bundle>/scripts/tvt-edge-operations.sh \
+  upgrade-release status --operation-id <operation-id>
+```
+
+`--deployment-id` is required only when the plan reports a changed CV
+solution. A plan reporting `platform_maintenance` must use the rebooting host
+preparation/reinstall track above rather than the in-place activator. See
+[TVT edge release deployment](DEPLOYMENT.md) for availability, verification,
+resume, rollback, and release-specific operator-action instructions.
+
 ## Phase 1: edge-local OCI registry and K3s
 
 Run these commands from the `tvt-prototype` repository root on the Ubuntu 24.04

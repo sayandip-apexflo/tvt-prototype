@@ -203,6 +203,7 @@ class EdgeHostInstallerTests(unittest.TestCase):
             "import-pipeline-traffic-image",
             "bootstrap-postgresql",
             "upgrade-application",
+            "upgrade-release",
             "upgrade-solution-image",
         ):
             self.assertIn(operation, result.stderr)
@@ -216,6 +217,21 @@ class EdgeHostInstallerTests(unittest.TestCase):
         )
         for filename in retired:
             self.assertFalse((ROOT / "scripts" / filename).exists(), filename)
+
+    def test_application_upgrade_restores_active_control_service(self) -> None:
+        operations = (ROOT / "scripts/tvt-edge-operations.sh").read_text(
+            encoding="utf-8"
+        )
+        application = operations.split("tvt_op_upgrade_application()", 1)[1].split(
+            "# Source: scripts/tvt-hardware-inventory.py", 1
+        )[0]
+        self.assertIn(
+            "systemctl is-active --quiet apexfabric-control.service",
+            application,
+        )
+        self.assertEqual(
+            application.count("systemctl restart apexfabric-control.service"), 2
+        )
 
     def test_solution_upgrade_operation_is_resumable_and_secret_free(self) -> None:
         operations = (ROOT / "scripts/tvt-edge-operations.sh").read_text(
@@ -253,7 +269,8 @@ class EdgeHostInstallerTests(unittest.TestCase):
         required = {
             "prepare-tvt-edge-host.sh", "install-tvt-edge-host.sh", "alembic.ini",
             "config/platform.env", "config/pipeline.env", "config/hardware-matrix.env",
-            "scripts/lib/tvt-installer-common.sh", "scripts/lib/tvt-solution-upgrade.py",
+            "scripts/lib/tvt-installer-common.sh", "scripts/lib/tvt-release-upgrade.py",
+            "scripts/lib/tvt-solution-upgrade.py",
             "scripts/tvt-edge-operations.sh",
             "scripts/tvt-hardware-inventory.py", "scripts/validate-solution-delivery.py",
             "deploy/k8s/apexfabric-foundation.yaml", "deploy/k8s/apexfabric-node-management.yaml",

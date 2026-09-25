@@ -1,114 +1,92 @@
-# CV solution image deployment
+# TVT edge release deployment
 
 ## Purpose
 
-This runbook upgrades an already-deployed TVT CV workload to a new,
-checksum-pinned vendor release, for example v2 to v3. It assumes the vendor has
-published a complete release and the TVT engineer has integrated its immutable
-archive and metadata into a TVT release bundle.
+This runbook upgrades an installed TVT edge from one immutable TVT release
+bundle to another. The common workflow handles changes to:
+
+- `tvt_edge` and `apexfabric` Python code and dependencies;
+- PostgreSQL migrations;
+- host systemd services and timers;
+- the TVT/ApexFabric dashboard image;
+- node-reporter and node-status-controller images and manifests;
+- Solution Pack schemas and catalogs; and
+- the vendor CV runtime image.
 
 Use only the consolidated host operation:
 
 ```bash
-sudo ./scripts/tvt-edge-operations.sh upgrade-solution-image ACTION OPTIONS
+sudo <release-bundle>/scripts/tvt-edge-operations.sh \
+  upgrade-release ACTION OPTIONS
 ```
 
-Do not edit Kubernetes Deployments, database rows, catalog rows, image tags, or
-camera Secrets by hand.
+The older `upgrade-application` and `upgrade-solution-image` operations remain
+component operations used by the common orchestrator and for targeted recovery.
+Do not edit Kubernetes Deployments, database rows, catalog rows, image tags,
+systemd units, or camera Secrets by hand.
 
-## Availability statement
+## Two upgrade classes
 
-The preparation phase does not interrupt the running CV workload. It verifies
-and stages the release, imports the image into the edge-local registry,
-pre-pulls the exact digest into K3s containerd, seeds the catalog, and previews
-the deployment while the current Pod continues to run.
+`upgrade-release plan` compares the installed and target release manifests and
+checksums. It reports one of two activation modes:
 
-Activation has a real interruption. The CV Deployment has one replica and the
-Intel accelerator profile uses Kubernetes `Recreate`. Kubernetes terminates
-the old Pod before it creates the new Pod. The outage lasts from termination of
-the old runtime until the new runtime has started, loaded its models, opened its
-camera streams, and passed readiness. Pre-pulling removes image-transfer time
-from this interval, but it does not make the rollout zero-downtime.
+1. `in_place` covers application, service-unit, dashboard, node-management,
+   manifest, catalog, and CV-image changes.
+2. `platform_maintenance` covers registry, K3s, kernel, driver, or offline host
+   package changes, plus database migrations that are not declared compatible
+   with the previous application. These require an offline transition or can
+   restart the whole data plane, so the in-place activator refuses them. Use
+   the host preparation/reinstall procedure in
+   `docs/EDGE-FLEET-DEPLOYMENT.md` for that release.
 
-A failed new-image rollout restores the previous complete bundle and image.
-After that restoration, synchronization enters `operator_required` instead of
-automatically retrying the bad image and causing repeated outages. The
-activation command then commits an explicit rollback to the previous applied
-snapshot. A failed restoration itself remains retryable because the old
-workload has not been proven healthy.
+This distinction is deliberate. One front door identifies the impact, but a
+kernel or driver transition cannot safely have the same rollback promise as a
+Python service or digest-pinned Kubernetes workload.
 
-True uninterrupted CV processing would require a separately designed
-blue/green or multi-replica runtime that can safely share accelerators, camera
-streams, event ownership, and persistent state. That is not the current
-single-box contract.
+## Availability
 
-## What the operation preserves
+Preparation is non-disruptive. It verifies the complete bundle, constructs the
+new release directory and virtual environment, publishes the dashboard and
+node-management images to the local registry, and pre-pulls/previews a changed
+CV solution. The active application and CV workload continue running.
 
-The target bundle is generated from the last successfully applied assignment
-snapshot inside one database transaction. It preserves:
+Activation has change-dependent interruption:
 
-- deployment ID and namespace;
-- lifecycle intent;
-- cameras, requested FPS, applications, geometry, and application config;
-- inference mode, resource requests and limits, and state PVC size;
-- the existing state PVC.
+| Changed component | Expected impact |
+|---|---|
+| TVT/ApexFabric host application | Brief management API/control-service restart; the existing CV Pod continues |
+| Dashboard | Brief dashboard `Recreate` rollout |
+| Node-management workloads | Rolling reporter/controller restart; the CV workload normally continues |
+| CV image or solution contract | Real inference interruption: the single CV replica uses `Recreate` |
+| K3s, kernel, drivers, or host packages | Platform maintenance and possibly a reboot; all inference may stop |
 
-The host script never retrieves camera credentials or RTSP URLs. Camera
-credentials remain encrypted in PostgreSQL and are materialized only through
-the existing sync worker when it applies the camera-source Secret.
+Pre-pulling removes image-transfer time from the CV outage but does not make a
+single-replica `Recreate` rollout zero-downtime. True uninterrupted inference
+requires a separately qualified blue/green or multi-replica design that can
+safely share camera streams, accelerators, persistent state, and event
+ownership.
 
-The upgrade commit uses the source applied bundle SHA-256 as a
-compare-and-swap token. If an operator changes assignments, enrollment, start
-or stop state, or another deployment revision between preview and commit, the
-commit fails and must be prepared again.
+## Release policy
 
-## Prerequisites
+Every deployable change receives a new TVT release version. Never publish new
+content under an existing version.
 
-Before using this runbook, verify all of the following:
+The release manifest declares:
 
-1. The vendor release contains the amd64 OCI archive and the complete solution
-   delivery metadata: `image-contract.yaml`,
-   `desired-state.schema.json`, `desired-state.example.json`,
-   `metrics.schema.json`, `analytics-event.schema.json`,
-   `analytics-event.example.json`, and `provenance.json`.
-2. `config/pipeline.env` pins the vendor repository commit, catalog ID,
-   version, archive name, archive size, archive SHA-256, source image tag,
-   edge-local repository/tag, metadata checksums, and compatibility-module
-   checksum.
-3. The matching catalog directory exists at
-   `solution-packs/catalog/tvt-mills-pilot-<version>/`.
-4. A hardware-profile-specific TVT release bundle has been built with
-   `scripts/make-tvt-edge-release.sh`. Do not use a raw vendor checkout as
-   the edge bundle.
-5. The edge is healthy, has enough free space for a staged copy of the OCI
-   archive and its unpacked registry layers, and the local registry, Docker,
-   K3s, PostgreSQL, `tvt-edge.service`, and
-   `tvt-camera-sync.service` are running.
-6. No enrollment session or other deployment change is in progress. The
-   deployment must report one stable applied desired revision.
-7. The installed TVT application includes the
-   `/deployments/{deployment_id}/upgrade` endpoints. If it does not,
-   upgrade the TVT application from the new release bundle first as described
-   below. This restarts the management services but does not replace the
-   currently running CV Pod.
+- database migration strategy and whether the previous application remains
+  compatible with the migrated schema; and
+- bounded operator actions associated with the release.
 
-Do not put SSH passwords, sudo passwords, registry credentials, camera
-credentials, or credential-bearing URLs in a command line, release bundle,
-state file, or this document.
+Operator actions are displayed in the plan but are never run automatically.
+This matters for data-maintenance operations such as
+`purge-unnamed-persons`: it is idempotent and takes its own backup, but it
+deletes legacy identity data and therefore still requires an explicit operator
+decision.
 
-## 1. Integrate and build the release
+## 1. Build the immutable release
 
-On the release workstation, update the immutable pins and catalog from the
-vendor's published release. Validate that the archive and metadata agree:
-
-```bash
-.venv/bin/python scripts/validate-solution-delivery.py \
-  --catalog solution-packs/catalog/tvt-mills-pilot-<v3-version> \
-  --config config/pipeline.env \
-  --archive /srv/tvt-release/inputs-v3/<vendor-image>.oci.tar
-```
-
-Probe the target edge and build a release for that exact inventory:
+Create a clean release commit and choose a new version. Probe the target edge,
+then build one bundle for that exact edge profile:
 
 ```bash
 ./scripts/tvt-edge-operations.sh probe-edge-hardware \
@@ -116,237 +94,236 @@ Probe the target edge and build a release for that exact inventory:
   --output /srv/tvt-release/edge-hardware-inventory.json
 
 ./scripts/make-tvt-edge-release.sh \
-  --input-directory /srv/tvt-release/inputs-v3 \
+  --input-directory /srv/tvt-release/inputs-<release> \
   --output-directory /srv/tvt-release/output/tvt-edge-release-<release>-intel-285h \
   --edge-inventory /srv/tvt-release/edge-hardware-inventory.json \
   --version <release> \
   --source-commit <full-40-character-tvt-git-sha>
 ```
 
-The release builder and `verify-release` gate every file through
-`checksums.sha256`. Transfer the completed bundle to stable local storage on
-the edge; do not activate directly from a directory that will disappear during
-the operation.
+The builder runs the source tests, builds the wheel and container artifacts,
+locks external inputs, validates the vendor delivery, and covers every bundle
+file with `checksums.sha256`. Transfer the completed bundle to stable local
+storage on the edge. Do not activate from removable or temporary storage.
 
-## 2. Upgrade the management capability when required
+Never put SSH passwords, sudo passwords, registry credentials, camera
+credentials, credential-bearing URLs, or API keys in the bundle or command
+line.
 
-This step is needed once on edges running a TVT application version that
-predates `upgrade-solution-image`. It upgrades the host application,
-database schema, and dashboard, but it does not change the CV desired bundle:
+## 2. Produce and review the plan
 
-```bash
-sudo <release-bundle>/scripts/tvt-edge-operations.sh upgrade-application \
-  --bundle <release-bundle>
-```
-
-Verify the loopback API and management service before proceeding:
+The plan operation is read-only:
 
 ```bash
-sudo systemctl is-active tvt-edge.service tvt-camera-sync.service
-curl --fail --silent http://127.0.0.1:8089/api/v1/health
+<release-bundle>/scripts/tvt-edge-operations.sh \
+  upgrade-release plan --bundle <release-bundle>
 ```
 
-The application upgrade has its own retained release and database backup under
-`/var/lib/tvt/install/`.
+Review:
 
-## 3. Identify the deployment
+- current and target release versions;
+- every changed component;
+- `activation_mode`;
+- availability impacts;
+- database rollback compatibility; and
+- required or optional operator actions.
 
-List deployments locally on the edge:
+Do not continue with the in-place workflow when `activation_mode` is
+`platform_maintenance`. Complete the release-specific host preparation,
+reboot, and verification procedure instead.
+
+If `cv_solution` is `true`, identify the stable applied deployment:
 
 ```bash
 curl --fail --silent http://127.0.0.1:8089/api/v1/deployments
 ```
 
-Choose the `deployment_id` whose `sync_state` is `applied`. Record its
-`applied_revision`, `applied_bundle_sha256`, and
-`applied_image_digest` in the change record. This response contains no camera
-credentials or RTSP URLs.
+Record its deployment ID, applied revision, bundle SHA-256, catalog ID, and
+image digest in the change record. The response contains no camera credentials
+or RTSP URLs.
 
-## 4. Prepare v3 without changing the running workload
+## 3. Prepare without interruption
 
-Run prepare from the new, verified release bundle:
+For a release that changes the CV solution:
 
 ```bash
 sudo <release-bundle>/scripts/tvt-edge-operations.sh \
-  upgrade-solution-image prepare \
+  upgrade-release prepare \
   --bundle <release-bundle> \
   --deployment-id <deployment-id>
 ```
 
-The command returns JSON containing an `operation_id`. Keep that value. Prepare
-is resumable: passing an explicit operation ID allows the same state to be
-reused after an interrupted shell session:
+When the CV solution is unchanged, omit `--deployment-id`:
 
 ```bash
 sudo <release-bundle>/scripts/tvt-edge-operations.sh \
-  upgrade-solution-image prepare \
+  upgrade-release prepare --bundle <release-bundle>
+```
+
+Preparation returns an `operation_id`. Save it. To resume an interrupted
+preparation, pass the same ID:
+
+```bash
+sudo <release-bundle>/scripts/tvt-edge-operations.sh \
+  upgrade-release prepare \
   --bundle <release-bundle> \
   --deployment-id <deployment-id> \
   --operation-id <operation-id>
 ```
 
-Prepare performs these gates before reporting `prepared`:
+Preparation performs these gates:
 
-1. verifies the full TVT release manifest and checksum coverage;
-2. copies the pinned archive and metadata into a root-only operation directory;
-3. validates catalog, provenance, pipeline pins, archive hash, size, and tag;
-4. imports the archive, adds the checksum-pinned TVT compatibility layer, and
-   publishes the versioned image to the loopback registry;
-5. records the registry-produced immutable digest in an image lock;
-6. runs `k3s crictl pull` and `inspecti` for the exact
-   `repository@sha256` reference;
-7. seeds and refreshes the target catalog entry;
-8. asks the management service to reconstruct the stable applied assignment
-   snapshot and preview the target bundle;
-9. verifies that the preview's catalog ID and image reference match the staged
-   image lock.
+1. verifies the release manifest and full checksum coverage;
+2. compares installed and target artifacts and rejects platform-maintenance
+   changes from the in-place path;
+3. creates `/opt/tvt/releases/<version>` and installs the target wheel into its
+   own virtual environment;
+4. publishes digest-pinned dashboard and node-management images to the
+   loopback registry;
+5. for a CV change, verifies the vendor archive/catalog, publishes and
+   pre-pulls the exact image digest, snapshots the applied assignment, and
+   performs the compare-and-swap preview; and
+6. records resumable, root-only state under
+   `/var/lib/tvt/install/release-upgrades/<operation-id>/`.
 
-All state and staged artifacts are under:
-
-```text
-/var/lib/tvt/pipeline/upgrades/<operation-id>/
-```
-
-The directory is root-only (mode `0700`), and its JSON state and staged
-files are mode `0600`.
-
-Inspect preparation at any time:
+Inspect it at any time:
 
 ```bash
 sudo <release-bundle>/scripts/tvt-edge-operations.sh \
-  upgrade-solution-image status \
-  --operation-id <operation-id>
+  upgrade-release status --operation-id <operation-id>
 ```
 
-Do not continue unless `status` is `prepared` and the source bundle/image
-match the recorded pre-change values.
+Continue only when the outer status is `prepared` and, for a CV change, the
+nested solution status is also `prepared`.
 
-## 5. Activate during the maintenance window
-
-Start activation:
+## 4. Activate during the maintenance window
 
 ```bash
 sudo <release-bundle>/scripts/tvt-edge-operations.sh \
-  upgrade-solution-image activate \
+  upgrade-release activate \
   --operation-id <operation-id> \
   --timeout 900
 ```
 
-Activation performs one compare-and-swap commit. The sync worker applies the
-target bundle, waits for the Kubernetes Deployment rollout, and marks the
-revision applied only after the rollout succeeds. On success, the command also
-updates the installed pipeline synchronization configuration and canonical
-image lock so scheduled verification uses v3.
+Activation executes in this order:
 
-Because `Recreate` is used, observe the maintenance window from another
-terminal:
+1. save the previous release links, installation evidence, systemd units,
+   dashboard/node image locks, PostgreSQL dump, and an online SQLite backup of
+   ApexFabric telemetry/identity state;
+2. stop the affected host writers, apply the PostgreSQL migration, switch the
+   release symlinks, install current service units, and restart all affected
+   long-running services;
+3. apply and wait for digest-pinned node-management and dashboard rollouts;
+4. activate the CV solution last, using the prepared assignment snapshot and
+   compare-and-swap token; and
+5. commit installation evidence only after health gates succeed.
+
+Do not edit cameras, assignments, enrollment state, or deployment lifecycle
+while activation is running. For a CV update, observe the expected
+single-replica interruption separately:
 
 ```bash
 sudo k3s kubectl get pods -n apexfabric -w
 ```
 
-Do not submit camera edits, enrollment requests, start/stop actions, or another
-solution upgrade while activation is running.
+Losing the SSH session does not create a second release. Re-run `status`, then
+re-run `activate` with the same operation ID when its recorded state permits
+resume.
 
-## 6. Verify the deployment
-
-Check durable orchestration state:
+## 5. Verify
 
 ```bash
 sudo <release-bundle>/scripts/tvt-edge-operations.sh \
-  upgrade-solution-image status \
-  --operation-id <operation-id>
-```
+  upgrade-release status --operation-id <operation-id>
 
-A successful operation reports:
+sudo /opt/tvt/current/resources/scripts/tvt-edge-operations.sh \
+  verify-k3s-plane
 
-- operation `status: applied`;
-- deployment `sync_state: applied`;
-- `applied_bundle_sha256` equal to `target_bundle_sha256`;
-- `applied_image_digest` equal to `target_image_digest`.
+sudo systemctl is-active \
+  apexfabric-control.service tvt-edge.service tvt-camera-sync.service
 
-Then run the read-only platform and application checks:
-
-```bash
-sudo <release-bundle>/install-tvt-edge-host.sh \
-  --bundle <release-bundle> \
-  --site-config <site-config> \
-  --prepare-mode offline \
-  --verify-only
-
-sudo systemctl is-active tvt-edge.service tvt-camera-sync.service
+curl --fail --silent http://127.0.0.1:8088/api/customer
 curl --fail --silent http://127.0.0.1:8089/api/v1/health
+curl --fail --silent http://127.0.0.1:18081/dashboard/ >/dev/null
 ```
 
-Also verify the site-specific cameras and expected analytics in the TVT
-dashboard. A Kubernetes-ready Pod proves rollout completion, not inference
-correctness; use the Traffic qualification workflow when release acceptance
-requires inference evidence.
+Verify the site-specific cameras and expected analytics in the dashboard. A
+Kubernetes-ready Pod proves rollout completion, not inference correctness. Run
+the Traffic qualification workflow when release acceptance requires inference
+evidence.
 
-## 7. Failure behavior and rollback
+## 6. Release-specific operator actions
 
-If target rollout fails after Kubernetes mutation, the sync worker first
-reapplies the previous complete bundle and waits for its rollout. For an image
-change that was successfully restored, it sets `operator_required` and does
-not retry the failed target automatically. The activation command detects this
-state and commits an explicit rollback to the previous bundle snapshot.
+The current release advertises the optional post-activation cleanup for legacy
+unnamed identities. Review first:
 
-If activation times out, the command does not guess whether the rollout is
-still progressing. Inspect status and cluster health first:
+```bash
+sudo /opt/tvt/current/resources/scripts/tvt-edge-operations.sh \
+  purge-unnamed-persons --dry-run
+```
+
+Run the real cleanup only when its result is approved:
+
+```bash
+sudo /opt/tvt/current/resources/scripts/tvt-edge-operations.sh \
+  purge-unnamed-persons
+```
+
+It preserves named people and creates a root-only SQLite backup under
+`/var/lib/tvt/install/` before deleting unnamed people, their vectors, and
+attendance sessions.
+
+## 7. Failure and rollback
+
+If application activation fails before completion, the component upgrader
+restores the previous release links, systemd units, dashboard/node image locks,
+and workloads. It does not silently restore PostgreSQL from `pg_dump`, because
+doing so could discard writes accepted after the backup.
+
+The CV upgrader independently restores the previous complete bundle and image
+after a failed rollout. Synchronization then enters `operator_required` to
+prevent retrying a known-bad image and causing repeated outages.
+
+Inspect first:
 
 ```bash
 sudo <release-bundle>/scripts/tvt-edge-operations.sh \
-  upgrade-solution-image status \
-  --operation-id <operation-id>
-
-sudo k3s kubectl get deployments,pods -n apexfabric
+  upgrade-release status --operation-id <operation-id>
 ```
 
-When rollback is appropriate, run:
+When rollback is appropriate:
 
 ```bash
 sudo <release-bundle>/scripts/tvt-edge-operations.sh \
-  upgrade-solution-image rollback \
+  upgrade-release rollback \
   --operation-id <operation-id> \
   --timeout 900
 ```
 
-Rollback creates a new desired revision from the previously applied immutable
-assignment snapshot and current camera credential versions. It retains the
-state PVC. If v3 had already become active, it also restores the prior pipeline
-sync configuration and canonical image lock. The v3 image remains cached in
-Docker, the local registry, and containerd; removing cached images is a separate
-capacity-management action and is not part of rollback.
+Rollback runs in reverse order: CV solution, Kubernetes image locks/manifests,
+systemd units, application links, and services. It is allowed automatically
+only when the target release manifest declares the migrated database schema
+compatible with the previous application. Otherwise the operation remains
+`operator_required`; use a reviewed offline database recovery procedure rather
+than risking silent data loss.
 
-Rollback also uses `Recreate`, so it causes another bounded CV interruption.
+Rollback of an active CV image uses `Recreate` and causes another bounded
+inference interruption. Newly published images remain cached; cache cleanup is
+a separate capacity-management action.
 
-## 8. Resume and recovery rules
-
-- Re-run `prepare` with the same explicit operation ID to inspect an already
-  created operation. It will not create a second deployment revision.
-- Re-run `activate` after a lost SSH session. Its idempotency key is derived
-  from the operation ID, so an already-committed upgrade is not duplicated.
-- Re-run `rollback` when state is `rolling_back`; it waits for the existing
-  rollback instead of posting another rollback revision.
-- A `prepared` operation may be abandoned without affecting the running
-  workload. It leaves staged artifacts for audit and later cleanup.
-- `operator_required` deliberately requires an explicit new commit or rollback.
-  Ordinary camera and lifecycle commits return synchronization to `pending`.
-- Never edit the operation JSON to force a transition. Preserve it with the
-  installation evidence and diagnose the underlying failed gate.
-
-## 9. Audit and evidence
+## 8. Evidence
 
 Retain these non-secret records with the change ticket:
 
-- TVT release version and source commit;
-- release `manifest.json` and `checksums.sha256`;
-- operation ID and final status output;
-- source and target catalog IDs, bundle SHA-256 values, image digests, and
-  desired/applied revisions;
-- installation/verification report;
-- qualification report when required;
-- start/end time of the observed CV interruption.
+- source commit and current/target release versions;
+- target `manifest.json` and `checksums.sha256`;
+- plan output, operation ID, and final status;
+- database migration head and backup directory;
+- previous and target dashboard/node/CV image digests;
+- source and target CV bundle SHA-256 values and revisions;
+- installation verification and qualification reports; and
+- observed management and inference interruption times.
 
-Do not attach environment files, camera Secret bodies, raw PostgreSQL dumps,
-credential files, or command output containing sensitive values.
+Do not attach environment files, credential files, Secret bodies, raw database
+dumps, camera URLs, faces, plates, embeddings, or command output containing
+sensitive values.

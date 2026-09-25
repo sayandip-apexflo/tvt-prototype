@@ -29,11 +29,24 @@ tvt_canonical_directory() {
 }
 
 tvt_acquire_lock() {
+  # A top-level release operation owns the same lock while it invokes the
+  # component operations below it. Bash preserves the lock file descriptor
+  # across those child processes, so they must treat this marker as a
+  # re-entrant acquisition rather than deadlocking against their parent.
+  if [[ ${TVT_INSTALL_LOCK_HELD:-} == 1 && -e /proc/$$/fd/8 ]]; then
+    held_lock="$(readlink -f "/proc/$$/fd/8" 2>/dev/null || true)"
+    expected_lock="$(readlink -f "${TVT_INSTALL_LOCK}" 2>/dev/null || true)"
+    if [[ -n ${held_lock} && ${held_lock} == "${expected_lock}" ]]; then
+      return
+    fi
+  fi
+  unset TVT_INSTALL_LOCK_HELD
   local lock_directory
   lock_directory="$(dirname "${TVT_INSTALL_LOCK}")"
   install -d -m 0755 "${lock_directory}"
   exec 8>"${TVT_INSTALL_LOCK}"
   flock --wait 0 8 || tvt_fail "another TVT host installation command is running"
+  export TVT_INSTALL_LOCK_HELD=1
 }
 
 tvt_manifest_value() {
@@ -110,6 +123,23 @@ required = {
 }
 if not isinstance(artifacts, dict) or required - artifacts.keys():
     raise SystemExit("manifest artifacts section is incomplete")
+upgrade = manifest.get("upgrade")
+if not isinstance(upgrade, dict):
+    raise SystemExit("manifest upgrade section is missing or invalid")
+database_upgrade = upgrade.get("database")
+if not isinstance(database_upgrade, dict) \
+        or database_upgrade.get("strategy") not in {"expand-contract", "forward-only", "none"} \
+        or not isinstance(database_upgrade.get("rollback_compatible"), bool):
+    raise SystemExit("manifest database upgrade policy is invalid")
+operator_actions = upgrade.get("operator_actions")
+if not isinstance(operator_actions, list):
+    raise SystemExit("manifest operator_actions must be a list")
+for action in operator_actions:
+    if not isinstance(action, dict) \
+            or not isinstance(action.get("operation"), str) \
+            or action.get("timing") not in {"before_activation", "after_activation"} \
+            or not isinstance(action.get("required"), bool):
+        raise SystemExit("manifest contains an invalid operator action")
 
 def safe_relative(raw: str) -> pathlib.PurePosixPath:
     if not isinstance(raw, str) or not raw:
@@ -127,6 +157,7 @@ required_resources = {
     "prepare-tvt-edge-host.sh", "install-tvt-edge-host.sh", "alembic.ini",
     "config/platform.env", "config/pipeline.env", "config/hardware-matrix.env",
     "scripts/lib/tvt-installer-common.sh",
+    "scripts/lib/tvt-release-upgrade.py",
     "scripts/lib/tvt-solution-upgrade.py",
     "scripts/tvt-edge-operations.sh",
     "scripts/tvt-hardware-inventory.py",

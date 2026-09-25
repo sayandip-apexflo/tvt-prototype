@@ -4036,6 +4036,53 @@ esac
 exec python3 "${REPO_ROOT}/scripts/lib/tvt-solution-upgrade.py" "$@"
 )
 
+tvt_op_upgrade_release() (
+# Plan, prepare, activate, inspect, or roll back a complete TVT edge release.
+set -Eeuo pipefail
+umask 077
+
+readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+[[ $# -gt 0 ]] || {
+  echo "usage: scripts/tvt-edge-operations.sh upgrade-release {plan|prepare|activate|status|rollback} [arguments]" >&2
+  exit 2
+}
+readonly ACTION="$1"
+
+# shellcheck source=scripts/lib/tvt-installer-common.sh
+source "${REPO_ROOT}/scripts/lib/tvt-installer-common.sh"
+case "${ACTION}" in
+  plan|prepare)
+    BUNDLE=""
+    arguments=("$@")
+    for ((index=1; index < ${#arguments[@]}; index++)); do
+      if [[ ${arguments[index]} == --bundle ]]; then
+        BUNDLE="${arguments[index + 1]:-}"
+        break
+      fi
+    done
+    [[ -n ${BUNDLE} ]] || tvt_fail "${ACTION} requires --bundle DIR"
+    BUNDLE="$(tvt_canonical_directory "${BUNDLE}")"
+    tvt_verify_bundle "${BUNDLE}"
+    if [[ ${ACTION} == prepare ]]; then
+      tvt_require_root
+      tvt_acquire_lock
+    fi
+    ;;
+  activate|rollback)
+    tvt_require_root
+    tvt_acquire_lock
+    ;;
+  status)
+    ;;
+  *)
+    echo "usage: scripts/tvt-edge-operations.sh upgrade-release {plan|prepare|activate|status|rollback} [arguments]" >&2
+    exit 2
+    ;;
+esac
+
+exec python3 "${REPO_ROOT}/scripts/lib/tvt-release-upgrade.py" "$@"
+)
+
 tvt_op_upgrade_application() (
 # Upgrade only the TVT application, database schema, and dashboard image on an
 # already-installed edge. The previous release directory is retained and the
@@ -4045,14 +4092,18 @@ umask 027
 
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUNDLE="${REPO_ROOT}"
+UI_IMAGE_LOCK=""
+NODE_IMAGE_LOCK=""
 
 usage() {
-  echo "usage: scripts/tvt-edge-operations.sh upgrade-application [--bundle DIR]" >&2
+  echo "usage: scripts/tvt-edge-operations.sh upgrade-application [--bundle DIR] [--ui-image-lock FILE] [--node-image-lock FILE]" >&2
 }
 
 while (($#)); do
   case "$1" in
     --bundle) BUNDLE="${2:-}"; shift 2 ;;
+    --ui-image-lock) UI_IMAGE_LOCK="${2:-}"; shift 2 ;;
+    --node-image-lock) NODE_IMAGE_LOCK="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage; exit 2 ;;
   esac
@@ -4066,7 +4117,20 @@ for command_name in curl docker flock k3s pg_dump python3 readlink runuser syste
 done
 BUNDLE="$(tvt_canonical_directory "${BUNDLE}")"
 tvt_verify_bundle "${BUNDLE}"
+database_rollback_compatible="$(python3 - "${BUNDLE}/manifest.json" <<'PY'
+import json, pathlib, sys
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(str(manifest["upgrade"]["database"]["rollback_compatible"]).lower())
+PY
+)"
+[[ ${database_rollback_compatible} == true ]] || \
+  tvt_fail "in-place application upgrade requires a rollback-compatible database migration policy"
 tvt_acquire_lock
+for supplied_lock in "${UI_IMAGE_LOCK}" "${NODE_IMAGE_LOCK}"; do
+  if [[ -n ${supplied_lock} && (! -f ${supplied_lock} || -L ${supplied_lock}) ]]; then
+    tvt_fail "prepared image lock is missing or unsafe: ${supplied_lock}"
+  fi
+done
 
 readonly RELEASE_VERSION="$(tvt_manifest_value "${BUNDLE}" release_version)"
 readonly OPT_TVT="${TVT_OPT_DIRECTORY:-/opt/tvt}"
@@ -4091,11 +4155,58 @@ install -d -o root -g root -m 0700 "${backup_directory}"
 printf '%s\n' "${previous_release}" >"${backup_directory}/previous-release"
 printf '%s\n' "${previous_venv}" >"${backup_directory}/previous-venv"
 chmod 0600 "${backup_directory}/previous-release" "${backup_directory}/previous-venv"
-for evidence in install-state.json installation-report.json ui-image.lock.json; do
+for evidence in install-state.json installation-report.json ui-image.lock.json \
+  node-management-images.lock.json; do
   if [[ -f ${TVT_INSTALL_STATE_ROOT}/${evidence} ]]; then
     cp -a "${TVT_INSTALL_STATE_ROOT}/${evidence}" "${backup_directory}/${evidence}"
   fi
 done
+readonly -a managed_units=(
+  apexfabric-control.service
+  tvt-edge.service
+  tvt-camera-sync.service
+  tvt-alert-dispatcher.service
+  tvt-retention.service
+  tvt-retention.timer
+  tvt-k3s-watchdog.service
+  tvt-k3s-watchdog.timer
+  tvt-anpr-report.service
+  tvt-anpr-report.timer
+  tvt-anpr-report-attendance.service
+  tvt-anpr-report-attendance.timer
+  tvt-pipeline-image-sync.service
+  tvt-pipeline-image-sync.timer
+)
+apexfabric_control_was_active=false
+alert_dispatcher_was_active=false
+systemctl is-active --quiet apexfabric-control.service && apexfabric_control_was_active=true
+systemctl is-active --quiet tvt-alert-dispatcher.service && alert_dispatcher_was_active=true
+install -d -o root -g root -m 0700 "${backup_directory}/systemd"
+: >"${backup_directory}/active-units"
+for unit in "${managed_units[@]}"; do
+  systemctl is-active --quiet "${unit}" && printf '%s\n' "${unit}" >>"${backup_directory}/active-units"
+  if [[ -f /etc/systemd/system/${unit} && ! -L /etc/systemd/system/${unit} ]]; then
+    cp -a "/etc/systemd/system/${unit}" "${backup_directory}/systemd/${unit}"
+  else
+    touch "${backup_directory}/systemd/${unit}.absent"
+  fi
+done
+chmod 0600 "${backup_directory}/active-units"
+while read -r sqlite_source sqlite_name; do
+  [[ -f ${sqlite_source} ]] || continue
+  "${previous_venv}/bin/python3" -c 'import sqlite3, sys
+source = sqlite3.connect(sys.argv[1], timeout=30)
+target = sqlite3.connect(sys.argv[2])
+source.backup(target)
+target.close()
+source.close()' \
+    "${sqlite_source}" "${backup_directory}/${sqlite_name}"
+  chmod 0600 "${backup_directory}/${sqlite_name}"
+done <<'SQLITE_DATABASES'
+/var/lib/apexfabric/control/catalog.sqlite3 apexfabric-catalog.sqlite3
+/var/lib/apexfabric/control/device-registry.sqlite3 apexfabric-device-registry.sqlite3
+/var/lib/apexfabric/control/telemetry/telemetry.sqlite3 apexfabric-telemetry.sqlite3
+SQLITE_DATABASES
 deployment_count_before="$(runuser -u postgres -- psql -d tvt -Atc 'SELECT count(*) FROM solution_deployments')"
 runuser -u postgres -- pg_dump --format=custom tvt >"${backup_directory}/tvt.pg_dump"
 chmod 0600 "${backup_directory}/tvt.pg_dump"
@@ -4105,6 +4216,7 @@ rollback_application() {
   local status=$?
   if ${rollback_required}; then
     tvt_log "application upgrade failed; restoring ${previous_release}"
+    set +e
     local old_venv_link old_current_link
     old_venv_link="${OPT_TVT}/.venv.rollback.$$"
     old_current_link="${OPT_TVT}/.current.rollback.$$"
@@ -4112,36 +4224,91 @@ rollback_application() {
     ln -s "${previous_release}" "${old_current_link}"
     mv -Tf "${old_venv_link}" "${OPT_TVT}/venv"
     mv -Tf "${old_current_link}" "${OPT_TVT}/current"
+    for unit in "${managed_units[@]}"; do
+      if [[ -f ${backup_directory}/systemd/${unit} ]]; then
+        cp -a "${backup_directory}/systemd/${unit}" "/etc/systemd/system/${unit}"
+      elif [[ -f ${backup_directory}/systemd/${unit}.absent ]]; then
+        rm -f -- "/etc/systemd/system/${unit}"
+      fi
+    done
+    for evidence in ui-image.lock.json node-management-images.lock.json; do
+      if [[ -f ${backup_directory}/${evidence} ]]; then
+        cp -a "${backup_directory}/${evidence}" "${TVT_INSTALL_STATE_ROOT}/${evidence}"
+      fi
+    done
+    systemctl daemon-reload
+    old_operations="${previous_release}/resources/scripts/tvt-edge-operations.sh"
+    if [[ -x ${old_operations} && -f ${TVT_INSTALL_STATE_ROOT}/node-management-images.lock.json ]]; then
+      "${old_operations}" install-k3s-plane \
+        --image-lock "${TVT_INSTALL_STATE_ROOT}/node-management-images.lock.json" || true
+    fi
+    if [[ -x ${old_operations} && -f ${TVT_INSTALL_STATE_ROOT}/ui-image.lock.json ]]; then
+      "${old_operations}" install-apexfabric-ui \
+        --image-lock "${TVT_INSTALL_STATE_ROOT}/ui-image.lock.json" || true
+    fi
     systemctl restart tvt-edge.service tvt-camera-sync.service || true
+    if ${apexfabric_control_was_active}; then
+      systemctl restart apexfabric-control.service || true
+    fi
+    if ${alert_dispatcher_was_active}; then
+      systemctl restart tvt-alert-dispatcher.service || true
+    fi
+    systemctl try-restart \
+      tvt-retention.timer tvt-k3s-watchdog.timer \
+      tvt-anpr-report.timer tvt-anpr-report-attendance.timer \
+      tvt-pipeline-image-sync.timer || true
   fi
+  set -e
   return "${status}"
 }
 trap rollback_application ERR
 
 install -d -o root -g root -m 0755 "${OPT_TVT}/releases" "${RELEASE_DIRECTORY}"
 [[ ! -L ${RELEASE_DIRECTORY} ]] || tvt_fail "refusing symlinked release directory"
-if [[ -f ${RESOURCE_DIRECTORY}/manifest.json ]]; then
+bundle_checksum="$(sha256sum "${BUNDLE}/checksums.sha256" | awk '{print $1}')"
+prepared_marker="${RELEASE_DIRECTORY}/.prepared-bundle-sha256"
+prepared_release=false
+if [[ -f ${prepared_marker} && -f ${RESOURCE_DIRECTORY}/manifest.json \
+  && -x ${VENV_DIRECTORY}/bin/tvt-edge \
+  && "$(tr -d '\n' <"${prepared_marker}")" == "${bundle_checksum}" ]]; then
   cmp -s "${BUNDLE}/manifest.json" "${RESOURCE_DIRECTORY}/manifest.json" || \
-    tvt_fail "release ${RELEASE_VERSION} is already present with a different manifest"
+    tvt_fail "prepared release ${RELEASE_VERSION} has a different manifest"
+  prepared_release=true
+  tvt_log "using prepared application release ${RELEASE_VERSION}"
 fi
-install -d -o root -g root -m 0755 "${RESOURCE_DIRECTORY}"
-for item in manifest.json checksums.sha256 alembic.ini apexfabric config deploy examples \
-  scripts solution-packs images k3s tvt_edge; do
-  cp -a "${BUNDLE}/${item}" "${RESOURCE_DIRECTORY}/"
-done
-python3 -m venv --clear "${VENV_DIRECTORY}"
-wheel_relative="$(tvt_manifest_value "${BUNDLE}" artifacts.application_wheel)"
-"${VENV_DIRECTORY}/bin/python" -m pip install --disable-pip-version-check \
-  --no-index --find-links "${BUNDLE}/wheels" "${BUNDLE}/${wheel_relative}"
-chown -R root:root "${RELEASE_DIRECTORY}"
-chmod -R go+rX "${VENV_DIRECTORY}" "${RESOURCE_DIRECTORY}"
+if ! ${prepared_release}; then
+  if [[ -f ${RESOURCE_DIRECTORY}/manifest.json ]]; then
+    cmp -s "${BUNDLE}/manifest.json" "${RESOURCE_DIRECTORY}/manifest.json" || \
+      tvt_fail "release ${RELEASE_VERSION} is already present with a different manifest"
+  fi
+  install -d -o root -g root -m 0755 "${RESOURCE_DIRECTORY}"
+  for item in manifest.json checksums.sha256 alembic.ini apexfabric config deploy docs examples \
+    scripts solution-packs images k3s tvt_edge; do
+    cp -a "${BUNDLE}/${item}" "${RESOURCE_DIRECTORY}/"
+  done
+  python3 -m venv --clear "${VENV_DIRECTORY}"
+  wheel_relative="$(tvt_manifest_value "${BUNDLE}" artifacts.application_wheel)"
+  "${VENV_DIRECTORY}/bin/python" -m pip install --disable-pip-version-check \
+    --no-index --find-links "${BUNDLE}/wheels" "${BUNDLE}/${wheel_relative}"
+  printf '%s\n' "${bundle_checksum}" >"${prepared_marker}"
+  chown -R root:root "${RELEASE_DIRECTORY}"
+  chmod -R go+rX "${VENV_DIRECTORY}" "${RESOURCE_DIRECTORY}"
+fi
 export PATH="${VENV_DIRECTORY}/bin:${PATH}"
 
 systemctl stop tvt-camera-sync.service tvt-edge.service
+systemctl stop apexfabric-control.service tvt-alert-dispatcher.service >/dev/null 2>&1 || true
 runuser -u postgres -- env \
   TVT_RESOURCE_ROOT="${RESOURCE_DIRECTORY}" \
   TVT_DATABASE_URL=postgresql+psycopg:///tvt \
   "${VENV_DIRECTORY}/bin/tvt-edge" migrate
+
+for unit in "${managed_units[@]}"; do
+  if [[ -f ${RESOURCE_DIRECTORY}/deploy/systemd/${unit} ]]; then
+    install -o root -g root -m 0644 \
+      "${RESOURCE_DIRECTORY}/deploy/systemd/${unit}" "/etc/systemd/system/${unit}"
+  fi
+done
 
 new_venv_link="${OPT_TVT}/.venv.${RELEASE_VERSION}.$$"
 new_current_link="${OPT_TVT}/.current.${RELEASE_VERSION}.$$"
@@ -4151,11 +4318,36 @@ mv -Tf "${new_venv_link}" "${OPT_TVT}/venv"
 mv -Tf "${new_current_link}" "${OPT_TVT}/current"
 systemctl daemon-reload
 systemctl restart tvt-edge.service tvt-camera-sync.service
+if ${apexfabric_control_was_active}; then
+  systemctl restart apexfabric-control.service
+fi
+if ${alert_dispatcher_was_active}; then
+  systemctl restart tvt-alert-dispatcher.service
+fi
+systemctl try-restart \
+  tvt-retention.timer tvt-k3s-watchdog.timer \
+  tvt-anpr-report.timer tvt-anpr-report-attendance.timer \
+  tvt-pipeline-image-sync.timer || true
 
 ui_lock="${TVT_INSTALL_STATE_ROOT}/ui-image.lock.json"
-"${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" publish-ui-image \
-  --registry 127.0.0.1:5000 --scheme http \
-  --archive-dir "${RESOURCE_DIRECTORY}/images" --lock-output "${ui_lock}"
+if [[ -n ${UI_IMAGE_LOCK} ]]; then
+  install -o root -g root -m 0600 "${UI_IMAGE_LOCK}" "${ui_lock}"
+else
+  "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" publish-ui-image \
+    --registry 127.0.0.1:5000 --scheme http \
+    --archive-dir "${RESOURCE_DIRECTORY}/images" --lock-output "${ui_lock}"
+fi
+
+node_lock="${TVT_INSTALL_STATE_ROOT}/node-management-images.lock.json"
+if [[ -n ${NODE_IMAGE_LOCK} ]]; then
+  install -o root -g root -m 0600 "${NODE_IMAGE_LOCK}" "${node_lock}"
+else
+  "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" publish-control-images \
+    --registry 127.0.0.1:5000 --scheme http \
+    --archive-dir "${RESOURCE_DIRECTORY}/images" --lock-output "${node_lock}"
+fi
+"${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" install-k3s-plane \
+  --image-lock "${node_lock}"
 "${RESOURCE_DIRECTORY}/scripts/tvt-edge-operations.sh" install-apexfabric-ui \
   --image-lock "${ui_lock}"
 
@@ -4376,6 +4568,7 @@ operations:
   purge-unnamed-persons
   qualify-traffic-edge
   upgrade-application
+  upgrade-release
   upgrade-solution-image
   verify-k3s-plane
   verify-local-registry
@@ -4412,6 +4605,7 @@ case "${operation}" in
   purge-unnamed-persons) tvt_op_purge_unnamed_persons "$@" ;;
   qualify-traffic-edge) tvt_op_qualify_traffic_edge "$@" ;;
   upgrade-application) tvt_op_upgrade_application "$@" ;;
+  upgrade-release) tvt_op_upgrade_release "$@" ;;
   upgrade-solution-image) tvt_op_upgrade_solution_image "$@" ;;
   verify-k3s-plane) tvt_op_verify_k3s_plane "$@" ;;
   verify-local-registry) tvt_op_verify_local_registry "$@" ;;

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "bundle_contract": 1,
   "product": "tvt-edge",
-  "release_version": "0.1.9",
+  "release_version": "0.1.10",
   "source_commit": "0000000000000000000000000000000000000000",
   "architecture": "amd64",
   "os_id": "ubuntu",
@@ -15,8 +15,22 @@
   "minimum_ram_mib": 16384,
   "minimum_disk_mib": 20480,
   "k3s_version": "v1.36.3+k3s1",
+  "upgrade": {
+    "database": {
+      "strategy": "expand-contract",
+      "rollback_compatible": true
+    },
+    "operator_actions": [
+      {
+        "operation": "purge-unnamed-persons",
+        "timing": "after_activation",
+        "required": false,
+        "description": "Audit and optionally remove pre-0009 unnamed face identities after the release is healthy."
+      }
+    ]
+  },
   "artifacts": {
-    "application_wheel": "wheels/tvt_runtime-0.1.9-py3-none-any.whl",
+    "application_wheel": "wheels/tvt_runtime-0.1.10-py3-none-any.whl",
     "input_lock": "release-inputs.lock.json",
     "registry_image": "images/registry.tar",
     "node_reporter_image": "images/node-reporter.tar",
