@@ -368,10 +368,18 @@ def build_plan(bundle: Path, current_resources: Path | None = None) -> dict[str,
 
 def staged_release_is_valid(release: Path, bundle_digest: str) -> bool:
     marker = release / ".prepared-bundle-sha256"
+    executable = release / "venv/bin/tvt-edge"
     try:
+        shebang = executable.open("rb").readline().rstrip()
+        expected_shebangs = {
+            f"#!{release}/venv/bin/python".encode(),
+            f"#!{release}/venv/bin/python3".encode(),
+        }
         return (
             marker.read_text(encoding="utf-8").strip() == bundle_digest
-            and (release / "venv/bin/tvt-edge").is_file()
+            and executable.is_file()
+            and os.access(executable, os.X_OK)
+            and shebang in expected_shebangs
             and (release / "resources/manifest.json").is_file()
         )
     except OSError:
@@ -383,16 +391,37 @@ def stage_release(bundle: Path, version: str) -> Path:
     releases.mkdir(parents=True, exist_ok=True, mode=0o755)
     final = releases / version
     bundle_digest = sha256(bundle / "checksums.sha256")
+    preparing_marker = final / ".preparing-bundle-sha256"
     if final.exists():
-        if final.is_symlink() or not staged_release_is_valid(final, bundle_digest):
+        if final.is_symlink():
             raise ReleaseUpgradeError(
                 f"release directory {final} already exists but is not the prepared target bundle"
             )
-        return final
+        if staged_release_is_valid(final, bundle_digest):
+            return final
+        try:
+            resumable = preparing_marker.read_text(encoding="utf-8").strip() == bundle_digest
+        except OSError:
+            resumable = False
+        if not resumable:
+            raise ReleaseUpgradeError(
+                f"release directory {final} already exists but is not the prepared target bundle"
+            )
+        shutil.rmtree(final)
 
     temporary = Path(tempfile.mkdtemp(prefix=f".{version}.prepare.", dir=releases))
     try:
-        resources = temporary / "resources"
+        (temporary / ".preparing-bundle-sha256").write_text(
+            bundle_digest + "\n", encoding="utf-8"
+        )
+        os.chmod(temporary, 0o755)
+        os.replace(temporary, final)
+
+        # Python virtual environments are not relocatable: pip-generated entry
+        # points contain an absolute shebang. Build the venv only after the
+        # directory has its permanent path so activation cannot reference the
+        # now-absent temporary directory.
+        resources = final / "resources"
         resources.mkdir(mode=0o755)
         for item in RESOURCE_ITEMS:
             source = bundle / item
@@ -403,7 +432,7 @@ def stage_release(bundle: Path, version: str) -> Path:
                 shutil.copytree(source, target)
             else:
                 shutil.copy2(source, target)
-        venv = temporary / "venv"
+        venv = final / "venv"
         command(["python3", "-m", "venv", "--clear", str(venv)])
         manifest = load_json(bundle / "manifest.json")
         wheel_relative = manifest.get("artifacts", {}).get("application_wheel")
@@ -422,13 +451,9 @@ def stage_release(bundle: Path, version: str) -> Path:
                 str(bundle / wheel_relative),
             ]
         )
-        (temporary / ".prepared-bundle-sha256").write_text(
-            bundle_digest + "\n", encoding="utf-8"
-        )
-        command(["chown", "-R", "root:root", str(temporary)])
+        command(["chown", "-R", "root:root", str(final)])
         command(["chmod", "-R", "go+rX", str(venv), str(resources)])
-        os.chmod(temporary, 0o755)
-        os.replace(temporary, final)
+        os.replace(preparing_marker, final / ".prepared-bundle-sha256")
     finally:
         if temporary.exists():
             shutil.rmtree(temporary)
@@ -452,6 +477,11 @@ def update_state(path: Path, state: dict[str, Any], **changes: Any) -> None:
 
 def helper_environment(state: dict[str, Any]) -> dict[str, str]:
     environment = dict(os.environ)
+    # Release bundles are checksum-complete immutable inputs. Several component
+    # operations run Python with the bundle as their working directory, where
+    # normal imports would otherwise create unlisted __pycache__ files and make
+    # the next integrity check reject the bundle.
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["PATH"] = f"{state['staged_release']}/venv/bin:{environment.get('PATH', '')}"
     environment["TVT_SOLUTION_UPGRADE_STATE_DIR"] = str(
         Path(state["operation_directory"]) / "solution-upgrades"
@@ -479,16 +509,72 @@ def run_solution(state: dict[str, Any], action: str, timeout: int = 900) -> dict
     return json.loads(result.stdout)
 
 
+def run_platform_preparation(state: dict[str, Any]) -> dict[str, Any]:
+    bundle = Path(state["bundle"])
+    command(
+        [
+            "/bin/bash",
+            str(bundle / "prepare-tvt-edge-host.sh"),
+            "--bundle",
+            state["bundle"],
+            "--mode",
+            "offline",
+            "--platform-upgrade",
+        ],
+        env=helper_environment(state),
+    )
+    preparation = load_json(INSTALL_STATE_ROOT / "prepare-state.json")
+    target = state["plan"]["target_release_version"]
+    if preparation.get("release_version") != target:
+        raise ReleaseUpgradeError("platform preparation state does not match target release")
+    return preparation
+
+
+def apply_platform_components(state: dict[str, Any]) -> None:
+    changes = state["plan"]["changes"]
+    operations = Path(state["bundle"]) / "scripts/tvt-edge-operations.sh"
+    environment = helper_environment(state)
+    if changes["local_registry"]:
+        command(
+            [
+                str(operations),
+                "install-local-registry",
+                "--image-archive",
+                str(Path(state["bundle"]) / "images/registry.tar"),
+            ],
+            env=environment,
+        )
+    if changes["k3s"]:
+        command(
+            [
+                str(operations),
+                "install-k3s-single-node",
+                "--installer",
+                str(Path(state["bundle"]) / "k3s/install.sh"),
+                "--k3s-binary",
+                str(Path(state["bundle"]) / "k3s/k3s"),
+            ],
+            env=environment,
+        )
+
+
 def prepare(args: argparse.Namespace) -> dict[str, Any]:
     require_root()
     bundle_input = Path(args.bundle)
     bundle = bundle_input.resolve(strict=True)
     plan = build_plan(bundle)
-    if plan["platform_changes"]:
+    platform_maintenance = bool(plan["platform_changes"])
+    if platform_maintenance and not args.platform_maintenance:
         changed = ", ".join(plan["platform_changes"])
         raise ReleaseUpgradeError(
             "target changes platform artifacts requiring the rebooting host-maintenance "
-            f"track ({changed}); do not run the in-place activator"
+            f"track ({changed}); rerun prepare with --platform-maintenance"
+        )
+    if args.platform_maintenance and not platform_maintenance:
+        raise ReleaseUpgradeError("--platform-maintenance was supplied for an in-place release")
+    if "database_offline_migration" in plan["platform_changes"]:
+        raise ReleaseUpgradeError(
+            "forward-only database migration requires a release-specific reviewed recovery plan"
         )
     if plan["changes"]["cv_solution"] and not args.deployment_id:
         raise ReleaseUpgradeError("--deployment-id is required because the CV solution changes")
@@ -498,9 +584,13 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     state_path = operation_directory / "state.json"
     if state_path.exists():
         _, state = read_state(operation_id)
-        if state.get("bundle") != str(bundle) or state.get("deployment_id") != deployment_id:
+        if (
+            state.get("bundle") != str(bundle)
+            or state.get("deployment_id") != deployment_id
+            or state.get("platform_maintenance") != platform_maintenance
+        ):
             raise ReleaseUpgradeError("prepare arguments do not match the existing operation")
-        if state.get("status") == "prepared":
+        if state.get("status") in {"prepared", "platform_reboot_required"}:
             return state
         if state.get("status") != "preparing":
             raise ReleaseUpgradeError(f"prepare cannot resume from {state.get('status')!r}")
@@ -514,6 +604,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             "bundle": str(bundle),
             "operation_directory": str(operation_directory),
             "deployment_id": deployment_id,
+            "platform_maintenance": platform_maintenance,
             "solution_operation_id": f"{operation_id}-solution",
             "plan": plan,
             "created_at": now(),
@@ -552,6 +643,16 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     if plan["changes"]["cv_solution"]:
         solution = run_solution(state, "prepare")
         update_state(state_path, state, solution=solution, stage="solution_staged")
+    if platform_maintenance and plan["changes"]["host_packages_or_drivers"]:
+        update_state(state_path, state, stage="platform_preparing")
+        preparation = run_platform_preparation(state)
+        if preparation.get("status") != "reboot_required":
+            raise ReleaseUpgradeError("platform preparation did not request the required reboot")
+        update_state(
+            state_path, state, status="platform_reboot_required",
+            stage="platform_reboot_required", platform_preparation=preparation,
+        )
+        return state
     update_state(state_path, state, status="prepared", stage="prepared", prepared_at=now())
     return state
 
@@ -561,10 +662,34 @@ def activate(args: argparse.Namespace) -> dict[str, Any]:
     state_path, state = read_state(args.operation_id)
     if state.get("status") == "applied":
         return state
+    if state.get("status") == "platform_reboot_required":
+        preparation = run_platform_preparation(state)
+        if preparation.get("status") != "prepared":
+            raise ReleaseUpgradeError("post-reboot platform verification is incomplete")
+        update_state(
+            state_path, state, status="prepared", stage="platform_prepared",
+            platform_preparation=preparation, platform_prepared_at=now(),
+        )
     if state.get("status") not in {"prepared", "activating", "operator_required"}:
         raise ReleaseUpgradeError(f"operation cannot activate from {state.get('status')!r}")
     update_state(state_path, state, status="activating", activated_at=state.get("activated_at") or now())
     operations = Path(state["bundle"]) / "scripts/tvt-edge-operations.sh"
+    if state["plan"]["platform_changes"] and not state.get("platform_components_applied"):
+        try:
+            apply_platform_components(state)
+        except subprocess.CalledProcessError as error:
+            update_state(
+                state_path,
+                state,
+                status="operator_required",
+                failed_stage="platform_components",
+                last_error="registry or K3s platform activation failed",
+            )
+            raise ReleaseUpgradeError("platform component activation failed") from error
+        update_state(
+            state_path, state, platform_components_applied=True,
+            stage="platform_components_applied",
+        )
     if not state.get("application_applied"):
         try:
             active_release = (OPT_TVT / "current").resolve(strict=True)
@@ -749,6 +874,9 @@ def summary(state: dict[str, Any]) -> dict[str, Any]:
         "stage",
         "deployment_id",
         "plan",
+        "platform_maintenance",
+        "platform_preparation",
+        "platform_components_applied",
         "application_applied",
         "solution_applied",
         "solution",
@@ -756,6 +884,7 @@ def summary(state: dict[str, Any]) -> dict[str, Any]:
         "last_error",
         "created_at",
         "prepared_at",
+        "platform_prepared_at",
         "activated_at",
         "applied_at",
         "rolled_back_at",
@@ -772,6 +901,7 @@ def parser() -> argparse.ArgumentParser:
     prepare_command = commands.add_parser("prepare")
     prepare_command.add_argument("--bundle", required=True)
     prepare_command.add_argument("--deployment-id")
+    prepare_command.add_argument("--platform-maintenance", action="store_true")
     prepare_command.add_argument("--operation-id")
     activate_command = commands.add_parser("activate")
     activate_command.add_argument("--operation-id", required=True)

@@ -109,8 +109,24 @@ sudo <release-bundle>/scripts/tvt-edge-operations.sh \
 ```
 
 `--deployment-id` is required only when the plan reports a changed CV
-solution. A plan reporting `platform_maintenance` must use the rebooting host
-preparation/reinstall track above rather than the in-place activator. See
+solution. For a plan reporting `platform_maintenance`, prepare with explicit
+disruptive intent; reboot when status is `platform_reboot_required`, then
+activate with the same operation ID:
+
+```bash
+sudo <release-bundle>/scripts/tvt-edge-operations.sh upgrade-release prepare \
+  --bundle <release-bundle> --platform-maintenance
+sudo reboot
+```
+
+Before building a rebooting platform release, verify that `uname -r` matches
+the kernel targeted by `/boot/vmlinuz`; otherwise reboot, re-probe, and build a
+new release version. If post-reboot verification ever detects a different
+kernel, keep the rejected release immutable, probe again, and start a new
+platform-maintenance operation with a newer version. See the recovery details
+in `DEPLOYMENT.md`.
+
+See
 [TVT edge release deployment](DEPLOYMENT.md) for availability, verification,
 resume, rollback, and release-specific operator-action instructions.
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
 # Consolidated TVT build, installation, and verification operations. Each
 # operation runs in a subshell so its legacy globals, traps, and shell options
@@ -462,9 +463,9 @@ mkdir -p "${OUTPUT}/tvt_edge/db"
 python3 -m pip wheel --wheel-dir "${OUTPUT}/wheels" .
 
 cp -a apexfabric config deploy docs examples scripts solution-packs "${OUTPUT}/"
-find "${OUTPUT}" -name '__pycache__' -type d -prune -exec rm -rf -- {} +
 cp -a alembic.ini "${OUTPUT}/alembic.ini"
 cp -a tvt_edge/db/migrations "${OUTPUT}/tvt_edge/db/"
+find "${OUTPUT}" -name '__pycache__' -type d -prune -exec rm -rf -- {} +
 cp -a prepare-tvt-edge-host.sh install-tvt-edge-host.sh "${OUTPUT}/"
 cp -a release/manifest.template.json "${OUTPUT}/manifest.json"
 cp -a "${INPUT_LOCK}" "${OUTPUT}/release-inputs.lock.json"
@@ -2427,12 +2428,13 @@ readonly REBOOT_MARKER="${TVT_HARDWARE_REBOOT_MARKER:-${STATE_DIRECTORY}/hardwar
 MODE=online
 BUNDLE=""
 ALLOW_UNVERIFIED_HARDWARE=false
+REPLACE_LOCKED_RECIPE=false
 
 log() { printf 'tvt-driver-install: %s\n' "$*"; }
 fail() { printf 'tvt-driver-install: ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
-  echo "usage: sudo scripts/tvt-edge-operations.sh install-tvt-hardware-drivers [--mode online|offline] [--bundle PATH] [--allow-unverified-hardware]" >&2
+  echo "usage: sudo scripts/tvt-edge-operations.sh install-tvt-hardware-drivers [--mode online|offline] [--bundle PATH] [--allow-unverified-hardware] [--replace-locked-recipe]" >&2
 }
 
 while (($#)); do
@@ -2440,6 +2442,7 @@ while (($#)); do
     --mode) MODE="${2:-}"; shift 2 ;;
     --bundle) BUNDLE="${2:-}"; shift 2 ;;
     --allow-unverified-hardware) ALLOW_UNVERIFIED_HARDWARE=true; shift ;;
+    --replace-locked-recipe) REPLACE_LOCKED_RECIPE=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; exit 2 ;;
   esac
@@ -2448,6 +2451,9 @@ done
 if [[ ${MODE} == offline ]]; then
   [[ -d ${BUNDLE} && ! -L ${BUNDLE} ]] || fail "offline mode requires --bundle PATH"
   BUNDLE="$(cd "${BUNDLE}" && pwd -P)"
+fi
+if ${REPLACE_LOCKED_RECIPE} && [[ ${MODE} != offline ]]; then
+  fail "--replace-locked-recipe is valid only with --mode offline"
 fi
 
 APT_PACKAGES=(
@@ -2573,6 +2579,7 @@ if [[ ${MODE} == online ]]; then
 fi
 
 install -d -o root -g root -m 0755 "${STATE_DIRECTORY}" "${CACHE_DIRECTORY}"
+[[ ! -L ${LOCK_FILE} ]] || fail "refusing symlinked hardware recipe: ${LOCK_FILE}"
 work_directory="$(mktemp -d "${CACHE_DIRECTORY}/resolve.XXXXXX")"
 cleanup() { rm -rf -- "${work_directory}"; }
 trap cleanup EXIT
@@ -2770,7 +2777,9 @@ PY
 }
 
 validate_lock_and_cache() {
-  python3 - "${LOCK_FILE}" "${CACHE_DIRECTORY}" "$(uname -r)" \
+  local lock_file="${1:-${LOCK_FILE}}"
+  local cache_directory="${2:-${CACHE_DIRECTORY}}"
+  python3 - "${lock_file}" "${cache_directory}" "$(uname -r)" \
     "${AXELERA_HARDWARE_PRESENT}" <<'PY'
 import hashlib
 import json
@@ -2839,33 +2848,63 @@ else:
 PY
 }
 
+install_offline_recipe() {
+  local offline_hardware="${BUNDLE}/hardware"
+  local wheels_new="${CACHE_DIRECTORY}/wheels.new"
+  local voyager_new="${CACHE_DIRECTORY}/voyager-wheels.new"
+  install -m 0644 "${offline_hardware}/driver-recipe.json" "${LOCK_FILE}.new"
+  install -m 0644 "${offline_hardware}/linux-npu-driver.tar.gz" \
+    "${CACHE_DIRECTORY}/linux-npu-driver.tar.gz.new"
+  rm -rf -- "${wheels_new}" "${voyager_new}"
+  install -d -m 0755 "${wheels_new}"
+  cp -a "${offline_hardware}/wheels/." "${wheels_new}/"
+  if ${AXELERA_HARDWARE_PRESENT}; then
+    install -d -m 0755 "${voyager_new}"
+    cp -a "${offline_hardware}/voyager-wheels/." "${voyager_new}/"
+  fi
+  mv -f -- "${CACHE_DIRECTORY}/linux-npu-driver.tar.gz.new" \
+    "${CACHE_DIRECTORY}/linux-npu-driver.tar.gz"
+  rm -rf -- "${CACHE_DIRECTORY}/wheels" "${CACHE_DIRECTORY}/voyager-wheels"
+  mv -f -- "${wheels_new}" "${CACHE_DIRECTORY}/wheels"
+  if ${AXELERA_HARDWARE_PRESENT}; then
+    mv -f -- "${voyager_new}" "${CACHE_DIRECTORY}/voyager-wheels"
+  fi
+  # Publish the new lock last: an interrupted cache copy then remains safely
+  # resumable because the prior lock still differs from the target bundle.
+  mv -f -- "${LOCK_FILE}.new" "${LOCK_FILE}"
+}
+
+if [[ ${MODE} == offline ]]; then
+  offline_hardware="${BUNDLE}/hardware"
+  [[ -f ${offline_hardware}/driver-recipe.json ]] || fail "offline driver recipe is missing"
+  [[ -f ${offline_hardware}/linux-npu-driver.tar.gz ]] || fail "offline Intel NPU archive is missing"
+  [[ -d ${offline_hardware}/wheels ]] || fail "offline OpenVINO wheels are missing"
+  if ${AXELERA_HARDWARE_PRESENT}; then
+    [[ -d ${offline_hardware}/voyager-wheels ]] || fail "offline Voyager runtime wheels are missing"
+  fi
+  validate_lock_and_cache "${offline_hardware}/driver-recipe.json" "${offline_hardware}"
+fi
+
 if [[ ! -f ${LOCK_FILE} ]]; then
   if [[ ${MODE} == offline ]]; then
-    offline_hardware="${BUNDLE}/hardware"
-    [[ -f ${offline_hardware}/driver-recipe.json ]] || \
-      fail "offline driver recipe is missing"
-    [[ -f ${offline_hardware}/linux-npu-driver.tar.gz ]] || \
-      fail "offline Intel NPU archive is missing"
-    [[ -d ${offline_hardware}/wheels ]] || fail "offline OpenVINO wheels are missing"
-    install -m 0644 "${offline_hardware}/driver-recipe.json" "${LOCK_FILE}"
-    install -m 0644 "${offline_hardware}/linux-npu-driver.tar.gz" \
-      "${CACHE_DIRECTORY}/linux-npu-driver.tar.gz"
-    install -d -m 0755 "${CACHE_DIRECTORY}/wheels"
-    cp -a "${offline_hardware}/wheels/." "${CACHE_DIRECTORY}/wheels/"
-    rm -rf -- "${CACHE_DIRECTORY}/voyager-wheels"
-    if ${AXELERA_HARDWARE_PRESENT}; then
-      [[ -d ${offline_hardware}/voyager-wheels ]] || fail "offline Voyager runtime wheels are missing"
-      install -d -m 0755 "${CACHE_DIRECTORY}/voyager-wheels"
-      cp -a "${offline_hardware}/voyager-wheels/." "${CACHE_DIRECTORY}/voyager-wheels/"
-    fi
+    install_offline_recipe
   else
     resolve_recipe
   fi
 else
   log "reusing locked recipe ${LOCK_FILE}"
   if [[ ${MODE} == offline ]]; then
-    cmp -s "${BUNDLE}/hardware/driver-recipe.json" "${LOCK_FILE}" || \
-      fail "installed driver recipe does not match the offline release bundle"
+    if ! cmp -s "${BUNDLE}/hardware/driver-recipe.json" "${LOCK_FILE}"; then
+      ${REPLACE_LOCKED_RECIPE} || \
+        fail "installed driver recipe does not match the offline release bundle"
+      previous_digest="$(sha256sum "${LOCK_FILE}" | awk '{print $1}')"
+      previous_recipe="${LOCK_FILE}.before-${previous_digest}"
+      if [[ ! -e ${previous_recipe} ]]; then
+        install -m 0644 "${LOCK_FILE}" "${previous_recipe}"
+      fi
+      install_offline_recipe
+      log "replaced locked recipe from the verified offline platform-upgrade bundle; previous recipe saved as ${previous_recipe}"
+    fi
   fi
 fi
 validate_lock_and_cache

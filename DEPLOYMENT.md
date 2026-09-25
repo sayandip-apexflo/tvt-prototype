@@ -34,10 +34,14 @@ checksums. It reports one of two activation modes:
    manifest, catalog, and CV-image changes.
 2. `platform_maintenance` covers registry, K3s, kernel, driver, or offline host
    package changes, plus database migrations that are not declared compatible
-   with the previous application. These require an offline transition or can
-   restart the whole data plane, so the in-place activator refuses them. Use
-   the host preparation/reinstall procedure in
-   `docs/EDGE-FLEET-DEPLOYMENT.md` for that release.
+   with the previous application. Supply `--platform-maintenance` to make the
+   disruptive intent explicit. Package/driver changes use the same operation
+   ID across preparation, mandatory reboot, post-reboot hardware verification,
+   and application activation. Registry or K3s changes use the same track but
+   require a reboot only when host packages or drivers also changed.
+
+A forward-only database migration is classified as platform maintenance but is
+rejected until that release includes a separately reviewed recovery plan.
 
 This distinction is deliberate. One front door identifies the impact, but a
 kernel or driver transition cannot safely have the same rollback promise as a
@@ -45,10 +49,12 @@ Python service or digest-pinned Kubernetes workload.
 
 ## Availability
 
-Preparation is non-disruptive. It verifies the complete bundle, constructs the
-new release directory and virtual environment, publishes the dashboard and
-node-management images to the local registry, and pre-pulls/previews a changed
-CV solution. The active application and CV workload continue running.
+In-place preparation is non-disruptive: it verifies the complete bundle,
+constructs the new release and virtual environment, publishes management
+images, and pre-pulls/previews a changed CV solution. Platform preparation may
+install host packages, restart Docker or PostgreSQL, reinstall drivers, and
+then require a reboot. Treat the complete platform flow as a maintenance
+window even if the existing CV Pod continues running before the reboot.
 
 Activation has change-dependent interruption:
 
@@ -101,6 +107,17 @@ then build one bundle for that exact edge profile:
   --source-commit <full-40-character-tvt-git-sha>
 ```
 
+Before accepting a probe for a rebooting platform release, confirm that the
+running kernel is also the configured next-boot kernel:
+
+```bash
+ssh <edge-ssh-target> 'uname -r; readlink -f /boot/vmlinuz'
+```
+
+If the versions differ, reboot the edge first, wait for workload recovery,
+then probe and build again. The platform prepare preflight enforces the same
+rule so a bundle cannot install drivers for one kernel and reboot into another.
+
 The builder runs the source tests, builds the wheel and container artifacts,
 locks external inputs, validates the vendor delivery, and covers every bundle
 file with `checksums.sha256`. Transfer the completed bundle to stable local
@@ -129,8 +146,9 @@ Review:
 - required or optional operator actions.
 
 Do not continue with the in-place workflow when `activation_mode` is
-`platform_maintenance`. Complete the release-specific host preparation,
-reboot, and verification procedure instead.
+`platform_maintenance`. Use the explicit `--platform-maintenance` preparation
+path below. Do not bypass the classification by invoking component installers
+or altering installation state files.
 
 If `cv_solution` is `true`, identify the stable applied deployment:
 
@@ -160,6 +178,42 @@ sudo <release-bundle>/scripts/tvt-edge-operations.sh \
   upgrade-release prepare --bundle <release-bundle>
 ```
 
+For a plan reporting `platform_maintenance`, explicitly select that track:
+
+```bash
+sudo <release-bundle>/scripts/tvt-edge-operations.sh \
+  upgrade-release prepare \
+  --bundle <release-bundle> \
+  --platform-maintenance
+```
+
+When host packages or drivers changed, preparation returns status
+`platform_reboot_required`. Save its `operation_id`, then reboot:
+
+```bash
+sudo reboot
+```
+
+After SSH returns, run `activate` with the same operation ID. Activation first
+verifies that the boot ID changed and that the locked GPU/NPU, Docker,
+PostgreSQL, kernel, and hardware profile are healthy. It then applies any
+registry/K3s changes and continues through the normal application activation.
+
+During package preparation, enabled registry and K3s services are restored in
+dependency order before the driver stage. When a platform release intentionally
+changes the locked hardware recipe, the old recipe is retained as
+`/var/lib/tvt/hardware-driver-recipe.json.before-<sha256>` and the target
+bundle's already verified recipe/cache are published atomically.
+
+If post-reboot verification finds a different kernel despite the preflight,
+do not alter or republish the existing release version. Probe the now-running
+kernel, create a newer immutable release version, and start a new
+`upgrade-release prepare --platform-maintenance` operation. A newer verified
+release may supersede an older `reboot_required` host-preparation state only
+after the older operation's requested reboot is proven by a changed boot ID;
+the superseded state is preserved under `/var/lib/tvt/install/`. Do not edit
+either state file manually.
+
 Preparation returns an `operation_id`. Save it. To resume an interrupted
 preparation, pass the same ID:
 
@@ -174,8 +228,9 @@ sudo <release-bundle>/scripts/tvt-edge-operations.sh \
 Preparation performs these gates:
 
 1. verifies the release manifest and full checksum coverage;
-2. compares installed and target artifacts and rejects platform-maintenance
-   changes from the in-place path;
+2. compares installed and target artifacts, requires explicit platform intent,
+   and preserves the previous preparation state before installing a different
+   release's packages or drivers;
 3. creates `/opt/tvt/releases/<version>` and installs the target wheel into its
    own virtual environment;
 4. publishes digest-pinned dashboard and node-management images to the
@@ -193,8 +248,10 @@ sudo <release-bundle>/scripts/tvt-edge-operations.sh \
   upgrade-release status --operation-id <operation-id>
 ```
 
-Continue only when the outer status is `prepared` and, for a CV change, the
-nested solution status is also `prepared`.
+For an in-place release, continue only when the outer status is `prepared`.
+For package/driver maintenance, `platform_reboot_required` means reboot before
+activation; it does not authorize activation on the same boot. For a CV change,
+the nested solution status must also be `prepared`.
 
 ## 4. Activate during the maintenance window
 
@@ -306,6 +363,11 @@ only when the target release manifest declares the migrated database schema
 compatible with the previous application. Otherwise the operation remains
 `operator_required`; use a reviewed offline database recovery procedure rather
 than risking silent data loss.
+
+Application rollback does not downgrade already-installed host packages,
+drivers, Registry, or K3s. A platform rollback therefore restores the previous
+application and workloads only; reverting platform artifacts requires a
+separate bundle-specific maintenance plan and may require another reboot.
 
 Rollback of an active CV image uses `Recreate` and causes another bounded
 inference interruption. Newly published images remain cached; cache cleanup is

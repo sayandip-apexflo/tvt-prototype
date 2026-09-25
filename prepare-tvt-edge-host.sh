@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 umask 027
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,6 +11,7 @@ BUNDLE=""
 MODE=""
 ALLOW_UNVERIFIED_HARDWARE=false
 VERIFY_ONLY=false
+PLATFORM_UPGRADE=false
 LOG_FILE="${TVT_PREPARE_LOG_FILE:-/var/log/tvt/prepare-edge-host.log}"
 readonly PREPARE_STATE="${TVT_INSTALL_STATE_ROOT}/prepare-state.json"
 readonly REBOOT_MARKER="${TVT_HARDWARE_REBOOT_MARKER:-/var/lib/tvt/hardware-driver-reboot-required}"
@@ -22,6 +24,7 @@ usage: sudo ./prepare-tvt-edge-host.sh --bundle PATH --mode online|offline [opti
 options:
   --allow-unverified-hardware  permit an audited Intel equivalent to the 285H
   --verify-only               verify an already prepared host without changing it
+  --platform-upgrade          explicitly prepare an installed edge for a different release
   --log-file PATH             write the preparation log to PATH
 EOF
 }
@@ -32,6 +35,7 @@ while (($#)); do
     --mode) tvt_require_value "$1" "${2:-}"; MODE="$2"; shift 2 ;;
     --allow-unverified-hardware) ALLOW_UNVERIFIED_HARDWARE=true; shift ;;
     --verify-only) VERIFY_ONLY=true; shift ;;
+    --platform-upgrade) PLATFORM_UPGRADE=true; shift ;;
     --log-file) tvt_require_value "$1" "${2:-}"; LOG_FILE="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage; tvt_fail "unknown option: $1" ;;
@@ -74,6 +78,16 @@ preflight_host() {
   current_kernel="$(uname -r | sed 's/[^0-9.].*$//')"
   dpkg --compare-versions "${current_kernel}" ge "${minimum_kernel}" || \
     tvt_fail "kernel $(uname -r) is older than qualified minimum ${minimum_kernel}"
+  local default_kernel_image default_kernel
+  default_kernel_image="${TVT_DEFAULT_KERNEL_IMAGE:-/boot/vmlinuz}"
+  if [[ -L ${default_kernel_image} ]]; then
+    default_kernel="$(basename "$(readlink -f "${default_kernel_image}")")"
+    [[ ${default_kernel} == vmlinuz-* ]] || \
+      tvt_fail "default kernel link ${default_kernel_image} has an invalid target"
+    default_kernel="${default_kernel#vmlinuz-}"
+    [[ ${default_kernel} == "$(uname -r)" ]] || tvt_fail \
+      "running kernel $(uname -r) differs from next-boot kernel ${default_kernel}; reboot, re-probe, and rebuild the edge release before platform maintenance"
+  fi
   modinfo intel_vpu >/dev/null 2>&1 || tvt_fail "kernel $(uname -r) does not provide intel_vpu"
   if ! modinfo i915 >/dev/null 2>&1 && ! modinfo xe >/dev/null 2>&1; then
     tvt_fail "kernel $(uname -r) provides neither i915 nor xe"
@@ -199,11 +213,30 @@ enable_host_services() {
   systemctl is-active --quiet docker.service
   docker info >/dev/null 2>&1 || tvt_fail "Docker is active but not healthy"
   systemctl is-active --quiet postgresql.service
+
+  # A Docker package replacement stops dependent units. On an installed edge,
+  # restore the enabled registry before K3s so existing CV workloads recover
+  # even if a later platform-preparation check fails.
+  if systemctl is-enabled --quiet tvt-local-registry.service; then
+    systemctl reset-failed tvt-local-registry.service >/dev/null 2>&1 || true
+    systemctl start tvt-local-registry.service
+    systemctl is-active --quiet tvt-local-registry.service
+    curl --fail --silent --show-error --max-time 5 http://127.0.0.1:5000/v2/ >/dev/null
+  fi
+  if systemctl is-enabled --quiet k3s.service; then
+    systemctl reset-failed k3s.service >/dev/null 2>&1 || true
+    systemctl start k3s.service
+    systemctl is-active --quiet k3s.service
+    k3s kubectl wait --for=condition=Ready node --all --timeout=180s
+  fi
 }
 
 install_hardware() {
   local -a arguments=(--mode "${MODE}")
-  if [[ ${MODE} == offline ]]; then arguments+=(--bundle "${BUNDLE}"); fi
+  if [[ ${MODE} == offline ]]; then
+    arguments+=(--bundle "${BUNDLE}")
+    ${PLATFORM_UPGRADE} && arguments+=(--replace-locked-recipe)
+  fi
   if ${ALLOW_UNVERIFIED_HARDWARE}; then arguments+=(--allow-unverified-hardware); fi
   "${BUNDLE}/scripts/tvt-edge-operations.sh" install-tvt-hardware-drivers "${arguments[@]}"
   [[ -f ${REBOOT_MARKER} ]] || tvt_fail "hardware installer did not create its reboot marker"
@@ -323,17 +356,45 @@ PY
 
 preflight_host
 check_bundle_profile
+current_status="$(tvt_json_get "${PREPARE_STATE}" status 2>/dev/null || true)"
+prepared_release="$(tvt_json_get "${PREPARE_STATE}" release_version 2>/dev/null || true)"
 if ${VERIFY_ONLY}; then
-  [[ "$(tvt_json_get "${PREPARE_STATE}" status 2>/dev/null || true)" == prepared ]] || \
+  [[ ${current_status} == prepared ]] || \
     tvt_fail "host preparation state is not prepared"
+  [[ ${prepared_release} == "${RELEASE_VERSION}" ]] || \
+    tvt_fail "host preparation state belongs to release ${prepared_release:-unknown}"
   [[ ! -e ${REBOOT_MARKER} ]] || tvt_fail "hardware reboot-required marker still exists"
   verify_post_reboot
   tvt_log "Host preparation verification succeeded."
   exit 0
 fi
 
-current_status="$(tvt_json_get "${PREPARE_STATE}" status 2>/dev/null || true)"
+if [[ -n ${current_status} && ${prepared_release} != "${RELEASE_VERSION}" ]]; then
+  ${PLATFORM_UPGRADE} || tvt_fail \
+    "host preparation state belongs to release ${prepared_release:-unknown}; use the release-upgrade orchestrator"
+  if [[ ${current_status} != prepared ]]; then
+    if [[ ${current_status} == reboot_required ]]; then
+      installed_boot="$(tvt_json_get "${PREPARE_STATE}" driver_install_boot_id 2>/dev/null || true)"
+      current_boot="$(tr -d '\n' <"${BOOT_ID_FILE}")"
+      [[ -n ${installed_boot} && ${installed_boot} != "${current_boot}" ]] || tvt_fail \
+        "cannot supersede release ${prepared_release:-unknown} until its requested reboot has occurred"
+      tvt_log \
+        "superseding incomplete release ${prepared_release} after its reboot with verified release ${RELEASE_VERSION}"
+    else
+      tvt_fail \
+        "cannot start release ${RELEASE_VERSION} from incomplete preparation state ${current_status}"
+    fi
+  fi
+  previous_state="${PREPARE_STATE}.before-${RELEASE_VERSION}"
+  if [[ ! -e ${previous_state} ]]; then
+    install -o root -g root -m 0600 "${PREPARE_STATE}" "${previous_state}"
+  fi
+  tvt_log "starting explicit platform preparation from release ${prepared_release} to ${RELEASE_VERSION}"
+  current_status=""
+fi
+
 if [[ ${current_status} == prepared ]]; then
+  [[ ${prepared_release} == "${RELEASE_VERSION}" ]] || tvt_fail "prepared release state mismatch"
   [[ ! -e ${REBOOT_MARKER} ]] || tvt_fail "prepared state conflicts with the reboot-required marker"
   verify_post_reboot
   tvt_log "Host is already prepared; no changes were made."
@@ -341,6 +402,8 @@ if [[ ${current_status} == prepared ]]; then
 fi
 
 if [[ ${current_status} == reboot_required ]]; then
+  [[ ${prepared_release} == "${RELEASE_VERSION}" ]] || \
+    tvt_fail "reboot-required state belongs to release ${prepared_release:-unknown}"
   installed_boot="$(tvt_json_get "${PREPARE_STATE}" driver_install_boot_id 2>/dev/null || true)"
   current_boot="$(tr -d '\n' <"${BOOT_ID_FILE}")"
   [[ -n ${installed_boot} && ${installed_boot} != "${current_boot}" ]] || tvt_fail \
@@ -357,8 +420,14 @@ enable_host_services
 install_hardware
 boot_id="$(tr -d '\n' <"${BOOT_ID_FILE}")"
 tvt_write_state "${PREPARE_STATE}" reboot_required "${RELEASE_VERSION}" drivers_installed "${boot_id}"
-cat <<'EOF'
+if ${PLATFORM_UPGRADE}; then
+  cat <<'EOF'
+Platform preparation stage 1 completed. Reboot, then resume the release-upgrade operation.
+EOF
+else
+  cat <<'EOF'
 Host preparation stage 1 completed.
 Reboot required.
 After reboot, run install-tvt-edge-host.sh; it will verify preparation before installing.
 EOF
+fi

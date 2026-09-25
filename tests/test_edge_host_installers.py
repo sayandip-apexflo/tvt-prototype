@@ -16,6 +16,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class EdgeHostInstallerTests(unittest.TestCase):
+    def test_release_entrypoints_disable_python_bytecode_writes(self) -> None:
+        for relative in (
+            "prepare-tvt-edge-host.sh",
+            "install-tvt-edge-host.sh",
+            "scripts/tvt-edge-operations.sh",
+        ):
+            source = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn("export PYTHONDONTWRITEBYTECODE=1", source, relative)
+
+    def test_release_builder_removes_bytecode_after_all_source_copies(self) -> None:
+        source = (ROOT / "scripts/tvt-edge-operations.sh").read_text(
+            encoding="utf-8"
+        )
+        migration_copy = 'cp -a tvt_edge/db/migrations "${OUTPUT}/tvt_edge/db/"'
+        cleanup = "find \"${OUTPUT}\" -name '__pycache__'"
+        checksums = "xargs -0 sha256sum -- >checksums.sha256"
+
+        self.assertLess(source.index(migration_copy), source.index(cleanup))
+        self.assertLess(source.index(cleanup), source.index(checksums))
+
     def test_release_input_environment_parser_accepts_optional_empty_values(self) -> None:
         module = runpy.run_path(str(ROOT / "scripts/tvt-release-inputs.py"))
         with tempfile.TemporaryDirectory() as directory:
@@ -62,6 +82,15 @@ class EdgeHostInstallerTests(unittest.TestCase):
             service_setup.index("systemctl start docker.service"),
         )
         self.assertIn('tvt_fail "Docker is active but not healthy"', service_setup)
+        self.assertIn(
+            "systemctl is-enabled --quiet tvt-local-registry.service",
+            service_setup,
+        )
+        self.assertLess(
+            service_setup.index("systemctl start tvt-local-registry.service"),
+            service_setup.index("systemctl start k3s.service"),
+        )
+        self.assertIn("k3s kubectl wait --for=condition=Ready", service_setup)
 
     def test_offline_install_safely_replaces_legacy_onevpl_tools(self) -> None:
         prepare = (ROOT / "prepare-tvt-edge-host.sh").read_text(encoding="utf-8")
@@ -232,6 +261,23 @@ class EdgeHostInstallerTests(unittest.TestCase):
         self.assertEqual(
             application.count("systemctl restart apexfabric-control.service"), 2
         )
+
+    def test_platform_upgrade_preserves_and_versions_prepare_state(self) -> None:
+        preparation = (ROOT / "prepare-tvt-edge-host.sh").read_text(
+            encoding="utf-8"
+        )
+        for expected in (
+            "--platform-upgrade",
+            'prepared_release="$(tvt_json_get',
+            '[[ ${current_status} == prepared ]]',
+            "TVT_DEFAULT_KERNEL_IMAGE:-/boot/vmlinuz",
+            "differs from next-boot kernel",
+            'previous_state="${PREPARE_STATE}.before-${RELEASE_VERSION}"',
+            "superseding incomplete release",
+            "until its requested reboot has occurred",
+            "resume the release-upgrade operation",
+        ):
+            self.assertIn(expected, preparation)
 
     def test_solution_upgrade_operation_is_resumable_and_secret_free(self) -> None:
         operations = (ROOT / "scripts/tvt-edge-operations.sh").read_text(
@@ -515,6 +561,17 @@ tvt_run_stage {state} 0.1.0 sample worker
         ):
             self.assertIn(required, installer)
         self.assertIn('"schema_version": 2', installer)
+        for upgrade_guard in (
+            '--replace-locked-recipe',
+            'validate_lock_and_cache "${offline_hardware}/driver-recipe.json" "${offline_hardware}"',
+            'previous_recipe="${LOCK_FILE}.before-${previous_digest}"',
+            'replaced locked recipe from the verified offline platform-upgrade bundle',
+        ):
+            self.assertIn(upgrade_guard, installer)
+        prepare = (ROOT / "prepare-tvt-edge-host.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            '${PLATFORM_UPGRADE} && arguments+=(--replace-locked-recipe)', prepare
+        )
 
     def test_application_version_is_canonical_and_consistent(self) -> None:
         init_source = (ROOT / "tvt_edge/__init__.py").read_text(encoding="utf-8")

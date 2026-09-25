@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import runpy
+import subprocess
 import tempfile
 import unittest
 
@@ -138,6 +139,94 @@ class ReleaseUpgradePlanTests(unittest.TestCase):
 
             self.assertEqual(plan["activation_mode"], "platform_maintenance")
             self.assertIn("database_offline_migration", plan["platform_changes"])
+
+    def test_prepare_parser_requires_explicit_platform_maintenance_intent(self) -> None:
+        arguments = MODULE["parser"]().parse_args(
+            [
+                "prepare", "--bundle", "/release",
+                "--platform-maintenance", "--operation-id", "upgrade-1",
+            ]
+        )
+        self.assertTrue(arguments.platform_maintenance)
+        self.assertEqual(arguments.operation_id, "upgrade-1")
+
+    def test_helper_environment_keeps_release_bundle_immutable(self) -> None:
+        environment = MODULE["helper_environment"](
+            {
+                "staged_release": "/opt/tvt/releases/1.1.0",
+                "operation_directory": "/var/lib/tvt/install/release-upgrades/test",
+            }
+        )
+
+        self.assertEqual(environment["PYTHONDONTWRITEBYTECODE"], "1")
+
+    def test_stage_release_builds_entry_point_at_final_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            bundle = base / "bundle"
+            bundle.mkdir()
+            (bundle / "manifest.json").write_text(
+                json.dumps({"artifacts": {"application_wheel": "wheels/application.whl"}}),
+                encoding="utf-8",
+            )
+            (bundle / "checksums.sha256").write_text("checksums\n", encoding="utf-8")
+            (bundle / "wheels").mkdir()
+            (bundle / "wheels/application.whl").touch()
+
+            globals_ = MODULE["stage_release"].__globals__
+            original_opt_tvt = globals_["OPT_TVT"]
+            original_resource_items = globals_["RESOURCE_ITEMS"]
+            original_command = globals_["command"]
+
+            def fake_command(arguments: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                if arguments[:4] == ["python3", "-m", "venv", "--clear"]:
+                    venv = Path(arguments[4])
+                    (venv / "bin").mkdir(parents=True)
+                    (venv / "bin/python").touch(mode=0o755)
+                elif arguments[0].endswith("/venv/bin/python"):
+                    python = Path(arguments[0])
+                    executable = python.with_name("tvt-edge")
+                    executable.write_text(f"#!{python}\n", encoding="utf-8")
+                    executable.chmod(0o755)
+                return subprocess.CompletedProcess(arguments, 0)
+
+            try:
+                globals_["OPT_TVT"] = base / "opt/tvt"
+                globals_["RESOURCE_ITEMS"] = ("manifest.json", "checksums.sha256")
+                globals_["command"] = fake_command
+
+                release = MODULE["stage_release"](bundle, "1.2.3")
+
+                executable = release / "venv/bin/tvt-edge"
+                self.assertEqual(
+                    executable.read_text(encoding="utf-8").splitlines()[0],
+                    f"#!{release}/venv/bin/python",
+                )
+                self.assertTrue(
+                    MODULE["staged_release_is_valid"](
+                        release, MODULE["sha256"](bundle / "checksums.sha256")
+                    )
+                )
+            finally:
+                globals_["OPT_TVT"] = original_opt_tvt
+                globals_["RESOURCE_ITEMS"] = original_resource_items
+                globals_["command"] = original_command
+
+    def test_staged_release_rejects_relocated_entry_point(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            release = Path(directory) / "releases/1.2.3"
+            executable = release / "venv/bin/tvt-edge"
+            executable.parent.mkdir(parents=True)
+            executable.write_text(
+                "#!/opt/tvt/releases/.1.2.3.prepare.abcd/venv/bin/python\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o755)
+            (release / "resources").mkdir()
+            (release / "resources/manifest.json").write_text("{}", encoding="utf-8")
+            (release / ".prepared-bundle-sha256").write_text("digest\n", encoding="utf-8")
+
+            self.assertFalse(MODULE["staged_release_is_valid"](release, "digest"))
 
 
 if __name__ == "__main__":
