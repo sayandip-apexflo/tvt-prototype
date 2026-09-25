@@ -42,7 +42,10 @@ CAMERA_INVENTORY_SECRET = "apexfabric-camera-sources"
 # The "people/vehicles currently in frame" feature was removed from the
 # dashboard; drop these event types at ingestion so no telemetry endpoint
 # serves them, rather than just hiding them client-side.
-SUPPRESSED_TELEMETRY_EVENT_TYPES = {"pedestrian_count_per_frame", "vehicle_count_per_frame"}
+# camera_snapshot_event is a periodic full-frame JPEG (~400 KB) that nothing
+# consumes; storing it filled the byte-bounded telemetry store and evicted real
+# face/plate events within about a minute. Face/plate events carry their own frame.
+SUPPRESSED_TELEMETRY_EVENT_TYPES = {"pedestrian_count_per_frame", "vehicle_count_per_frame", "camera_snapshot_event"}
 TRAFFIC_INFERENCE_MODES = {
     "cpu-compatible": {"VEHICLE_DEVICE": "CPU", "PLATE_DEVICE": "CPU", "OCR_DEVICE": "CPU"},
     "intel-gpu-npu": {"VEHICLE_DEVICE": "GPU", "PLATE_DEVICE": "NPU", "OCR_DEVICE": "MULTI:GPU,NPU"},
